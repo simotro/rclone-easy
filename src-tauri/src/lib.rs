@@ -1,0 +1,205 @@
+use tauri::Manager;
+
+mod existing_config;
+use existing_config::{detect_existing_remotes, standard_rclone_config_path};
+
+mod rclone_bin;
+use rclone_bin::check_rclone_installed;
+
+mod rcd;
+use rcd::{rcd_status, RcdState};
+
+mod activity;
+
+mod remotes;
+use remotes::{
+    create_remote, delete_remote, delete_remote_cascade, get_remote_for_edit, import_remote, list_own_remotes, list_remote_dir,
+    list_s3_providers, list_s3_regions, own_config_path, remote_usage, update_remote,
+};
+
+mod oauth_remote;
+use oauth_remote::{answer_oauth_question, cancel_oauth, create_oauth_remote, PendingOAuthAnswer};
+
+mod tray;
+
+mod background_portal;
+
+mod jobs;
+use jobs::{create_job, delete_job, list_jobs, run_job, update_job};
+
+mod mounts;
+use mounts::{create_mount, delete_mount, list_mounts, mount_now, mount_now_and_open, unmount_now, update_mount};
+
+mod bisync;
+use bisync::{create_bisync_job, delete_bisync_job, list_bisync_jobs, run_bisync_job, update_bisync_job};
+
+mod scheduler;
+
+mod backup;
+use backup::{export_backup, import_backup};
+
+/// Riavvia l'app — usata dopo un ripristino di backup, che sovrascrive i
+/// file di config sotto `app_config_dir()` senza far ripartire da sé il
+/// demone rcd né i mount/job già in corso (vedi `backup::import_backup`).
+/// `request_restart` (non il semplice `restart`, che sui thread giusti può
+/// saltare la consegna di `RunEvent::Exit`) passa comunque dall'handler in
+/// `run()` sotto, che spegne il demone rclone rcd in modo pulito prima di
+/// far ripartire il processo.
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.request_restart();
+}
+
+/// Mostrata una sola volta per sessione dell'app (non persistita tra
+/// riavvii: non esiste ancora un sistema di impostazioni dell'app oltre al
+/// file rclone.conf) la prima volta che l'utente chiude la finestra e
+/// questa si nasconde invece di uscire — altrimenti un'utente non tecnica
+/// potrebbe credere di aver chiuso l'app per sbaglio.
+static TRAY_NOTICE_SHOWN: std::sync::Once = std::sync::Once::new();
+
+/// Chiudere la finestra (X) la nasconde invece di terminare l'app: è quello
+/// che rende utile un'icona "persistente" nella tray (stesso comportamento
+/// di client come Dropbox/Insync) — il demone rclone e i futuri job restano
+/// attivi, si esce davvero solo dalla voce "Esci" del menu della tray
+/// (`tray::build_tray`).
+fn hide_instead_of_close(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(tray::MAIN_WINDOW_LABEL) else { return };
+    let app_handle = app.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            tray::hide_main_window(&app_handle);
+            TRAY_NOTICE_SHOWN.call_once(|| {
+                use tauri_plugin_notification::NotificationExt;
+                let _ = app_handle
+                    .notification()
+                    .builder()
+                    .title("Rclone Easy")
+                    .body(
+                        "L'app continua a funzionare in background. Trovi l'icona nella tray di sistema; usa \"Esci\" dal suo menu per chiuderla davvero.",
+                    )
+                    .show();
+            });
+        }
+    });
+}
+
+/// `RunEvent::Exit` (agganciato più sotto) scatta solo quando l'app si
+/// chiude "normalmente" attraverso il ciclo di eventi della finestra. Un
+/// segnale diretto al processo — verificato durante lo sviluppo: capita ad
+/// ogni riavvio a caldo di `npm run tauri dev` quando si modifica un file
+/// Rust, e capiterebbe anche a un utente che spegne/disconnette la sessione
+/// con l'app aperta — non passa da lì, quindi `rclone rcd` restava orfano.
+/// Installare qui un gestore per SIGTERM/SIGINT che fa la stessa pulizia
+/// esplicita prima di uscire chiude anche questo caso. Solo Unix (Linux/macOS,
+/// coerente con la fase attuale solo-Linux del progetto): Windows userà
+/// `tokio::signal::windows` quando arriverà quella fase.
+#[cfg(unix)]
+fn spawn_signal_shutdown_handler(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("impossibile installare il gestore SIGTERM");
+        let mut sigint = signal(SignalKind::interrupt()).expect("impossibile installare il gestore SIGINT");
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+        let state = app.state::<RcdState>();
+        rcd::shutdown(&state).await;
+        std::process::exit(0);
+    });
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // Config propria dell'app, separata dal rclone.conf di sistema
+            // (letto invece, in sola lettura, da existing_config.rs) — vedi
+            // SPEC.md, sezione "Configurazione".
+            let config_dir = app
+                .path()
+                .app_config_dir()
+                .expect("impossibile determinare la cartella di configurazione dell'app");
+            let rcd_state: RcdState = tauri::async_runtime::block_on(rcd::build_state(config_dir.join("rclone.conf")));
+            app.manage(rcd_state);
+            app.manage(PendingOAuthAnswer::default());
+            #[cfg(unix)]
+            spawn_signal_shutdown_handler(app.handle().clone());
+            tray::build_tray(app.handle());
+            hide_instead_of_close(app.handle());
+            background_portal::request_background();
+            // In background, non bloccante: montare subito i mount con
+            // auto_mount potrebbe richiedere secondi (connessione a un
+            // remote cloud), non deve ritardare la comparsa della finestra.
+            {
+                let app_handle = app.handle().clone();
+                let config_dir = config_dir.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_handle.state::<RcdState>();
+                    mounts::auto_mount_all(&state, &config_dir).await;
+                });
+            }
+            // Ciclo interno per i job di sync/bisync con esecuzione
+            // automatica configurata — vedi scheduler.rs sul perché non un
+            // systemd user timer esterno.
+            scheduler::spawn(app.handle().clone(), config_dir.clone());
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            check_rclone_installed,
+            detect_existing_remotes,
+            standard_rclone_config_path,
+            rcd_status,
+            list_own_remotes,
+            list_remote_dir,
+            create_remote,
+            update_remote,
+            delete_remote,
+            delete_remote_cascade,
+            remote_usage,
+            get_remote_for_edit,
+            list_s3_providers,
+            list_s3_regions,
+            own_config_path,
+            import_remote,
+            create_oauth_remote,
+            cancel_oauth,
+            answer_oauth_question,
+            list_jobs,
+            create_job,
+            update_job,
+            delete_job,
+            run_job,
+            list_mounts,
+            create_mount,
+            update_mount,
+            delete_mount,
+            mount_now,
+            mount_now_and_open,
+            unmount_now,
+            list_bisync_jobs,
+            create_bisync_job,
+            update_bisync_job,
+            delete_bisync_job,
+            run_bisync_job,
+            export_backup,
+            import_backup,
+            restart_app
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Terminazione esplicita del demone rclone rcd: kill_on_drop da
+            // solo non è affidabile perché Tauri non garantisce che il Drop
+            // dello stato giri alla chiusura normale dell'app (verificato
+            // empiricamente durante lo sviluppo).
+            if let tauri::RunEvent::Exit = event {
+                let state = app_handle.state::<RcdState>();
+                tauri::async_runtime::block_on(rcd::shutdown(&state));
+            }
+        });
+}

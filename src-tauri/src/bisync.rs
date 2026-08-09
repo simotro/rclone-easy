@@ -1,0 +1,884 @@
+use crate::rcd::RcdState;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use tauri::{AppHandle, Manager};
+
+/// Job di sincronizzazione bidirezionale (`rclone bisync`) — un concetto
+/// proprio di Rclone Easy, stesso schema di `SyncJob`/`MountConfig`.
+/// `needs_resync` parte `true` per un job appena creato (nessuna baseline
+/// ancora stabilita) e torna `true` se un'esecuzione fallisce in un modo che
+/// richiede esplicitamente un resync (rclone lo segnala chiaramente nel suo
+/// stesso messaggio d'errore) — un'esecuzione riuscita lo riporta a `false`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BisyncJob {
+    pub name: String,
+    pub path1: String,
+    pub path2: String,
+    #[serde(default)]
+    pub needs_resync: bool,
+    /// `Some(n)` = eseguito da solo ogni `n` minuti dal ciclo interno
+    /// dell'app (`scheduler.rs`), oltre al normale "Esegui ora" manuale.
+    #[serde(default)]
+    pub auto_interval_minutes: Option<u32>,
+    /// Le ultime esecuzioni, più recente in testa — stesso schema di
+    /// `jobs::SyncJob::history`, vedi lì per il perché della migrazione da
+    /// un singolo `lastRun`.
+    #[serde(default)]
+    pub history: Vec<BisyncRunResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BisyncRunResult {
+    pub success: bool,
+    pub message: String,
+    pub when_unix: u64,
+    #[serde(default)]
+    pub conflict_paths: Vec<String>,
+}
+
+/// `BisyncJob` unito allo stato live "in esecuzione ora" — stesso principio
+/// di `jobs::SyncJobEntry`: `is_running` non è mai salvato su disco.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BisyncJobEntry {
+    pub name: String,
+    pub path1: String,
+    pub path2: String,
+    pub needs_resync: bool,
+    pub auto_interval_minutes: Option<u32>,
+    pub history: Vec<BisyncRunResult>,
+    pub is_running: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct BisyncFile {
+    #[serde(default)]
+    jobs: Vec<BisyncJob>,
+}
+
+fn bisync_file_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("bisync.toml")
+}
+
+pub(crate) fn load_from_dir(config_dir: &Path) -> Result<Vec<BisyncJob>, String> {
+    let path = bisync_file_path(config_dir);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("impossibile leggere '{}': {e}", path.display()))?;
+    let file: BisyncFile = toml::from_str(&content).map_err(|e| format!("file dei job bisync non valido: {e}"))?;
+    Ok(file.jobs)
+}
+
+fn save_to_dir(config_dir: &Path, jobs: &[BisyncJob]) -> Result<(), String> {
+    std::fs::create_dir_all(config_dir)
+        .map_err(|e| format!("impossibile creare '{}': {e}", config_dir.display()))?;
+    let file = BisyncFile { jobs: jobs.to_vec() };
+    let content = toml::to_string_pretty(&file).map_err(|e| format!("impossibile serializzare i job bisync: {e}"))?;
+    let path = bisync_file_path(config_dir);
+    std::fs::write(&path, content).map_err(|e| format!("impossibile scrivere '{}': {e}", path.display()))
+}
+
+/// Nome del remote referenziato da una stringa `fs` (`remoto:percorso`),
+/// `None` se è un percorso locale — riconosciuto dal `/` iniziale (tutti i
+/// percorsi locali scelti dal selettore di cartelle sono assoluti, nessun
+/// nome di remote rclone può iniziare per `/`).
+fn remote_name_of(fs: &str) -> Option<&str> {
+    if fs.starts_with('/') {
+        return None;
+    }
+    fs.split_once(':').map(|(name, _)| name)
+}
+
+fn job_remote_names(job: &BisyncJob) -> [Option<&str>; 2] {
+    [remote_name_of(&job.path1), remote_name_of(&job.path2)]
+}
+
+/// Rifiuta una seconda sincronizzazione bidirezionale per un remote già
+/// usato da un'altra — al massimo una bisync per remote, stessa
+/// semplificazione già applicata a mount e backup. `excluding` è il nome
+/// della voce in corso di modifica, da non contare come "già esistente".
+fn ensure_remotes_not_already_bisynced(
+    jobs: &[BisyncJob],
+    path1: &str,
+    path2: &str,
+    excluding: Option<&str>,
+) -> Result<(), String> {
+    for candidate in [remote_name_of(path1), remote_name_of(path2)].into_iter().flatten() {
+        let clash = jobs
+            .iter()
+            .filter(|j| excluding != Some(j.name.as_str()))
+            .any(|j| job_remote_names(j).contains(&Some(candidate)));
+        if clash {
+            return Err(format!(
+                "esiste già una sincronizzazione bidirezionale per '{candidate}': modificala invece di crearne un'altra"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn create_bisync_job_in(
+    config_dir: &Path,
+    name: &str,
+    path1: &str,
+    path2: &str,
+    auto_interval_minutes: Option<u32>,
+) -> Result<(), String> {
+    let mut jobs = load_from_dir(config_dir)?;
+    if jobs.iter().any(|j| j.name == name) {
+        return Err(format!("esiste già un job bisync chiamato '{name}': scegli un altro nome"));
+    }
+    ensure_remotes_not_already_bisynced(&jobs, path1, path2, None)?;
+    jobs.push(BisyncJob {
+        name: name.to_string(),
+        path1: path1.to_string(),
+        path2: path2.to_string(),
+        needs_resync: true,
+        auto_interval_minutes,
+        history: Vec::new(),
+    });
+    save_to_dir(config_dir, &jobs)
+}
+
+/// `old_name` individua il job da modificare. Se i percorsi cambiano,
+/// `needs_resync` torna `true`: la baseline già stabilita si riferisce ai
+/// vecchi percorsi, non ha senso confrontarla con quelli nuovi. Un semplice
+/// rinomina (percorsi invariati) non tocca `needs_resync`.
+fn update_bisync_job_in(
+    config_dir: &Path,
+    old_name: &str,
+    name: &str,
+    path1: &str,
+    path2: &str,
+    auto_interval_minutes: Option<u32>,
+) -> Result<(), String> {
+    let mut jobs = load_from_dir(config_dir)?;
+    if name != old_name && jobs.iter().any(|j| j.name == name) {
+        return Err(format!("esiste già un job bisync chiamato '{name}': scegli un altro nome"));
+    }
+    ensure_remotes_not_already_bisynced(&jobs, path1, path2, Some(old_name))?;
+    let job =
+        jobs.iter_mut().find(|j| j.name == old_name).ok_or_else(|| format!("nessun job bisync chiamato '{old_name}'"))?;
+    let paths_changed = job.path1 != path1 || job.path2 != path2;
+    job.name = name.to_string();
+    job.path1 = path1.to_string();
+    job.path2 = path2.to_string();
+    job.auto_interval_minutes = auto_interval_minutes;
+    if paths_changed {
+        job.needs_resync = true;
+    }
+    save_to_dir(config_dir, &jobs)
+}
+
+pub(crate) fn delete_bisync_job_in(config_dir: &Path, name: &str) -> Result<(), String> {
+    let mut jobs = load_from_dir(config_dir)?;
+    let before = jobs.len();
+    jobs.retain(|j| j.name != name);
+    if jobs.len() == before {
+        return Err(format!("nessun job bisync chiamato '{name}'"));
+    }
+    save_to_dir(config_dir, &jobs)
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Cartella di lavoro dedicata al job (`--workdir`), sotto la config
+/// dell'app: senza specificarla esplicitamente rclone ne calcola una da solo
+/// codificando i percorsi completi nel nome file, che supera facilmente il
+/// limite di lunghezza del filesystem con percorsi non banali (osservato
+/// durante lo sviluppo: "file name too long" con un percorso di test
+/// nidificato).
+fn workdir_for(config_dir: &Path, name: &str) -> PathBuf {
+    config_dir.join("bisync-workdirs").join(name)
+}
+
+/// Rimuove i codici colore ANSI che rclone include comunque nel campo `msg`
+/// anche con `--use-json-log` (verificato: il JSON è valido, ma il testo del
+/// messaggio contiene comunque `[...m` per la colorazione pensata per
+/// il terminale) — altrimenti finirebbero mostrati letteralmente nella UI.
+fn strip_ansi(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            output.push(c);
+        }
+    }
+    output
+}
+
+/// Estrae i percorsi dei file di conflitto generati in un run, leggendo le
+/// righe di log JSON (`--use-json-log`, una per evento). Non esiste un
+/// endpoint RC per bisync (a differenza di sync/mount) né un riepilogo
+/// strutturato dedicato ai conflitti: l'unica fonte è il testo dei log che
+/// rclone stesso produce quando rinomina in modo non distruttivo un file in
+/// conflitto (`bisync/resolve.go`, messaggio "Renaming PathN copy").
+fn extract_conflict_paths(stderr: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in stderr.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Some(msg) = value.get("msg").and_then(|m| m.as_str()) else { continue };
+        let clean = strip_ansi(msg);
+        if let Some(idx) = clean.find("Renaming Path") {
+            if let Some(path) = clean[idx..].split(" - ").last() {
+                let path = path.trim();
+                if !path.is_empty() {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// Messaggio più utile disponibile nei log per spiegare un fallimento,
+/// ripulito dai codici ANSI — stesso principio di
+/// `rcd::error_message_from_response`: mostrare il messaggio più specifico
+/// di rclone invece del solo codice di uscita del processo. Tre livelli,
+/// dal più specifico al più generico:
+/// 1. l'ultima riga di log JSON di livello "error" (caso più comune: rclone
+///    logga chiaramente perché ha abortito);
+/// 2. se non c'è nessuna riga "error" (es. bisync si ferma per un motivo
+///    segnalato solo a livello "notice"/"info"), l'ultimo messaggio di log
+///    qualunque sia il livello — meglio di niente;
+/// 3. se l'output non è nemmeno JSON valido (es. rclone fallisce prima di
+///    inizializzare il logging strutturato), l'ultima riga grezza non
+///    vuota di stderr, così da non mostrare mai il solo "terminato con
+///    codice N" quando c'è qualunque testo utile da riportare.
+fn extract_error_message(stderr: &str) -> Option<String> {
+    let mut last_error = None;
+    let mut last_any_msg = None;
+    let mut last_raw_line = None;
+    for line in stderr.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        last_raw_line = Some(strip_ansi(trimmed));
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else { continue };
+        let Some(msg) = value.get("msg").and_then(|m| m.as_str()) else { continue };
+        let cleaned = strip_ansi(msg);
+        if value.get("level").and_then(|l| l.as_str()) == Some("error") {
+            last_error = Some(cleaned.clone());
+        }
+        last_any_msg = Some(cleaned);
+    }
+    last_error.or(last_any_msg).or(last_raw_line)
+}
+
+/// `true` se il messaggio d'errore indica esplicitamente che serve un nuovo
+/// resync prima di poter riprovare (rclone lo segnala chiaramente, es.
+/// "Bisync aborted. Must run --resync to recover.") — usato per far ripartire
+/// automaticamente `needs_resync` così il prossimo "Esegui ora" include già
+/// `--resync` senza che l'utente debba capire da solo il messaggio di rclone.
+fn error_requires_resync(message: &str) -> bool {
+    message.to_lowercase().contains("resync")
+}
+
+/// Esegue `rclone bisync` come sottoprocesso diretto (non c'è un endpoint RC
+/// per bisync, a differenza di sync/mount — SPEC.md prevedeva questo
+/// fallback). `Err` solo se non si riesce proprio ad avviare il processo;
+/// un fallimento riportato da rclone stesso (exit code diverso da zero)
+/// resta dentro il `BisyncRunResult` con `success: false`, così il
+/// chiamante può comunque salvare last_run e decidere se serve un resync.
+async fn execute_bisync(
+    config_path: &Path,
+    workdir: &Path,
+    path1: &str,
+    path2: &str,
+    resync: bool,
+) -> Result<BisyncRunResult, String> {
+    std::fs::create_dir_all(workdir)
+        .map_err(|e| format!("impossibile creare la cartella di lavoro '{}': {e}", workdir.display()))?;
+
+    let mut args = vec![
+        "bisync".to_string(),
+        path1.to_string(),
+        path2.to_string(),
+        "--config".to_string(),
+        config_path.to_string_lossy().to_string(),
+        "--workdir".to_string(),
+        workdir.to_string_lossy().to_string(),
+        "--conflict-resolve".to_string(),
+        "none".to_string(),
+        "--conflict-loser".to_string(),
+        "num".to_string(),
+        "--conflict-suffix".to_string(),
+        "conflitto".to_string(),
+        "--suffix-keep-extension".to_string(),
+        "--use-json-log".to_string(),
+    ];
+    if resync {
+        args.push("--resync".to_string());
+        // Senza questo, "--resync" da solo equivale a "--resync-mode path1":
+        // per i file già presenti su entrambi i lati ma diversi, vince
+        // sempre la cartella locale (path1) indipendentemente da quale
+        // versione sia più recente — sorprendente per chi si aspetta che
+        // vinca il file modificato più di recente, come infatti ci si
+        // aspetterebbe di default.
+        args.push("--resync-mode".to_string());
+        args.push("newer".to_string());
+    }
+
+    let output = tokio::process::Command::new(crate::rclone_bin::resolve_rclone_binary())
+        .args(&args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|e| format!("impossibile avviare 'rclone bisync': {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let conflict_paths = extract_conflict_paths(&stderr);
+
+    let (success, message) = if output.status.success() {
+        (true, String::new())
+    } else {
+        let message = extract_error_message(&stderr)
+            .unwrap_or_else(|| format!("rclone bisync terminato con codice {:?}", output.status.code()));
+        (false, message)
+    };
+
+    Ok(BisyncRunResult { success, message, when_unix: now_unix(), conflict_paths })
+}
+
+/// Nomi dei job bisync attualmente in esecuzione — stessa cautela di
+/// `jobs::running_jobs`: evita che lo scheduler interno rilanci un job il
+/// cui giro precedente non è ancora finito, o che un click manuale su
+/// "Esegui ora" parta in parallelo a un'esecuzione automatica già in corso
+/// (due `rclone bisync` concorrenti sullo stesso workdir sono da evitare).
+fn running_jobs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static RUNNING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    RUNNING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Usata da `tray.rs` per decidere se mostrare l'icona "in esecuzione" —
+/// riusa lo stesso insieme già mantenuto per evitare sovrapposizioni,
+/// niente da tracciare in più.
+pub(crate) fn any_job_running() -> bool {
+    !running_jobs().lock().unwrap().is_empty()
+}
+
+/// Usata da `list_bisync_jobs` per popolare `BisyncJobEntry::is_running`.
+fn is_job_running(name: &str) -> bool {
+    running_jobs().lock().unwrap().contains(name)
+}
+
+pub(crate) async fn run_bisync_job_by_name(config_dir: &Path, name: &str) -> Result<BisyncRunResult, String> {
+    if !running_jobs().lock().unwrap().insert(name.to_string()) {
+        return Err(format!("il job '{name}' è già in esecuzione"));
+    }
+
+    let result = run_bisync_job_by_name_inner(config_dir, name).await;
+
+    running_jobs().lock().unwrap().remove(name);
+    result
+}
+
+async fn run_bisync_job_by_name_inner(config_dir: &Path, name: &str) -> Result<BisyncRunResult, String> {
+    let mut jobs = load_from_dir(config_dir)?;
+    let job = jobs.iter().find(|j| j.name == name).cloned().ok_or_else(|| format!("nessun job bisync chiamato '{name}'"))?;
+
+    let workdir = workdir_for(config_dir, name);
+    let result = execute_bisync(&config_dir.join("rclone.conf"), &workdir, &job.path1, &job.path2, job.needs_resync).await?;
+
+    if let Some(stored) = jobs.iter_mut().find(|j| j.name == name) {
+        stored.needs_resync = if result.success { false } else { error_requires_resync(&result.message) };
+        crate::jobs::push_history(&mut stored.history, result.clone());
+    }
+    save_to_dir(config_dir, &jobs)?;
+
+    Ok(result)
+}
+
+fn app_config_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    app.path().app_config_dir().map_err(|e| format!("impossibile determinare la cartella di configurazione: {e}"))
+}
+
+#[tauri::command]
+pub fn list_bisync_jobs(app: AppHandle) -> Result<Vec<BisyncJobEntry>, String> {
+    let jobs = load_from_dir(&app_config_dir(&app)?)?;
+    Ok(jobs
+        .into_iter()
+        .map(|j| BisyncJobEntry {
+            is_running: is_job_running(&j.name),
+            name: j.name,
+            path1: j.path1,
+            path2: j.path2,
+            needs_resync: j.needs_resync,
+            auto_interval_minutes: j.auto_interval_minutes,
+            history: j.history,
+        })
+        .collect())
+}
+
+/// Se `auto_interval_minutes` è impostato (la bisync diventa "attiva", vedi
+/// `activity.rs`), rifiuta se un altro servizio è già attivo per uno dei
+/// remote coinvolti — una bisync solo manuale non ha questa restrizione.
+async fn ensure_activation_allowed(
+    state: &RcdState,
+    config_dir: &Path,
+    path1: &str,
+    path2: &str,
+    auto_interval_minutes: Option<u32>,
+) -> Result<(), String> {
+    if auto_interval_minutes.is_none() {
+        return Ok(());
+    }
+    for candidate in [remote_name_of(path1), remote_name_of(path2)].into_iter().flatten() {
+        crate::activity::ensure_no_other_active_service(state, config_dir, candidate, crate::activity::ServiceKind::Bisync)
+            .await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn create_bisync_job(
+    app: AppHandle,
+    state: tauri::State<'_, RcdState>,
+    name: String,
+    path1: String,
+    path2: String,
+    auto_interval_minutes: Option<u32>,
+) -> Result<(), String> {
+    let config_dir = app_config_dir(&app)?;
+    ensure_activation_allowed(&state, &config_dir, &path1, &path2, auto_interval_minutes).await?;
+    create_bisync_job_in(&config_dir, &name, &path1, &path2, auto_interval_minutes)
+}
+
+#[tauri::command]
+pub async fn update_bisync_job(
+    app: AppHandle,
+    state: tauri::State<'_, RcdState>,
+    old_name: String,
+    name: String,
+    path1: String,
+    path2: String,
+    auto_interval_minutes: Option<u32>,
+) -> Result<(), String> {
+    let config_dir = app_config_dir(&app)?;
+    ensure_activation_allowed(&state, &config_dir, &path1, &path2, auto_interval_minutes).await?;
+    update_bisync_job_in(&config_dir, &old_name, &name, &path1, &path2, auto_interval_minutes)
+}
+
+#[tauri::command]
+pub fn delete_bisync_job(app: AppHandle, name: String) -> Result<(), String> {
+    delete_bisync_job_in(&app_config_dir(&app)?, &name)
+}
+
+/// A differenza dei job di sync (`jobs::run_job`), il risultato non è solo
+/// successo/errore: anche un run riuscito può aver generato conflitti da
+/// segnalare — per questo restituisce `BisyncRunResult` invece di `()`, e
+/// manda una notifica desktop solo in quel caso (un run senza conflitti non
+/// ha nulla da far rivedere all'utente).
+#[tauri::command]
+pub async fn run_bisync_job(app: AppHandle, name: String) -> Result<BisyncRunResult, String> {
+    let config_dir = app_config_dir(&app)?;
+    let result = run_bisync_job_by_name(&config_dir, &name).await?;
+
+    if result.success && !result.conflict_paths.is_empty() {
+        use tauri_plugin_notification::NotificationExt;
+        let count = result.conflict_paths.len();
+        let _ = app
+            .notification()
+            .builder()
+            .title("Rclone Easy — conflitto rilevato")
+            .body(format!(
+                "Il job '{name}' ha trovato {count} file modificati su entrambi i lati: nessuna versione è stata persa, entrambe sono state salvate con un suffisso. Apri Rclone Easy per rivederle."
+            ))
+            .show();
+    }
+
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rcd::tests::TempDir;
+
+    #[test]
+    fn load_from_missing_file_returns_empty() {
+        let dir = TempDir::new("bisync-missing");
+        assert_eq!(load_from_dir(&dir.path).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn create_then_list_roundtrips_and_starts_needing_a_resync() {
+        let dir = TempDir::new("bisync-roundtrip");
+        create_bisync_job_in(&dir.path, "foto", "/home/utente/foto", "cubbit:foto", None).unwrap();
+
+        let jobs = load_from_dir(&dir.path).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].name, "foto");
+        assert_eq!(jobs[0].path1, "/home/utente/foto");
+        assert_eq!(jobs[0].path2, "cubbit:foto");
+        assert!(jobs[0].needs_resync, "un job appena creato non ha ancora una baseline");
+        assert!(jobs[0].history.is_empty());
+    }
+
+    #[test]
+    fn create_bisync_job_rejects_duplicate_name() {
+        let dir = TempDir::new("bisync-duplicate");
+        create_bisync_job_in(&dir.path, "dup", "/a", "/b", None).unwrap();
+        let result = create_bisync_job_in(&dir.path, "dup", "/c", "/d", None);
+        assert!(result.is_err());
+        assert_eq!(load_from_dir(&dir.path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn create_bisync_job_rejects_a_second_job_for_the_same_remote() {
+        let dir = TempDir::new("bisync-same-remote");
+        create_bisync_job_in(&dir.path, "uno", "/locale-a", "cubbit:x", None).unwrap();
+        let result = create_bisync_job_in(&dir.path, "due", "/locale-b", "cubbit:y", None);
+        assert!(result.is_err());
+        assert_eq!(load_from_dir(&dir.path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn create_bisync_job_allows_different_remotes() {
+        let dir = TempDir::new("bisync-different-remotes");
+        create_bisync_job_in(&dir.path, "uno", "/locale-a", "cubbit:x", None).unwrap();
+        assert!(create_bisync_job_in(&dir.path, "due", "/locale-b", "wasabi:y", None).is_ok());
+    }
+
+    #[test]
+    fn update_bisync_job_can_keep_pointing_at_its_own_remote() {
+        let dir = TempDir::new("bisync-update-same-remote-ok");
+        create_bisync_job_in(&dir.path, "uno", "/locale-a", "cubbit:x", None).unwrap();
+        assert!(update_bisync_job_in(&dir.path, "uno", "uno", "/locale-a", "cubbit:nuovo-percorso", None).is_ok());
+    }
+
+    #[test]
+    fn update_bisync_job_rejects_moving_onto_a_remote_already_used_by_another_job() {
+        let dir = TempDir::new("bisync-update-remote-clash");
+        create_bisync_job_in(&dir.path, "uno", "/locale-a", "cubbit:x", None).unwrap();
+        create_bisync_job_in(&dir.path, "due", "/locale-b", "wasabi:y", None).unwrap();
+        let result = update_bisync_job_in(&dir.path, "due", "due", "/locale-b", "cubbit:altro", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_bisync_job_changes_fields_and_can_rename() {
+        let dir = TempDir::new("bisync-update");
+        create_bisync_job_in(&dir.path, "vecchio-nome", "/vecchio-a", "remote:vecchio-b", None).unwrap();
+
+        update_bisync_job_in(&dir.path, "vecchio-nome", "nuovo-nome", "/nuovo-a", "remote:nuovo-b", None).unwrap();
+
+        let jobs = load_from_dir(&dir.path).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].name, "nuovo-nome");
+        assert_eq!(jobs[0].path1, "/nuovo-a");
+        assert_eq!(jobs[0].path2, "remote:nuovo-b");
+    }
+
+    #[test]
+    fn update_bisync_job_fails_for_unknown_name() {
+        let dir = TempDir::new("bisync-update-unknown");
+        assert!(update_bisync_job_in(&dir.path, "non-esiste", "x", "/a", "/b", None).is_err());
+    }
+
+    #[test]
+    fn update_bisync_job_rejects_rename_onto_an_existing_name() {
+        let dir = TempDir::new("bisync-update-rename-conflict");
+        create_bisync_job_in(&dir.path, "uno", "/a", "/b", None).unwrap();
+        create_bisync_job_in(&dir.path, "due", "/c", "/d", None).unwrap();
+
+        let result = update_bisync_job_in(&dir.path, "uno", "due", "/a", "/b", None);
+        assert!(result.is_err());
+        let jobs = load_from_dir(&dir.path).unwrap();
+        assert_eq!(jobs.iter().find(|j| j.name == "uno").unwrap().path1, "/a", "la voce originale non deve essere stata toccata");
+    }
+
+    #[test]
+    fn create_bisync_job_stores_the_automatic_interval() {
+        let dir = TempDir::new("bisync-auto-interval");
+        create_bisync_job_in(&dir.path, "prova", "/a", "/b", Some(20)).unwrap();
+        assert_eq!(load_from_dir(&dir.path).unwrap()[0].auto_interval_minutes, Some(20));
+    }
+
+    #[test]
+    fn update_bisync_job_can_disable_the_automatic_interval() {
+        let dir = TempDir::new("bisync-auto-interval-disable");
+        create_bisync_job_in(&dir.path, "prova", "/a", "/b", Some(20)).unwrap();
+        update_bisync_job_in(&dir.path, "prova", "prova", "/a", "/b", None).unwrap();
+        assert_eq!(load_from_dir(&dir.path).unwrap()[0].auto_interval_minutes, None);
+    }
+
+    #[test]
+    fn update_bisync_job_resets_needs_resync_when_paths_change_but_not_on_simple_rename() {
+        let dir = TempDir::new("bisync-update-resync-flag");
+        create_bisync_job_in(&dir.path, "prova", "/a", "/b", None).unwrap();
+        // Un job appena creato ha già needs_resync=true di suo: lo azzero a
+        // mano per verificare che SOLO il cambio di percorso lo riattivi,
+        // non un semplice rinomina.
+        {
+            let mut jobs = load_from_dir(&dir.path).unwrap();
+            jobs[0].needs_resync = false;
+            save_to_dir(&dir.path, &jobs).unwrap();
+        }
+
+        update_bisync_job_in(&dir.path, "prova", "prova-rinominato", "/a", "/b", None).unwrap();
+        assert!(!load_from_dir(&dir.path).unwrap()[0].needs_resync, "un semplice rinomina non deve richiedere un nuovo resync");
+
+        update_bisync_job_in(&dir.path, "prova-rinominato", "prova-rinominato", "/a", "/percorso-nuovo", None).unwrap();
+        assert!(load_from_dir(&dir.path).unwrap()[0].needs_resync, "cambiare i percorsi deve richiedere un nuovo resync");
+    }
+
+    #[test]
+    fn delete_bisync_job_removes_it() {
+        let dir = TempDir::new("bisync-delete");
+        create_bisync_job_in(&dir.path, "da-cancellare", "/a", "/b", None).unwrap();
+        delete_bisync_job_in(&dir.path, "da-cancellare").unwrap();
+        assert_eq!(load_from_dir(&dir.path).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn delete_bisync_job_fails_for_unknown_name() {
+        let dir = TempDir::new("bisync-delete-unknown");
+        assert!(delete_bisync_job_in(&dir.path, "non-esiste").is_err());
+    }
+
+    #[test]
+    fn strip_ansi_removes_color_codes_but_keeps_the_text() {
+        let input = "- \u{1b}[36mPath1\u{1b}[0m    \u{1b}[35mRenaming Path1 copy\u{1b}[0m - \u{1b}[36m/tmp/a/doc.conflitto1.txt\u{1b}[0m";
+        assert_eq!(strip_ansi(input), "- Path1    Renaming Path1 copy - /tmp/a/doc.conflitto1.txt");
+    }
+
+    /// Costruisce una riga di log JSON come la scrive davvero `rclone
+    /// --use-json-log`: i codici colore ANSI dentro `msg` sono codificati
+    /// come sequenza di escape JSON valida (``, 6 caratteri ASCII),
+    /// non come byte ESC grezzo — un byte di controllo non escaped
+    /// renderebbe la riga JSON non valida e la farebbe scartare in
+    /// silenzio da `serde_json::from_str` (bug scoperto scrivendo questo
+    /// stesso test: una prima versione con un ESC letterale incollato a
+    /// mano produceva sempre un vec vuoto).
+    fn json_log_line(level: &str, msg_with_esc_markers: &str) -> String {
+        let esc = "\\u001b";
+        let msg = msg_with_esc_markers.replace("<ESC>", esc);
+        format!(r#"{{"level":"{level}","msg":"{msg}"}}"#)
+    }
+
+    #[test]
+    fn extract_conflict_paths_reads_both_renamed_copies() {
+        let stderr = [
+            json_log_line(
+                "notice",
+                "- <ESC>[36mPath1<ESC>[0m    <ESC>[35mRenaming Path1 copy<ESC>[0m                - <ESC>[36m/tmp/a/doc.conflitto1.txt<ESC>[0m",
+            ),
+            json_log_line(
+                "notice",
+                "- <ESC>[34mPath2<ESC>[0m    <ESC>[35mRenaming Path2 copy<ESC>[0m                - <ESC>[36m/tmp/b/doc.conflitto2.txt<ESC>[0m",
+            ),
+            json_log_line("notice", "something unrelated"),
+        ]
+        .join("\n");
+
+        let paths = extract_conflict_paths(&stderr);
+        assert_eq!(paths, vec!["/tmp/a/doc.conflitto1.txt", "/tmp/b/doc.conflitto2.txt"]);
+    }
+
+    #[test]
+    fn extract_conflict_paths_is_empty_when_there_are_none() {
+        let stderr = json_log_line("notice", "Bisync successful");
+        assert!(extract_conflict_paths(&stderr).is_empty());
+    }
+
+    #[test]
+    fn extract_error_message_reads_the_last_error_level_line() {
+        let stderr = [
+            json_log_line("error", "primo errore"),
+            json_log_line("notice", "qualcosa di neutro"),
+            json_log_line("error", "<ESC>[31mBisync aborted. Must run --resync to recover.<ESC>[0m"),
+        ]
+        .join("\n");
+
+        assert_eq!(extract_error_message(&stderr).unwrap(), "Bisync aborted. Must run --resync to recover.");
+    }
+
+    #[test]
+    fn extract_error_message_falls_back_to_the_last_log_line_when_none_is_level_error() {
+        // Un fallimento può fermare bisync senza che rclone logghi una riga
+        // "error" esplicita (es. un abort segnalato solo come "notice") —
+        // meglio mostrare l'ultimo messaggio disponibile che il solo
+        // codice di uscita del processo.
+        let stderr = [
+            json_log_line("notice", "primo avviso"),
+            json_log_line("notice", "Bisync critical error: sync aborted"),
+        ]
+        .join("\n");
+
+        assert_eq!(extract_error_message(&stderr).unwrap(), "Bisync critical error: sync aborted");
+    }
+
+    #[test]
+    fn extract_error_message_falls_back_to_the_raw_last_line_when_output_is_not_json() {
+        // Se rclone fallisce prima ancora di inizializzare il logging
+        // strutturato (es. un errore di parsing degli argomenti), stderr
+        // non contiene affatto righe JSON valide.
+        let stderr = "Error: unknown flag: --workdirX\n";
+
+        assert_eq!(extract_error_message(stderr).unwrap(), "Error: unknown flag: --workdirX");
+    }
+
+    #[test]
+    fn extract_error_message_is_none_for_empty_output() {
+        assert_eq!(extract_error_message(""), None);
+    }
+
+    #[test]
+    fn error_requires_resync_matches_the_real_rclone_wording() {
+        assert!(error_requires_resync("Bisync aborted. Must run --resync to recover."));
+        assert!(!error_requires_resync("rete non raggiungibile"));
+    }
+
+    /// Verifica che il primissimo resync preferisca la versione modificata
+    /// più di recente, non semplicemente quella locale (path1) — senza
+    /// "--resync-mode newer" esplicito, rclone farebbe vincere path1 a
+    /// prescindere dalle date, sorprendente per l'utente (vedi il commento
+    /// su `execute_bisync`).
+    #[tokio::test]
+    async fn resync_prefers_the_more_recently_modified_version_over_the_local_side() {
+        let jobs_dir = TempDir::new("bisync-resync-newer-jobs");
+        let path1_dir = TempDir::new("bisync-resync-newer-path1");
+        let path2_dir = TempDir::new("bisync-resync-newer-path2");
+        std::fs::create_dir_all(&path1_dir.path).unwrap();
+        std::fs::create_dir_all(&path2_dir.path).unwrap();
+
+        // Stesso nome, contenuto diverso, su entrambi i lati PRIMA del primo
+        // resync — path2 scritto per ultimo, quindi con mtime più recente.
+        std::fs::write(path1_dir.path.join("documento.txt"), "versione vecchia (locale)").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        std::fs::write(path2_dir.path.join("documento.txt"), "versione nuova").unwrap();
+
+        create_bisync_job_in(
+            &jobs_dir.path,
+            "prova",
+            &path1_dir.path.to_string_lossy(),
+            &path2_dir.path.to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&jobs_dir.path).unwrap();
+
+        let result = run_bisync_job_by_name(&jobs_dir.path, "prova").await.unwrap();
+        assert!(result.success, "il resync dovrebbe riuscire: {result:?}");
+
+        let path1_content = std::fs::read_to_string(path1_dir.path.join("documento.txt")).unwrap();
+        assert_eq!(
+            path1_content, "versione nuova",
+            "la versione più recente deve vincere sul resync, non semplicemente quella locale"
+        );
+    }
+
+    /// Prova un bisync reale end-to-end: baseline, poi un conflitto genuino
+    /// (stesso file modificato su entrambi i lati), verificando che nessuna
+    /// delle due versioni vada persa e che compaiano entrambe con suffissi
+    /// distinti su entrambi i lati (SPEC: "non sovrascrivere né eliminare
+    /// nulla").
+    #[tokio::test]
+    async fn run_bisync_job_resolves_a_real_conflict_without_losing_either_version() {
+        let jobs_dir = TempDir::new("bisync-run-jobs");
+        let path1_dir = TempDir::new("bisync-run-path1");
+        let path2_dir = TempDir::new("bisync-run-path2");
+        std::fs::create_dir_all(&path1_dir.path).unwrap();
+        std::fs::create_dir_all(&path2_dir.path).unwrap();
+        // Un resync su due cartelle del tutto vuote produce una baseline che
+        // rclone stesso considera non valida ("Cannot sync to an empty
+        // directory") e richiede un altro resync per riprendersi — scoperto
+        // scrivendo questo test. Un file già presente evita il caso limite,
+        // più vicino comunque a un uso reale (nessuno crea un job bisync su
+        // due cartelle che restano vuote per sempre).
+        std::fs::write(path1_dir.path.join("placeholder.txt"), "presente fin dall'inizio").unwrap();
+
+        create_bisync_job_in(
+            &jobs_dir.path,
+            "prova",
+            &path1_dir.path.to_string_lossy(),
+            &path2_dir.path.to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        // execute_bisync usa <config_dir>/rclone.conf: basta che la cartella
+        // esista, il file stesso non serve (rclone usa i default se manca).
+        std::fs::create_dir_all(&jobs_dir.path).unwrap();
+
+        let baseline = run_bisync_job_by_name(&jobs_dir.path, "prova").await.unwrap();
+        assert!(baseline.success, "il resync iniziale dovrebbe riuscire: {baseline:?}");
+        assert!(!load_from_dir(&jobs_dir.path).unwrap()[0].needs_resync, "dopo un run riuscito non serve più resync");
+
+        std::fs::write(path1_dir.path.join("documento.txt"), "versione lato 1").unwrap();
+        std::fs::write(path2_dir.path.join("documento.txt"), "versione lato 2, più lunga delle altre").unwrap();
+
+        let result = run_bisync_job_by_name(&jobs_dir.path, "prova").await.unwrap();
+        assert!(result.success, "un conflitto risolto da rclone non è un errore per noi: {result:?}");
+        assert_eq!(result.conflict_paths.len(), 2, "un conflitto genera due copie rinominate: {result:?}");
+
+        let path1_entries: Vec<_> =
+            std::fs::read_dir(&path1_dir.path).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        let path2_entries: Vec<_> =
+            std::fs::read_dir(&path2_dir.path).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        assert!(!path1_entries.iter().any(|n| n == "documento.txt"), "il file originale in conflitto non deve restare tale e quale: {path1_entries:?}");
+        assert_eq!(path1_entries.len(), 3, "placeholder.txt più le due versioni in conflitto su path1: {path1_entries:?}");
+        assert_eq!(path2_entries.len(), 3, "placeholder.txt più le due versioni in conflitto su path2: {path2_entries:?}");
+
+        let all_content: Vec<String> = path1_entries
+            .iter()
+            .map(|name| std::fs::read_to_string(path1_dir.path.join(name)).unwrap())
+            .collect();
+        assert!(all_content.iter().any(|c| c == "versione lato 1"), "la versione del lato 1 non deve essere andata persa: {all_content:?}");
+        assert!(all_content.iter().any(|c| c.starts_with("versione lato 2")), "la versione del lato 2 non deve essere andata persa: {all_content:?}");
+    }
+
+    #[tokio::test]
+    async fn run_bisync_job_fails_cleanly_for_an_unknown_job() {
+        let dir = TempDir::new("bisync-run-unknown");
+        let result = run_bisync_job_by_name(&dir.path, "non-esiste").await;
+        assert!(result.is_err());
+    }
+
+    /// Stesso schema deterministico usato in `jobs::run_job_by_name_rejects_
+    /// a_second_concurrent_call_for_the_same_name`: `tokio::join!` polla i
+    /// due futuri in ordine sullo stesso task, quindi il primo si registra
+    /// nel set di `running_jobs` prima di cedere il controllo al primo vero
+    /// `.await` (l'avvio del sottoprocesso `rclone bisync`).
+    #[tokio::test]
+    async fn run_bisync_job_by_name_rejects_a_second_concurrent_call_for_the_same_name() {
+        let jobs_dir = TempDir::new("bisync-concurrent-guard-jobs");
+        let path1_dir = TempDir::new("bisync-concurrent-guard-path1");
+        let path2_dir = TempDir::new("bisync-concurrent-guard-path2");
+        std::fs::create_dir_all(&path1_dir.path).unwrap();
+        std::fs::create_dir_all(&path2_dir.path).unwrap();
+
+        create_bisync_job_in(
+            &jobs_dir.path,
+            "job-concorrenza-unico",
+            &path1_dir.path.to_string_lossy(),
+            &path2_dir.path.to_string_lossy(),
+            None,
+        )
+        .unwrap();
+
+        let (first, second) = tokio::join!(
+            run_bisync_job_by_name(&jobs_dir.path, "job-concorrenza-unico"),
+            run_bisync_job_by_name(&jobs_dir.path, "job-concorrenza-unico"),
+        );
+
+        assert!(first.is_ok(), "la prima delle due chiamate dovrebbe riuscire: {first:?}");
+        assert!(second.is_err(), "la seconda, concorrente, deve essere rifiutata: {second:?}");
+        assert!(second.unwrap_err().contains("già in esecuzione"));
+    }
+}

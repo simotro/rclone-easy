@@ -1,0 +1,16 @@
+.DS_Store
+node_modules
+/build
+/.svelte-kit
+/package
+.env
+.env.*
+!.env.example
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Sidecar rclone (scaricato con scripts/fetch-rclone-sidecar.sh, non versionato)
+/src-tauri/binaries/
+
+# Note di sviluppo, materiale sorgente e artefatti locali non destinati al repo pubblico
+/dev-notes/

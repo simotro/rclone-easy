@@ -1,0 +1,542 @@
+use crate::rcd::RcdState;
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::Duration;
+use tauri::{
+    image::Image,
+    menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    tray::{TrayIcon, TrayIconBuilder},
+    AppHandle, Emitter, Manager, Wry,
+};
+
+const SHOW_HIDE_ID: &str = "show_hide";
+const QUIT_ID: &str = "quit";
+const MOUNT_PREFIX: &str = "mount:";
+const UNMOUNT_PREFIX: &str = "unmount:";
+const BACKUP_PREFIX: &str = "backup:";
+const BISYNC_PREFIX: &str = "bisync:";
+/// Voce mostrata per un remote senza alcun mount/job/bisync configurato —
+/// porta l'utente alla riga di quel remote in home invece di offrire azioni
+/// che non esistono ancora, vedi `build_remote_submenu`.
+const CONFIGURE_PREFIX: &str = "configure:";
+/// Voce mostrata in cima al menu per ogni remote la cui ultima esecuzione
+/// registrata (backup o bisync) è fallita — vedi `collect_remote_actions` e
+/// `build_menu_from_remotes`.
+const WARNING_PREFIX: &str = "warning:";
+/// Evento ascoltato da `RemoteRow.svelte`: porta la finestra in primo piano
+/// e scorre/evidenzia la riga del remote indicato nel payload, aprendone
+/// anche la cronologia se il click veniva da una voce di avviso. Stesso
+/// schema di nome (`rclone-easy://...`) degli altri eventi verso il
+/// frontend, vedi `oauth_remote.rs`.
+const FOCUS_REMOTE_EVENT: &str = "rclone-easy://tray-focus-remote";
+/// Evento ascoltato da `RemoteRow.svelte`: spegne l'evidenziazione aperta da
+/// `FOCUS_REMOTE_EVENT`, che deve restare accesa finché la finestra non
+/// torna nascosta in tray — vedi `hide_main_window`.
+const WINDOW_HIDDEN_EVENT: &str = "rclone-easy://window-hidden";
+
+/// Nome della finestra principale, quello di default assegnato da Tauri
+/// quando `tauri.conf.json` non specifica un `label` esplicito (confermato:
+/// non lo specifica).
+pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
+
+/// Icona unica colorata (non una coppia chiaro/scuro): niente rilevamento a
+/// runtime del tema del pannello, che su Linux non ha un'API affidabile e
+/// uniforme tra desktop environment diversi — scelta esplicita dell'utente.
+///
+/// Pixel RGBA grezzi (non PNG): `tauri::image::Image` in questa versione
+/// non decodifica PNG da sé (`Image::new` vuole già RGBA piano), quindi i
+/// file sono pre-decodificati una volta con Pillow da `icons/tray/tray-*.png`
+/// a `icons/tray/tray-*.rgba`, 64×64. Se le sorgenti PNG cambiano vanno
+/// rigenerati allo stesso modo.
+const TRAY_ICON_SIZE: u32 = 64;
+const TRAY_FRAME_BYTE_LEN: usize = (TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usize;
+const IDLE_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-idle.rgba");
+/// Sequenza di fotogrammi di una dissolvenza morbida teal→ambra→teal
+/// ("respiro"), mostrata in loop mentre almeno un job di backup o bisync è
+/// in esecuzione — vedi `watch_activity`. Usa la stessa API multipiattaforma
+/// di Tauri per l'icona della tray (nessun trucco specifico per Linux),
+/// quindi la stessa affidabilità vale anche per Windows/macOS in futuro.
+/// 24 fotogrammi, interpolazione con easing a coseno (transizione più lenta
+/// agli estremi, più rapida a metà, per un effetto "respiro" naturale
+/// invece che lineare) generata una volta con Pillow da
+/// `icons/tray/tray-idle.png`.
+const BREATHE_FRAME_BYTES: &[u8] = include_bytes!("../icons/tray/tray-breathe.rgba");
+/// Stessa animazione "respiro" di `BREATHE_FRAME_BYTES` (stessa formula di
+/// easing, stessi 24 fotogrammi, stessa silhouette), ma tra ambra e rosso
+/// acceso invece che teal e ambra — mostrata in loop al posto dell'icona
+/// idle statica quando l'ultima esecuzione registrata di un job di backup o
+/// bisync (qualunque remote) è fallita, finché non ne va a buon fine una
+/// successiva. Un badge statico era troppo poco visibile nella tray a
+/// dimensione reale; un cambio di colore persistente si nota molto di più.
+const ERROR_BREATHE_FRAME_BYTES: &[u8] = include_bytes!("../icons/tray/tray-error-breathe.rgba");
+const BREATHE_FRAME_COUNT: usize = 24;
+/// Intervallo tra un fotogramma e il successivo: abbastanza fitto da
+/// sembrare fluido per una transizione di solo colore (non richiede la
+/// stessa frequenza di un'animazione con movimento), abbastanza largo da
+/// restare affidabile su qualunque implementazione di tray/menu bar.
+const BREATHE_FRAME_INTERVAL: Duration = Duration::from_millis(120);
+/// Intervallo di controllo quando non c'è nulla in esecuzione — nessuna
+/// icona da aggiornare in quella finestra, un controllo più rado va bene.
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Intervallo di ricostruzione del menu — vedi `watch_menu`.
+const MENU_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Handle salvato come stato gestito da Tauri per poterne cambiare icona e
+/// menu più avanti (`watch_activity`/`watch_menu`) — `TrayIconBuilder::build`
+/// restituisce l'handle una volta sola, va conservato da qualche parte per
+/// riusarlo.
+struct TrayHandle(TrayIcon);
+
+/// Icona persistente nella tray richiesta dallo SPEC, con menu contestuale
+/// che elenca i remote configurati e le loro azioni rapide (monta/smonta,
+/// backup ora, sincronizza ora) e stato "in esecuzione"/"ultimo fallito"
+/// riflesso nell'icona — vedi `watch_activity`/`watch_menu`.
+///
+/// Non fallisce l'avvio dell'app se la tray non può essere creata (es.
+/// nessun systray disponibile sul desktop dell'utente finale, scenario
+/// comune con alcuni window manager Linux minimali o GNOME senza
+/// l'estensione AppIndicator) — l'app resta comunque utilizzabile come
+/// finestra normale.
+pub fn build_tray(app: &AppHandle) {
+    if let Err(e) = try_build_tray(app) {
+        eprintln!("impossibile creare l'icona nella tray, l'app resta comunque utilizzabile: {e}");
+    }
+}
+
+fn try_build_tray(app: &AppHandle) -> tauri::Result<()> {
+    // Placeholder minimo: il primo giro di `watch_menu`, praticamente
+    // immediato, lo sostituisce con la versione completa (coinvolge una
+    // chiamata RC per lo stato live dei mount, quindi va costruito in modo
+    // asincrono — non blocca la comparsa della tray).
+    let show_hide = MenuItem::with_id(app, SHOW_HIDE_ID, "Mostra/Nascondi finestra", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, QUIT_ID, "Esci", true, None::<&str>)?;
+    let placeholder_menu = Menu::with_items(app, &[&show_hide, &separator, &quit])?;
+
+    let idle_icon = Image::new(IDLE_ICON_BYTES, TRAY_ICON_SIZE, TRAY_ICON_SIZE);
+
+    let tray = TrayIconBuilder::new()
+        .icon(idle_icon)
+        .tooltip(TOOLTIP_OK)
+        .menu(&placeholder_menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| {
+            let id = event.id.as_ref();
+            if let Some(remote) = id.strip_prefix(CONFIGURE_PREFIX) {
+                focus_remote(app, remote, false);
+                return;
+            }
+            if let Some(remote) = id.strip_prefix(WARNING_PREFIX) {
+                focus_remote(app, remote, true);
+                return;
+            }
+            match id {
+                SHOW_HIDE_ID => toggle_main_window(app),
+                QUIT_ID => app.exit(0),
+                _ => dispatch_action(app, id),
+            }
+        })
+        .build(app)?;
+
+    app.manage(TrayHandle(tray));
+
+    let activity_handle = app.clone();
+    tauri::async_runtime::spawn(async move { watch_activity(activity_handle).await });
+
+    let menu_handle = app.clone();
+    tauri::async_runtime::spawn(async move { watch_menu(menu_handle).await });
+
+    Ok(())
+}
+
+fn set_tray_icon(app: &AppHandle, bytes: &[u8]) {
+    let Some(tray) = app.try_state::<TrayHandle>() else { return };
+    let icon = Image::new(bytes, TRAY_ICON_SIZE, TRAY_ICON_SIZE);
+    let _ = tray.0.set_icon(Some(icon));
+}
+
+fn set_tray_tooltip(app: &AppHandle, text: &str) {
+    let Some(tray) = app.try_state::<TrayHandle>() else { return };
+    let _ = tray.0.set_tooltip(Some(text));
+}
+
+fn breathe_frame(frames: &[u8], frame: usize) -> &[u8] {
+    let start = frame * TRAY_FRAME_BYTE_LEN;
+    &frames[start..start + TRAY_FRAME_BYTE_LEN]
+}
+
+fn any_job_running() -> bool {
+    crate::jobs::any_job_running() || crate::bisync::any_job_running()
+}
+
+/// `true` se l'ultima esecuzione registrata di un qualunque job di backup o
+/// bisync (qualunque remote) è fallita — pilota l'animazione di errore
+/// sull'icona quando l'app torna inattiva. Best-effort: un fallimento nel
+/// leggere la config (es. cartella non ancora creata al primissimo avvio)
+/// conta come "nessun errore" invece di far fallire il controllo.
+fn last_run_failed(app: &AppHandle) -> bool {
+    let Ok(config_dir) = app.path().app_config_dir() else { return false };
+
+    let jobs_failed = crate::jobs::load_from_dir(&config_dir)
+        .map(|jobs| jobs.iter().any(|j| j.history.first().is_some_and(|h| !h.success)))
+        .unwrap_or(false);
+    let bisync_failed = crate::bisync::load_from_dir(&config_dir)
+        .map(|jobs| jobs.iter().any(|j| j.history.first().is_some_and(|h| !h.success)))
+        .unwrap_or(false);
+
+    jobs_failed || bisync_failed
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum ActivityState {
+    Running,
+    Error,
+    Ok,
+}
+
+const TOOLTIP_RUNNING: &str = "Rclone Easy - Sincronizzazione in corso";
+/// Testo del tooltip usato anche per capire, a colpo d'occhio nel codice,
+/// cosa comunica l'animazione ambra→rosso di `ERROR_BREATHE_FRAME_BYTES`.
+const TOOLTIP_ERROR: &str = "Rclone Easy - Uno o più lavori hanno avuto un problema";
+const TOOLTIP_OK: &str = "Rclone Easy - Ultimi lavori eseguiti con successo";
+
+/// Ogni ~120ms, mentre almeno un job è in esecuzione oppure mentre l'ultima
+/// esecuzione registrata di un job è fallita, mostra il fotogramma
+/// successivo della relativa dissolvenza (teal→ambra per "in corso",
+/// ambra→rosso per "problema"); appena torna tutto normale mostra l'icona
+/// statica idle, controllato ogni ~500ms. Il tooltip riflette lo stesso
+/// stato, aggiornato solo al cambio di stato (non ad ogni fotogramma) per
+/// non chiamare l'API della tray decine di volte al secondo inutilmente.
+/// Un polling semplice invece di un canale di notifica: evita di dover far
+/// conoscere un `AppHandle` a `jobs.rs`/`bisync.rs`, che oggi restano
+/// testabili senza una vera app Tauri.
+async fn watch_activity(app: AppHandle) {
+    let mut current_state: Option<ActivityState> = None;
+    let mut frame = 0usize;
+
+    loop {
+        let state = if any_job_running() {
+            ActivityState::Running
+        } else if last_run_failed(&app) {
+            ActivityState::Error
+        } else {
+            ActivityState::Ok
+        };
+
+        if current_state != Some(state) {
+            let tooltip = match state {
+                ActivityState::Running => TOOLTIP_RUNNING,
+                ActivityState::Error => TOOLTIP_ERROR,
+                ActivityState::Ok => TOOLTIP_OK,
+            };
+            set_tray_tooltip(&app, tooltip);
+            current_state = Some(state);
+            frame = 0;
+        }
+
+        match state {
+            ActivityState::Running => {
+                set_tray_icon(&app, breathe_frame(BREATHE_FRAME_BYTES, frame));
+                frame = (frame + 1) % BREATHE_FRAME_COUNT;
+                tokio::time::sleep(BREATHE_FRAME_INTERVAL).await;
+            }
+            ActivityState::Error => {
+                set_tray_icon(&app, breathe_frame(ERROR_BREATHE_FRAME_BYTES, frame));
+                frame = (frame + 1) % BREATHE_FRAME_COUNT;
+                tokio::time::sleep(BREATHE_FRAME_INTERVAL).await;
+            }
+            ActivityState::Ok => {
+                set_tray_icon(&app, IDLE_ICON_BYTES);
+                tokio::time::sleep(IDLE_POLL_INTERVAL).await;
+            }
+        }
+    }
+}
+
+/// Stato di un job (backup o bisync) rilevante per il menu della tray: nome
+/// per costruire l'id della voce, se ha la sincronizzazione automatica
+/// accesa (`autoIntervalMinutes` impostato — stesso criterio di
+/// `activity::active_service_for_remote`, NON "sta girando in questo
+/// istante": è quello che il backend controlla davvero in `mounts::mount_now`
+/// prima di montare, quindi deve essere anche il gate per "Monta" qui, pena
+/// mostrarlo abilitato e farlo comunque fallire al click) e se la sua
+/// ultima esecuzione registrata è fallita (voce di avviso in cima al menu).
+struct JobStatus {
+    name: String,
+    auto_active: bool,
+    last_failed: bool,
+}
+
+/// Azioni rapide disponibili per un remote nel menu — al più un mount, un
+/// backup e una bisync per remote (stesso vincolo "uno per tipo" già
+/// applicato altrove), quindi al più tre voci nel suo sottomenu. Un remote
+/// con tutti e tre i campi a `None` non ha ancora nulla di configurato:
+/// `build_remote_submenu` gli mostra "Configura" al posto delle azioni.
+#[derive(Default)]
+struct RemoteActions {
+    mount: Option<(String, bool)>,
+    backup: Option<JobStatus>,
+    bisync: Option<JobStatus>,
+}
+
+impl RemoteActions {
+    fn is_empty(&self) -> bool {
+        self.mount.is_none() && self.backup.is_none() && self.bisync.is_none()
+    }
+}
+
+/// Nome del remote referenziato da una stringa `fs` (`remoto:percorso`),
+/// `None` se è un percorso locale — stessa funzione duplicata in
+/// `mounts.rs`/`jobs.rs`/`bisync.rs`/`activity.rs`: qui serve una copia
+/// propria per non introdurre una dipendenza incrociata.
+fn remote_name_of(fs: &str) -> Option<&str> {
+    if fs.starts_with('/') {
+        return None;
+    }
+    fs.split_once(':').map(|(name, _)| name)
+}
+
+async fn collect_remote_actions(app: &AppHandle, config_dir: &Path) -> Vec<(String, RemoteActions)> {
+    let mut map: HashMap<String, RemoteActions> = HashMap::new();
+
+    // Tutti i remote esistenti (non solo quelli con un mount/job/bisync già
+    // configurato), così anche i remote "nudi" compaiono nel menu con la
+    // voce "Configura" invece di essere semplicemente assenti — vedi
+    // `build_remote_submenu`. Best-effort: se rcd non risponde (es. app
+    // appena avviata) i remote restano comunque elencabili tramite mount/
+    // job/bisync già salvati sotto, solo senza le voci "Configura" per gli
+    // altri.
+    if let Some(state) = app.try_state::<RcdState>() {
+        if let Ok(body) = crate::rcd::call(&state, "config/listremotes", serde_json::json!({})).await {
+            if let Ok(names) = crate::remotes::extract_remote_names(&body) {
+                for name in names {
+                    map.entry(name).or_default();
+                }
+            }
+        }
+    }
+
+    if let Ok(mounts) = crate::mounts::load_from_dir(config_dir) {
+        let active = match app.try_state::<RcdState>() {
+            Some(state) => crate::mounts::active_mount_points(&state).await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        for m in mounts {
+            if let Some(remote) = remote_name_of(&m.remote) {
+                let mounted = crate::mounts::is_mounted(&active, &m.mount_point);
+                map.entry(remote.to_string()).or_default().mount = Some((m.name, mounted));
+            }
+        }
+    }
+
+    if let Ok(jobs) = crate::jobs::load_from_dir(config_dir) {
+        for j in jobs {
+            if let Some(remote) = remote_name_of(&j.source).or_else(|| remote_name_of(&j.destination)) {
+                let auto_active = j.auto_interval_minutes.is_some();
+                let last_failed = j.history.first().is_some_and(|h| !h.success);
+                map.entry(remote.to_string()).or_default().backup = Some(JobStatus { name: j.name, auto_active, last_failed });
+            }
+        }
+    }
+
+    if let Ok(bisync_jobs) = crate::bisync::load_from_dir(config_dir) {
+        for j in bisync_jobs {
+            if let Some(remote) = remote_name_of(&j.path1).or_else(|| remote_name_of(&j.path2)) {
+                let auto_active = j.auto_interval_minutes.is_some();
+                let last_failed = j.history.first().is_some_and(|h| !h.success);
+                map.entry(remote.to_string()).or_default().bisync = Some(JobStatus { name: j.name, auto_active, last_failed });
+            }
+        }
+    }
+
+    let mut result: Vec<_> = map.into_iter().collect();
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
+fn build_remote_submenu(app: &AppHandle, remote_name: &str, actions: &RemoteActions) -> tauri::Result<Submenu<Wry>> {
+    let submenu = Submenu::new(app, remote_name, true)?;
+
+    // Remote senza nulla di configurato: nessuna azione rapida da offrire,
+    // solo un rimando alla home per impostarne una.
+    if actions.is_empty() {
+        submenu.append(&MenuItem::with_id(app, format!("{CONFIGURE_PREFIX}{remote_name}"), "Configura", true, None::<&str>)?)?;
+        return Ok(submenu);
+    }
+
+    // "Monta" è disabilitato (ma resta visibile, così l'utente capisce
+    // perché) se un backup o una bisync di questo remote ha la
+    // sincronizzazione automatica accesa — stesso identico criterio che
+    // `mounts::mount_now` verifica davvero lato backend
+    // (`activity::ensure_no_other_active_service`), altrimenti il tasto
+    // risulterebbe cliccabile ma il montaggio fallirebbe silenziosamente
+    // (l'unico avviso sarebbe una notifica desktop). "Smonta" non ha questo
+    // vincolo: è sempre disponibile quando il remote è montato.
+    let remote_job_active = actions.backup.as_ref().is_some_and(|j| j.auto_active) || actions.bisync.as_ref().is_some_and(|j| j.auto_active);
+
+    if let Some((mount_name, mounted)) = &actions.mount {
+        let (label, id, enabled) = if *mounted {
+            ("Smonta".to_string(), format!("{UNMOUNT_PREFIX}{mount_name}"), true)
+        } else {
+            ("Monta e apri".to_string(), format!("{MOUNT_PREFIX}{mount_name}"), !remote_job_active)
+        };
+        submenu.append(&MenuItem::with_id(app, id, label, enabled, None::<&str>)?)?;
+    }
+    if let Some(job) = &actions.backup {
+        submenu.append(&MenuItem::with_id(app, format!("{BACKUP_PREFIX}{}", job.name), "Backup ora", true, None::<&str>)?)?;
+    }
+    if let Some(job) = &actions.bisync {
+        submenu.append(&MenuItem::with_id(app, format!("{BISYNC_PREFIX}{}", job.name), "Sincronizza ora", true, None::<&str>)?)?;
+    }
+
+    Ok(submenu)
+}
+
+/// Ricostruisce il menu con Mostra/Nascondi, un sottomenu per ogni remote
+/// con almeno un mount/backup/bisync configurato, ed Esci — chiamata
+/// periodicamente da `watch_menu` così riflette configurazioni cambiate
+/// mentre l'app è in esecuzione (nuovo remote/job aggiunto o rimosso, mount
+/// montato/smontato) senza dover agganciare un evento esplicito ad ogni
+/// singolo comando che tocca mount/job/bisync.
+///
+/// Raccoglie prima TUTTI i dati (unica parte che ha bisogno di `.await`,
+/// per lo stato live dei mount), poi costruisce gli oggetti menu di Tauri
+/// in una funzione tutta sincrona: non sono `Send`, non possono
+/// attraversare un punto di sospensione dentro il task spawnato da
+/// `watch_menu`.
+async fn build_dynamic_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+    let remotes = match app.path().app_config_dir() {
+        Ok(config_dir) => collect_remote_actions(app, &config_dir).await,
+        Err(_) => Vec::new(),
+    };
+    build_menu_from_remotes(app, &remotes)
+}
+
+/// Etichetta di una voce di avviso in cima al menu per un remote la cui
+/// ultima esecuzione registrata è fallita — nomina il tipo di job fallito
+/// così l'utente sa cosa aspettarsi aprendo la cronologia, senza doverlo
+/// scoprire cliccando.
+fn warning_label(remote_name: &str, actions: &RemoteActions) -> Option<String> {
+    let backup_failed = actions.backup.as_ref().is_some_and(|j| j.last_failed);
+    let bisync_failed = actions.bisync.as_ref().is_some_and(|j| j.last_failed);
+    match (backup_failed, bisync_failed) {
+        (true, true) => Some(format!("⚠ {remote_name}: backup e sincronizzazione falliti")),
+        (true, false) => Some(format!("⚠ {remote_name}: backup fallito")),
+        (false, true) => Some(format!("⚠ {remote_name}: sincronizzazione fallita")),
+        (false, false) => None,
+    }
+}
+
+fn build_menu_from_remotes(app: &AppHandle, remotes: &[(String, RemoteActions)]) -> tauri::Result<Menu<Wry>> {
+    let show_hide = MenuItem::with_id(app, SHOW_HIDE_ID, "Mostra/Nascondi finestra", true, None::<&str>)?;
+    let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = vec![Box::new(show_hide)];
+
+    let warnings: Vec<(&str, String)> =
+        remotes.iter().filter_map(|(remote_name, actions)| warning_label(remote_name, actions).map(|label| (remote_name.as_str(), label))).collect();
+    if !warnings.is_empty() {
+        items.push(Box::new(PredefinedMenuItem::separator(app)?));
+        for (remote_name, label) in warnings {
+            items.push(Box::new(MenuItem::with_id(app, format!("{WARNING_PREFIX}{remote_name}"), label, true, None::<&str>)?));
+        }
+    }
+
+    if !remotes.is_empty() {
+        items.push(Box::new(PredefinedMenuItem::separator(app)?));
+        for (remote_name, actions) in remotes {
+            items.push(Box::new(build_remote_submenu(app, remote_name, actions)?));
+        }
+    }
+
+    items.push(Box::new(PredefinedMenuItem::separator(app)?));
+    items.push(Box::new(MenuItem::with_id(app, QUIT_ID, "Esci", true, None::<&str>)?));
+
+    let refs: Vec<&dyn IsMenuItem<Wry>> = items.iter().map(|item| item.as_ref()).collect();
+    Menu::with_items(app, &refs)
+}
+
+async fn watch_menu(app: AppHandle) {
+    loop {
+        if let Ok(menu) = build_dynamic_menu(&app).await {
+            if let Some(tray) = app.try_state::<TrayHandle>() {
+                let _ = tray.0.set_menu(Some(menu));
+            }
+        }
+        tokio::time::sleep(MENU_REFRESH_INTERVAL).await;
+    }
+}
+
+/// Esegue l'azione codificata nell'id della voce di menu dinamica cliccata
+/// (vedi `build_remote_submenu`), in un task separato perché
+/// `on_menu_event` non è async e queste azioni (mount/sync reali) possono
+/// durare a lungo. Un fallimento arriva all'utente come notifica desktop —
+/// da qui non c'è nessun'altra UI a cui mostrarlo.
+fn dispatch_action(app: &AppHandle, id: &str) {
+    let Some((prefix, name)) = id.split_once(':') else { return };
+    let prefix = format!("{prefix}:");
+    let name = name.to_string();
+    let app = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let result: Result<(), String> = match prefix.as_str() {
+            MOUNT_PREFIX => {
+                let state = app.state::<RcdState>();
+                crate::mounts::mount_now_and_open(app.clone(), state, name.clone()).await
+            }
+            UNMOUNT_PREFIX => {
+                let state = app.state::<RcdState>();
+                crate::mounts::unmount_now(app.clone(), state, name.clone()).await
+            }
+            BACKUP_PREFIX => {
+                let state = app.state::<RcdState>();
+                crate::jobs::run_job(app.clone(), state, name.clone()).await
+            }
+            BISYNC_PREFIX => crate::bisync::run_bisync_job(app.clone(), name.clone()).await.map(|_| ()),
+            _ => return,
+        };
+        if let Err(message) = result {
+            notify_error(&app, &name, &message);
+        }
+    });
+}
+
+fn notify_error(app: &AppHandle, name: &str, message: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title("Rclone Easy").body(format!("'{name}' non è riuscito: {message}")).show();
+}
+
+fn toggle_main_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else { return };
+    if window.is_visible().unwrap_or(false) {
+        hide_main_window(app);
+    } else {
+        show_main_window(app);
+    }
+}
+
+fn show_main_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else { return };
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+/// Nasconde la finestra principale e notifica il frontend (`RemoteRow.svelte`,
+/// in ascolto su `WINDOW_HIDDEN_EVENT`) di spegnere l'evidenziazione aperta
+/// da `focus_remote` — persiste finché la finestra resta visibile, non un
+/// timeout arbitrario. Punto unico usato sia dal toggle della tray sia
+/// dall'intercettazione della chiusura (`lib.rs::hide_instead_of_close`),
+/// per non duplicare l'emit in due posti.
+pub(crate) fn hide_main_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else { return };
+    let _ = window.hide();
+    let _ = app.emit(WINDOW_HIDDEN_EVENT, ());
+}
+
+/// Porta la finestra in primo piano e notifica il frontend (`RemoteRow.svelte`,
+/// in ascolto su `FOCUS_REMOTE_EVENT`) di scorrere fino alla riga del
+/// remote indicato ed evidenziarla, aprendone anche la cronologia se si
+/// veniva da una voce di avviso — vedi `on_menu_event` per "Configura" e le
+/// voci di avviso.
+fn focus_remote(app: &AppHandle, remote: &str, open_history: bool) {
+    show_main_window(app);
+    let _ = app.emit(FOCUS_REMOTE_EVENT, serde_json::json!({ "remote": remote, "openHistory": open_history }));
+}

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="%sveltekit.assets%/favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tauri + SvelteKit + Typescript App</title>
+    %sveltekit.head%
+  </head>
+  <body data-sveltekit-preload-data="hover">
+    <!--
+      Niente `display: contents` sul wrapper (default dello scaffold
+      SvelteKit): su WebKitGTK (il motore di Tauri su Linux) un antenato
+      con `display: contents` ha causato containing block sbagliati per i
+      discendenti `position: fixed` (il toggle del tema finiva in alto a
+      sinistra invece che in alto a destra, e il suo menu a tendina
+      spuntava fuori posto) — bug noto di WebKit con quella proprietà,
+      niente qui dipende dalla sua trasparenza di layout (nessun
+      flex/grid su body che si aspetti figli diretti).
+    -->
+    %sveltekit.body%
+  </body>
+</html>

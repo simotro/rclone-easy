@@ -1,0 +1,224 @@
+/* Stile condiviso tra la home page e i componenti per-remote — estratto
+   da quello già in uso in ogni pagina (colori, form, dark mode), per non
+   ripeterlo in ogni componente che compone la nuova home page.
+
+   Tema: tutti i colori che cambiano tra chiaro/scuro sono custom property
+   su :root, valorizzate in tre punti — mai altrove, così un solo posto
+   controlla ogni pagina/componente:
+   1) valori di default (chiaro) qui sotto;
+   2) @media (prefers-color-scheme: dark) — tema di sistema scuro, quando
+      l'utente non ha scelto esplicitamente nulla;
+   3) :root[data-theme="dark"|"light"] — scelta esplicita dell'utente
+      (vedi $lib/theme.ts), vince sempre sulla preferenza di sistema perché
+      arriva dopo nel foglio di stile. */
+
+:root {
+  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+
+  --text-color: #0f0f0f;
+  --text-muted: #666;
+  --bg-page: #f6f6f6;
+  --bg-surface: #ffffff;
+  --surface-tint: rgba(0, 0, 0, 0.05);
+  --border-color: #ccc;
+  --border-color-subtle: rgba(0, 0, 0, 0.15);
+  --accent: #2a94ae;
+  --accent-bg: rgba(42, 148, 174, 0.12);
+  --ok: #1a7f37;
+  --error: #cf222e;
+  --warning-bg: #fff8e1;
+  --warning-text: #7a5c00;
+  --code-bg: rgba(0, 0, 0, 0.06);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 2px 2px rgba(0, 0, 0, 0.1);
+  --status-green: #1a7f37;
+  --status-yellow: #d4a72c;
+  --status-red: #cf222e;
+  --status-grey: #999;
+
+  color: var(--text-color);
+  background-color: var(--bg-page);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text-color: #f6f6f6;
+    --text-muted: #aaa;
+    --bg-page: #2f2f2f;
+    --bg-surface: #0f0f0f98;
+    --surface-tint: rgba(255, 255, 255, 0.08);
+    --border-color: #444;
+    --border-color-subtle: rgba(255, 255, 255, 0.2);
+    --accent: #68c9e0;
+    --accent-bg: rgba(104, 201, 224, 0.14);
+    --ok: #3fb950;
+    --error: #ff7b72;
+    --warning-bg: #4a3b00;
+    --warning-text: #ffdf7e;
+    --code-bg: rgba(255, 255, 255, 0.12);
+    --status-green: #3fb950;
+    --status-yellow: #e3b341;
+    --status-red: #ff7b72;
+    --status-grey: #777;
+  }
+}
+
+:root[data-theme="dark"] {
+  --text-color: #f6f6f6;
+  --text-muted: #aaa;
+  --bg-page: #2f2f2f;
+  --bg-surface: #0f0f0f98;
+  --surface-tint: rgba(255, 255, 255, 0.08);
+  --border-color: #444;
+  --border-color-subtle: rgba(255, 255, 255, 0.2);
+  --accent: #68c9e0;
+  --accent-bg: rgba(104, 201, 224, 0.14);
+  --ok: #3fb950;
+  --error: #ff7b72;
+  --warning-bg: #4a3b00;
+  --warning-text: #ffdf7e;
+  --code-bg: rgba(255, 255, 255, 0.12);
+  --status-green: #3fb950;
+  --status-yellow: #e3b341;
+  --status-red: #ff7b72;
+  --status-grey: #777;
+}
+
+:root[data-theme="light"] {
+  --text-color: #0f0f0f;
+  --text-muted: #666;
+  --bg-page: #f6f6f6;
+  --bg-surface: #ffffff;
+  --surface-tint: rgba(0, 0, 0, 0.05);
+  --border-color: #ccc;
+  --border-color-subtle: rgba(0, 0, 0, 0.15);
+  --accent: #2a94ae;
+  --accent-bg: rgba(42, 148, 174, 0.12);
+  --ok: #1a7f37;
+  --error: #cf222e;
+  --warning-bg: #fff8e1;
+  --warning-text: #7a5c00;
+  --code-bg: rgba(0, 0, 0, 0.06);
+  --status-green: #1a7f37;
+  --status-yellow: #d4a72c;
+  --status-red: #cf222e;
+  --status-grey: #999;
+}
+
+body {
+  color: var(--text-color);
+  background-color: var(--bg-page);
+}
+
+a {
+  color: var(--accent);
+}
+
+input,
+select {
+  font-family: inherit;
+  font-size: 1em;
+  padding: 0.5em 0.7em;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-surface);
+  color: var(--text-color);
+}
+
+/* Il browser applica di suo un aspetto nativo (GTK su Linux) ai <select>
+   che ignora background/border/radius personalizzati — verificato: senza
+   questo, il campo "Provider" appariva visibilmente diverso (più chiaro,
+   angoli diversi, anello di focus nativo) dagli <input> accanto, pur
+   condividendo esattamente le stesse regole CSS sopra. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 2em;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 1.1em) center, calc(100% - 0.8em) center;
+  background-size: 0.3em 0.3em, 0.3em 0.3em;
+  background-repeat: no-repeat;
+  color: var(--text-color);
+}
+
+button {
+  border-radius: 6px;
+  border: 1px solid transparent;
+  padding: 0.5em 1em;
+  font-size: 0.9em;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--text-color);
+  background-color: var(--bg-surface);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.ok {
+  color: var(--ok);
+  font-size: 0.9em;
+}
+
+.error {
+  color: var(--error);
+  font-size: 0.9em;
+}
+
+.hint,
+.muted {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+.path {
+  color: var(--text-muted);
+  font-size: 0.9em;
+  word-break: break-all;
+}
+
+.checkbox-row,
+.interval-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5em;
+  font-weight: 400;
+}
+
+.checkbox-row input {
+  width: auto;
+}
+
+.interval-row input {
+  width: 4.5em;
+}
+
+.folder-picker {
+  display: flex;
+  gap: 0.5em;
+}
+
+.folder-picker input {
+  flex: 1;
+}
+
+.row-actions {
+  display: flex;
+  gap: 0.5em;
+  flex-wrap: wrap;
+}
