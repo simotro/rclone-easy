@@ -25,6 +25,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "simotro",
+    "homepage": "https://github.com/simotro/rclone-easy",
+    "copyright": "Copyright © 2026 simotro",
+    "category": "Utility",
+    "shortDescription": "Interfaccia grafica per rclone",
+    "longDescription": "Un'interfaccia grafica semplice per rclone, pensata come alternativa più leggera a client come Insync, Google Drive Sync o MEGAsync, capace di collegarsi a decine di provider cloud diversi grazie al motore di rclone.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
