@@ -54,12 +54,27 @@ jobs:
       - name: Build
         run: npm run tauri build
 
-      - name: Carica i pacchetti come artefatti
+      # Tre artefatti separati e non uno solo con tutto dentro: chi scarica
+      # per testare (es. su Arch/CachyOS, dove .deb/.rpm non si installano)
+      # gli serve solo l'AppImage — un unico archivio con .deb+.rpm+AppImage
+      # pesava ~180MB invece di ~100MB, inutilmente lento da scaricare.
+      - name: Carica il pacchetto .deb
         uses: actions/upload-artifact@v7
         with:
-          name: rclone-easy-linux
-          path: |
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/rpm/*.rpm
-            src-tauri/target/release/bundle/appimage/*.AppImage
+          name: rclone-easy-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+      - name: Carica il pacchetto .rpm
+        uses: actions/upload-artifact@v7
+        with:
+          name: rclone-easy-rpm
+          path: src-tauri/target/release/bundle/rpm/*.rpm
+          if-no-files-found: error
+
+      - name: Carica l'AppImage
+        uses: actions/upload-artifact@v7
+        with:
+          name: rclone-easy-appimage
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
