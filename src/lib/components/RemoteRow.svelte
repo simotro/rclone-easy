@@ -420,28 +420,38 @@
     propagateDeletionsWarningOpen = false;
   }
 
+  // Salva sempre il form prima di eseguire qualunque azione: usata sia da
+  // saveBackup sia da runBackupNow, così "Esegui ora" non gira mai
+  // sull'ultima versione salvata ignorando una modifica non ancora
+  // confermata nel form (es. una nuova cartella locale appena scelta) —
+  // stesso principio già seguito dal mount, che ha un solo pulsante
+  // "salva e monta" invece di due azioni separate.
+  async function persistBackup() {
+    const remoteFs = `${prefix}${backupFormRemotePath}`;
+    const source = backupFormDirection === "toRemote" ? backupFormLocalPath.trim() : remoteFs;
+    const destination = backupFormDirection === "toRemote" ? remoteFs : backupFormLocalPath.trim();
+    const autoIntervalMinutes = backupFormAutoEnabled ? backupFormAutoInterval : null;
+    const propagateDeletions = backupFormPropagateDeletions;
+    if (syncJob) {
+      await invoke("update_job", {
+        oldName: syncJob.name,
+        name: remoteName,
+        source,
+        destination,
+        autoIntervalMinutes,
+        propagateDeletions,
+      });
+    } else {
+      await invoke("create_job", { name: remoteName, source, destination, autoIntervalMinutes, propagateDeletions });
+    }
+  }
+
   async function saveBackup() {
     if (backupFormLocalPath.trim() === "") return;
     backupBusy = true;
     backupError = null;
     try {
-      const remoteFs = `${prefix}${backupFormRemotePath}`;
-      const source = backupFormDirection === "toRemote" ? backupFormLocalPath.trim() : remoteFs;
-      const destination = backupFormDirection === "toRemote" ? remoteFs : backupFormLocalPath.trim();
-      const autoIntervalMinutes = backupFormAutoEnabled ? backupFormAutoInterval : null;
-      const propagateDeletions = backupFormPropagateDeletions;
-      if (syncJob) {
-        await invoke("update_job", {
-          oldName: syncJob.name,
-          name: remoteName,
-          source,
-          destination,
-          autoIntervalMinutes,
-          propagateDeletions,
-        });
-      } else {
-        await invoke("create_job", { name: remoteName, source, destination, autoIntervalMinutes, propagateDeletions });
-      }
+      await persistBackup();
       await onRefresh?.();
       backupModalOpen = false;
     } catch (error) {
@@ -452,12 +462,13 @@
   }
 
   async function runBackupNow() {
-    if (!syncJob) return;
+    if (backupFormLocalPath.trim() === "") return;
     backupBusy = true;
     backupError = null;
     backupRunResult = null;
     try {
-      await invoke("run_job", { name: syncJob.name });
+      await persistBackup();
+      await invoke("run_job", { name: remoteName });
       backupRunResult = { success: true, message: "" };
     } catch (error) {
       backupRunResult = { success: false, message: String(error) };
@@ -524,19 +535,26 @@
     if (typeof selected === "string") bisyncFormLocalPath = selected;
   }
 
+  // Stesso principio di persistBackup: salva sempre il form prima di
+  // eseguire, così "Esegui ora" non gira mai su un percorso vecchio quando
+  // il form ha una modifica non ancora confermata.
+  async function persistBisync() {
+    const path1 = bisyncFormLocalPath.trim();
+    const path2 = `${prefix}${bisyncFormRemotePath}`;
+    const autoIntervalMinutes = bisyncFormAutoEnabled ? bisyncFormAutoInterval : null;
+    if (bisyncJob) {
+      await invoke("update_bisync_job", { oldName: bisyncJob.name, name: remoteName, path1, path2, autoIntervalMinutes });
+    } else {
+      await invoke("create_bisync_job", { name: remoteName, path1, path2, autoIntervalMinutes });
+    }
+  }
+
   async function saveBisync() {
     if (bisyncFormLocalPath.trim() === "") return;
     bisyncBusy = true;
     bisyncError = null;
     try {
-      const path1 = bisyncFormLocalPath.trim();
-      const path2 = `${prefix}${bisyncFormRemotePath}`;
-      const autoIntervalMinutes = bisyncFormAutoEnabled ? bisyncFormAutoInterval : null;
-      if (bisyncJob) {
-        await invoke("update_bisync_job", { oldName: bisyncJob.name, name: remoteName, path1, path2, autoIntervalMinutes });
-      } else {
-        await invoke("create_bisync_job", { name: remoteName, path1, path2, autoIntervalMinutes });
-      }
+      await persistBisync();
       await onRefresh?.();
       bisyncModalOpen = false;
     } catch (error) {
@@ -547,12 +565,13 @@
   }
 
   async function runBisyncNow() {
-    if (!bisyncJob) return;
+    if (bisyncFormLocalPath.trim() === "") return;
     bisyncBusy = true;
     bisyncError = null;
     bisyncRunResult = null;
     try {
-      bisyncRunResult = await invoke<BisyncRunEntry>("run_bisync_job", { name: bisyncJob.name });
+      await persistBisync();
+      bisyncRunResult = await invoke<BisyncRunEntry>("run_bisync_job", { name: remoteName });
     } catch (error) {
       bisyncError = String(error);
     } finally {

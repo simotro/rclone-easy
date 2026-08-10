@@ -356,6 +356,7 @@ async fn start_rcd_in(config_path: &Path, password: Option<&str>) -> Result<RcdP
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    crate::rclone_bin::hide_console_window_tokio(&mut command);
 
     if let Some(password) = password {
         command.env("RCLONE_CONFIG_PASS", password);

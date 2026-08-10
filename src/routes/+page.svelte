@@ -169,10 +169,12 @@
   }
 
   // --- Password del backup (export/import) ---
-  // Il bundle contiene rclone.conf, le cui credenziali rclone "offusca"
-  // con un XOR banale reversibile da chiunque conosca l'algoritmo, non una
-  // cifratura vera — il backup va sempre cifrato con una password scelta
-  // dall'utente prima di toccare il disco.
+  // Il bundle contiene solo rclone.conf (i remote, non mount/backup/bisync:
+  // quelli dipendono da cartelle locali specifiche di questa macchina). Le
+  // credenziali che rclone "offusca" nel file sono reversibili da chiunque
+  // conosca l'algoritmo, non una cifratura vera — una password è quindi
+  // consigliata, ma facoltativa: lasciarla vuota salva il backup in chiaro,
+  // scelta esplicita dell'utente dopo essere stato avvisato.
   let exportPasswordModalOpen = $state(false);
   let exportPassword = $state("");
   let exportPasswordConfirm = $state("");
@@ -186,8 +188,16 @@
   }
 
   async function confirmExportPassword() {
+    if (exportPassword === "" && exportPasswordConfirm === "") {
+      if (!confirm("Senza password il backup sarà leggibile in chiaro da chiunque apra il file. Continuare comunque?")) {
+        return;
+      }
+      exportPasswordModalOpen = false;
+      await exportBackup(undefined);
+      return;
+    }
     if (exportPassword.length < 8) {
-      exportPasswordError = "La password deve avere almeno 8 caratteri.";
+      exportPasswordError = "La password deve avere almeno 8 caratteri, oppure lasciala vuota per non cifrare il backup.";
       return;
     }
     if (exportPassword !== exportPasswordConfirm) {
@@ -199,19 +209,21 @@
     await exportBackup(password);
   }
 
-  async function exportBackup(password: string) {
+  async function exportBackup(password: string | undefined) {
     importExportError = null;
     importExportOk = null;
     const destination = await saveFileDialog({
       title: "Salva backup di Rclone Easy",
-      defaultPath: "rclone-easy-backup.age",
-      filters: [{ name: "Backup Rclone Easy (cifrato)", extensions: ["age"] }],
+      defaultPath: password ? "rclone-easy-backup.age" : "rclone-easy-backup.json",
+      filters: password
+        ? [{ name: "Backup Rclone Easy (cifrato)", extensions: ["age"] }]
+        : [{ name: "Backup Rclone Easy (in chiaro)", extensions: ["json"] }],
     });
     if (!destination) return;
     importExportBusy = true;
     try {
-      await invoke("export_backup", { destinationPath: destination, password });
-      importExportOk = `Backup cifrato salvato in ${destination}`;
+      await invoke("export_backup", { destinationPath: destination, password: password ?? null });
+      importExportOk = password ? `Backup cifrato salvato in ${destination}` : `Backup in chiaro salvato in ${destination}`;
     } catch (error) {
       importExportError = String(error);
     } finally {
@@ -234,7 +246,7 @@
     if (typeof source !== "string") return;
     if (
       !confirm(
-        "Ripristinare questo backup sovrascrive tutti i remote, mount, backup e sincronizzazioni bidirezionali attuali di Rclone Easy. L'operazione non è reversibile. Continuare?",
+        "Ripristinare questo backup sovrascrive tutti i remote attuali di Rclone Easy (non mount/backup/sincronizzazioni, che restano quelli già configurati su questo PC). L'operazione non è reversibile. Continuare?",
       )
     ) {
       return;
@@ -347,11 +359,11 @@
       </button>
       <button type="button" class="menu-option" onclick={openExportPasswordModal} disabled={importExportBusy}>
         <strong>Crea backup Rclone Easy</strong>
-        <span>Salva, cifrato con una password a tua scelta, remote, mount, backup e sincronizzazioni bidirezionali attuali.</span>
+        <span>Salva i remote configurati (non mount/backup/sincronizzazioni, legati a cartelle di questo PC), opzionalmente cifrati con una password a tua scelta.</span>
       </button>
       <button type="button" class="menu-option" onclick={restoreBackup} disabled={importExportBusy}>
         <strong>Ripristina backup Rclone Easy</strong>
-        <span>Sovrascrive la configurazione attuale con quella di un file di backup.</span>
+        <span>Sovrascrive i remote attuali con quelli di un file di backup.</span>
       </button>
       {#if importExportBusy}
         <p class="hint">In corso…</p>
@@ -373,11 +385,12 @@
   <div class="stack-form">
     <p class="hint">
       Il backup contiene le credenziali dei tuoi remote: scegli una password per cifrarlo. Ti servirà la stessa
-      password per ripristinarlo in futuro — se la perdi, il backup diventa inutilizzabile.
+      password per ripristinarlo in futuro — se la perdi, il backup diventa inutilizzabile. Puoi anche lasciare
+      entrambi i campi vuoti: il backup verrà salvato in chiaro, leggibile da chiunque apra il file.
     </p>
     <label class="stack-field">
-      Password
-      <input type="password" bind:value={exportPassword} placeholder="Almeno 8 caratteri" />
+      Password (facoltativa)
+      <input type="password" bind:value={exportPassword} placeholder="Almeno 8 caratteri, o vuoto per non cifrare" />
     </label>
     <label class="stack-field">
       Conferma password
@@ -395,8 +408,8 @@
 <Modal bind:open={importPasswordModalOpen} title="Password del backup">
   <div class="stack-form">
     <p class="hint">
-      Inserisci la password scelta al momento del backup. Lascia vuoto solo se è un backup non cifrato di una
-      versione precedente dell'app.
+      Inserisci la password scelta al momento del backup. Lascia vuoto se il backup è stato salvato in chiaro,
+      senza password.
     </p>
     <label class="stack-field">
       Password

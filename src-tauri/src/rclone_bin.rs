@@ -1,6 +1,42 @@
 use std::path::Path;
 use tokio::process::Command;
 
+/// Su Windows, un eseguibile console (`rclone.exe`) lanciato da un'app GUI
+/// senza questo flag apre sempre una finestra cmd visibile — anche per
+/// invocazioni brevissime (`listremotes`, `config dump`), che producono un
+/// flash percepibile, e per il demone `rcd` in particolare una finestra che
+/// resta aperta per tutta la vita dell'app. Oltre al fastidio visivo, è
+/// pericoloso: chiudere quella finestra con la X manda un evento che
+/// termina il processo agganciato, uccidendo il demone da sotto i piedi
+/// dell'app. `0x08000000` = `CREATE_NO_WINDOW`
+/// (<https://learn.microsoft.com/windows/win32/procthread/process-creation-flags>).
+/// Nessun equivalente necessario su Linux/macOS, dove i processi figli non
+/// hanno mai una finestra propria.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Applica `CREATE_NO_WINDOW` a un `std::process::Command` — no-op sulle
+/// altre piattaforme, così i chiamanti possono invocarla incondizionatamente.
+pub(crate) fn hide_console_window(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
+/// Stessa cosa per `tokio::process::Command`, che espone lo stesso
+/// `creation_flags` come metodo inerente (non tramite `CommandExt`) solo
+/// sotto `cfg(windows)`.
+pub(crate) fn hide_console_window_tokio(command: &mut Command) -> &mut Command {
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// Nome del sidecar Tauri per rclone (`externalBin` in tauri.conf.json),
 /// convenzione `<nome>-<target-triple>[.exe su Windows]`.
 #[cfg(target_os = "windows")]
@@ -71,8 +107,9 @@ fn parse_version(stdout: &str) -> Result<String, String> {
 }
 
 async fn check_rclone_installed_in() -> Result<String, String> {
-    let output = Command::new(resolve_rclone_binary())
-        .arg("version")
+    let mut command = Command::new(resolve_rclone_binary());
+    command.arg("version");
+    let output = hide_console_window_tokio(&mut command)
         .output()
         .await
         .map_err(|e| format!("rclone non trovato: {e}"))?;

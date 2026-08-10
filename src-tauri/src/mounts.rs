@@ -177,6 +177,71 @@ pub(crate) fn is_mounted(active: &[String], mount_point: &str) -> bool {
     active.iter().any(|p| Path::new(p) == Path::new(mount_point))
 }
 
+/// `true` per un percorso a lettera di unità Windows (`X:` o `X:\`) — non è
+/// una cartella reale sul filesystem, non va mai toccato da
+/// `prepare_windows_mount_point` sotto. Separata dal resto (non gated a
+/// `cfg(windows)`) solo per poterla testare anche su questa piattaforma di
+/// sviluppo, stesso schema di `rcd::is_our_orphaned_rcd`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_drive_letter_mount_point(path: &str) -> bool {
+    let chars: Vec<char> = path.chars().collect();
+    matches!(chars.as_slice(), [letter, ':'] | [letter, ':', '\\'] if letter.is_ascii_alphabetic())
+}
+
+/// `true` per i metadati che Windows/Explorer scrivono da soli in una
+/// cartella altrimenti vuota (`desktop.ini`, personalizzazioni della
+/// cartella; `Thumbs.db`, cache miniature su filesystem senza indicizzazione
+/// abilitata) — mai dati dell'utente, quindi non devono impedire di
+/// considerare "vuota" una cartella di mount che all'utente appare tale in
+/// Esplora Risorse. Confronto case-insensitive: Windows non distingue
+/// maiuscole/minuscole nei nomi file. Non gated a `cfg(windows)` solo per
+/// poterla testare anche su questa piattaforma di sviluppo.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_ignorable_windows_metadata_file(file_name: &str) -> bool {
+    matches!(file_name.to_lowercase().as_str(), "desktop.ini" | "thumbs.db")
+}
+
+/// Su Windows, WinFsp (usato da rclone per il mount) rifiuta di montare su
+/// una cartella che esiste già — `"mountpoint path already exists"` — il
+/// contrario esatto di Linux/macOS (FUSE), dove la cartella DEVE già
+/// esistere. Il selettore di cartelle della UI fa scegliere solo cartelle
+/// esistenti (comportamento corretto per Linux/macOS): su Windows va quindi
+/// rimossa appena prima di montare, sicuro solo se risulta vuota — a parte
+/// eventuali metadati di Explorer (sopra), mai dati reali dell'utente — perché
+/// WinFsp la ricrea lui stesso. Se contiene altro, meglio un errore chiaro
+/// qui che lasciare a rclone il messaggio criptico originale.
+#[cfg(target_os = "windows")]
+fn prepare_windows_mount_point(mount_point: &str) -> Result<(), String> {
+    let path = Path::new(mount_point);
+    if is_drive_letter_mount_point(mount_point) || !path.exists() {
+        return Ok(());
+    }
+    if !path.is_dir() {
+        return Err(format!("'{mount_point}' esiste già e non è una cartella"));
+    }
+    let entries: Vec<_> = std::fs::read_dir(path)
+        .map_err(|e| format!("impossibile leggere '{mount_point}': {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    let has_real_content =
+        entries.iter().any(|entry| !is_ignorable_windows_metadata_file(&entry.file_name().to_string_lossy()));
+    if has_real_content {
+        return Err(format!(
+            "'{mount_point}' esiste già e non è vuota: su Windows la cartella di mount non deve esistere ancora, scegline una vuota o non ancora creata"
+        ));
+    }
+    for entry in &entries {
+        std::fs::remove_file(entry.path())
+            .map_err(|e| format!("impossibile preparare '{mount_point}' per il mount: {e}"))?;
+    }
+    std::fs::remove_dir(path).map_err(|e| format!("impossibile preparare '{mount_point}' per il mount: {e}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn prepare_windows_mount_point(_mount_point: &str) -> Result<(), String> {
+    Ok(())
+}
+
 fn app_config_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path().app_config_dir().map_err(|e| format!("impossibile determinare la cartella di configurazione: {e}"))
 }
@@ -301,9 +366,12 @@ pub async fn mount_now(app: AppHandle, state: tauri::State<'_, RcdState>, name: 
         crate::activity::ensure_no_other_active_service(&state, &config_dir, remote_name, crate::activity::ServiceKind::Mount)
             .await?;
     }
-    let result = rcd::call(&state, "mount/mount", serde_json::json!({ "fs": mount.remote, "mountPoint": mount.mount_point }))
-        .await
-        .map(|_| ());
+    let result = match prepare_windows_mount_point(&mount.mount_point) {
+        Ok(()) => rcd::call(&state, "mount/mount", serde_json::json!({ "fs": mount.remote, "mountPoint": mount.mount_point }))
+            .await
+            .map(|_| ()),
+        Err(e) => Err(e),
+    };
     record_mount_event(&config_dir, &name, "mount", &result);
     result
 }
@@ -393,6 +461,9 @@ pub async fn unmount_now(app: AppHandle, state: tauri::State<'_, RcdState>, name
 pub(crate) async fn auto_mount_all(state: &RcdState, config_dir: &Path) {
     let Ok(mounts) = load_from_dir(config_dir) else { return };
     for mount in mounts.iter().filter(|m| m.auto_mount) {
+        if prepare_windows_mount_point(&mount.mount_point).is_err() {
+            continue;
+        }
         let _ =
             rcd::call(state, "mount/mount", serde_json::json!({ "fs": mount.remote, "mountPoint": mount.mount_point }))
                 .await;
@@ -520,6 +591,35 @@ mod tests {
     fn delete_mount_fails_for_unknown_name() {
         let dir = TempDir::new("mounts-delete-unknown");
         assert!(delete_mount_in(&dir.path, "non-esiste").is_err());
+    }
+
+    #[test]
+    fn is_ignorable_windows_metadata_file_matches_known_names_case_insensitively() {
+        assert!(is_ignorable_windows_metadata_file("desktop.ini"));
+        assert!(is_ignorable_windows_metadata_file("Desktop.ini"));
+        assert!(is_ignorable_windows_metadata_file("Thumbs.db"));
+        assert!(!is_ignorable_windows_metadata_file("documento.txt"));
+    }
+
+    #[test]
+    fn is_drive_letter_mount_point_matches_bare_and_trailing_backslash_forms() {
+        assert!(is_drive_letter_mount_point("X:"));
+        assert!(is_drive_letter_mount_point("x:\\"));
+        assert!(!is_drive_letter_mount_point("X:\\cartella"));
+        assert!(!is_drive_letter_mount_point("/home/utente/cloud"));
+        assert!(!is_drive_letter_mount_point("1:"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn prepare_windows_mount_point_is_a_no_op_on_this_platform() {
+        // Su Linux/macOS il mountpoint deve continuare a esistere: qui la
+        // funzione non deve mai toccare il filesystem, a differenza della
+        // variante Windows (non compilata su questa piattaforma).
+        let dir = TempDir::new("mounts-windows-prepare-noop");
+        std::fs::create_dir_all(&dir.path).unwrap();
+        assert!(prepare_windows_mount_point(&dir.path.to_string_lossy()).is_ok());
+        assert!(dir.path.exists(), "su questa piattaforma la cartella non deve essere toccata");
     }
 
     #[test]

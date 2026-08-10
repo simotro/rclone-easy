@@ -347,6 +347,7 @@ async fn execute_bisync(
 
     let mut command = tokio::process::Command::new(crate::rclone_bin::resolve_rclone_binary());
     command.args(&args).stdin(Stdio::null());
+    crate::rclone_bin::hide_console_window_tokio(&mut command);
     if let Some(password) = config_password {
         command.env("RCLONE_CONFIG_PASS", password);
     }

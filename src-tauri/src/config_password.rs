@@ -64,6 +64,7 @@ fn run_config_encryption(
 ) -> Result<(), String> {
     let mut command = std::process::Command::new(crate::rclone_bin::resolve_rclone_binary());
     command.args(["config", "encryption", subcommand, "--config", &config_path.to_string_lossy()]);
+    crate::rclone_bin::hide_console_window(&mut command);
 
     if current_password.is_some() || new_password.is_some() {
         command.args(["--password-command", &format!("{} {PASSWORD_HELPER_ARG}", password_helper_exe.to_string_lossy())]);

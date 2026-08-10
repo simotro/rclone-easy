@@ -46,6 +46,7 @@ async fn detect_existing_remotes_in(config_path: Option<&Path>) -> Result<Vec<Ex
     let mut command = Command::new(crate::rclone_bin::resolve_rclone_binary());
     command.args(["listremotes", "--long"]);
     apply_config_path(&mut command, config_path);
+    crate::rclone_bin::hide_console_window_tokio(&mut command);
     let output = command.output().await.map_err(|e| format!("impossibile eseguire 'rclone listremotes': {e}"))?;
 
     if !output.status.success() {
@@ -81,8 +82,10 @@ fn extract_config_file_path(stdout: &str) -> Option<&str> {
 /// il selettore parte semplicemente senza percorso preselezionato.
 #[tauri::command]
 pub async fn standard_rclone_config_path() -> Result<Option<String>, String> {
-    let output = Command::new(crate::rclone_bin::resolve_rclone_binary())
-        .args(["config", "file"])
+    let mut command = Command::new(crate::rclone_bin::resolve_rclone_binary());
+    command.args(["config", "file"]);
+    crate::rclone_bin::hide_console_window_tokio(&mut command);
+    let output = command
         .output()
         .await
         .map_err(|e| format!("impossibile eseguire 'rclone config file': {e}"))?;
@@ -141,6 +144,7 @@ async fn dump_remote_parameters_in(
     let mut command = Command::new(crate::rclone_bin::resolve_rclone_binary());
     command.args(["config", "dump"]);
     apply_config_path(&mut command, config_path);
+    crate::rclone_bin::hide_console_window_tokio(&mut command);
     let output = command.output().await.map_err(|e| format!("impossibile eseguire 'rclone config dump': {e}"))?;
 
     if !output.status.success() {
