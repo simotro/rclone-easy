@@ -330,17 +330,22 @@ pub async fn mount_now_and_open(app: AppHandle, state: tauri::State<'_, RcdState
 }
 
 /// Apre `path` nel file manager di sistema. Variante Linux: chiama
-/// `xdg-open` direttamente invece di passare da `tauri_plugin_opener`,
-/// ripulendo esplicitamente l'ambiente del sottoprocesso dalle variabili
-/// iniettate dal runtime AppImage (`LD_LIBRARY_PATH` e affini, puntano alle
-/// librerie bundlate nell'AppImage — vedi `AppRun` generato da
-/// `linuxdeploy`). Senza questo, `xdg-open` — che internamente parla con
-/// gio/D-Bus per chiedere al file manager reale di aprire la cartella —
-/// carica le librerie glib/gio sbagliate quando l'app gira da un'AppImage e
-/// fallisce in silenzio: il montaggio riesce ma la cartella non si apre mai
-/// (riprodotto: funzionava con `npm run tauri dev`, che non ha questo
-/// inquinamento d'ambiente, non nell'AppImage pacchettizzata). Innocuo se le
-/// variabili non erano già impostate (fuori da un'AppImage).
+/// `xdg-open` direttamente invece di passare da `tauri_plugin_opener`, con
+/// l'ambiente del sottoprocesso ripulito da ciò che `AppRun` (generato da
+/// `linuxdeploy` per il bundling AppImage) inietta:
+/// - `LD_LIBRARY_PATH` e affini (`GIO_MODULE_DIR`, `QT_PLUGIN_PATH`, ecc.)
+///   puntano alle librerie bundlate nell'AppImage, non quelle di sistema;
+/// - `PATH` antepone `$APPDIR/usr/bin`, dove l'AppDir bundla una propria
+///   copia di `xdg-open` — identica byte per byte a quella di sistema
+///   (verificato), eppure invocata da lì non apre il file manager (spawn
+///   riuscito, `exit status: 0`, nessuna finestra — causa non identificata
+///   con certezza, ma il sintomo sparisce forzando la risoluzione verso la
+///   copia di sistema).
+/// Confermato risolto da Simone su AppImage reale dopo aver aggiunto anche
+/// il reset di `PATH` (il solo `env_remove` delle altre variabili non
+/// bastava). Senza questo fix il montaggio riesce ma la cartella non si
+/// apre mai, solo nell'AppImage pacchettizzata — funzionava già con `npm
+/// run tauri dev`, che non ha questo inquinamento d'ambiente.
 #[cfg(target_os = "linux")]
 fn open_in_file_manager(path: &str) {
     let mut command = std::process::Command::new("xdg-open");
@@ -359,29 +364,8 @@ fn open_in_file_manager(path: &str) {
     ] {
         command.env_remove(var);
     }
-    // Diagnostica TEMPORANEA (eprintln!, visibile solo lanciando l'AppImage
-    // da terminale): il problema segnalato ("il mount riesce ma il file
-    // manager non si apre, solo nell'AppImage") non si è confermato in
-    // laboratorio — xdg-open/kde-open restituiscono successo anche
-    // riproducendo a mano l'identico ambiente di AppRun. Serve sapere se lo
-    // spawn stesso fallisce (percorso di xdg-open risolto sbagliato,
-    // permessi, ecc.) o se il problema è più a valle. Da rimuovere una
-    // volta capito cosa succede davvero.
-    eprintln!("[mounts] apro '{path}' con: {command:?}");
-    match command.spawn() {
-        Ok(mut child) => {
-            eprintln!("[mounts] xdg-open avviato, pid {:?}", child.id());
-            // Aspetta l'uscita su un thread a parte (non blocca il resto
-            // dell'app): finora non controllavamo affatto il codice di
-            // uscita di xdg-open, solo che fosse partito — potrebbe finire
-            // con un errore che non vedevamo.
-            std::thread::spawn(move || match child.wait() {
-                Ok(status) => eprintln!("[mounts] xdg-open terminato con: {status}"),
-                Err(e) => eprintln!("[mounts] impossibile attendere xdg-open: {e}"),
-            });
-        }
-        Err(e) => eprintln!("[mounts] xdg-open non è partito: {e}"),
-    }
+    command.env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    let _ = command.spawn();
 }
 
 /// Altre piattaforme: nessun runtime AppImage a inquinare l'ambiente,
