@@ -359,7 +359,19 @@ fn open_in_file_manager(path: &str) {
     ] {
         command.env_remove(var);
     }
-    let _ = command.spawn();
+    // Diagnostica TEMPORANEA (eprintln!, visibile solo lanciando l'AppImage
+    // da terminale): il problema segnalato ("il mount riesce ma il file
+    // manager non si apre, solo nell'AppImage") non si è confermato in
+    // laboratorio — xdg-open/kde-open restituiscono successo anche
+    // riproducendo a mano l'identico ambiente di AppRun. Serve sapere se lo
+    // spawn stesso fallisce (percorso di xdg-open risolto sbagliato,
+    // permessi, ecc.) o se il problema è più a valle. Da rimuovere una
+    // volta capito cosa succede davvero.
+    eprintln!("[mounts] apro '{path}' con: {command:?}");
+    match command.spawn() {
+        Ok(child) => eprintln!("[mounts] xdg-open avviato, pid {:?}", child.id()),
+        Err(e) => eprintln!("[mounts] xdg-open non è partito: {e}"),
+    }
 }
 
 /// Altre piattaforme: nessun runtime AppImage a inquinare l'ambiente,
