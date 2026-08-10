@@ -55,6 +55,11 @@
           "/usr/share/icons/hicolor/scalable/apps/rclone-easy.svg": "icons/icon.svg"
         }
       }
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
+      }
     }
   }
 }

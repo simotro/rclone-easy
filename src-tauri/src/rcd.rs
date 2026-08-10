@@ -318,6 +318,71 @@ fn cleanup_orphaned_rcd_processes(config_path: &Path) {
     }
 }
 
+/// Estrae i PID di eventuali `rclone.exe rcd` orfani dall'output JSON di
+/// `Get-CimInstance Win32_Process` (PowerShell) — unico modo pratico su
+/// Windows per leggere la riga di comando completa di un processo (a
+/// differenza di `/proc/<pid>/cmdline` su Linux, `tasklist` da solo non la
+/// mostra). Separata dalla chiamata PowerShell per poterla testare con dati
+/// sintetici, stesso schema di `is_our_orphaned_rcd`. PowerShell restituisce
+/// un oggetto singolo (non un array) quando c'è un solo risultato — entrambe
+/// le forme vanno gestite. Riconosciuto per corrispondenza esatta del
+/// percorso di config passato con `--config` (mai un rclone.exe generico
+/// dell'utente per altri scopi), più la presenza di `rcd` come sottocomando
+/// (non solo nel percorso, che potrebbe contenerlo per caso).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn find_orphaned_rclone_pids_windows(cim_json: &str, config_path_str: &str) -> Vec<u32> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(cim_json) else { return Vec::new() };
+    let entries: Vec<&serde_json::Value> = match &value {
+        serde_json::Value::Array(arr) => arr.iter().collect(),
+        serde_json::Value::Object(_) => vec![&value],
+        _ => Vec::new(),
+    };
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let pid = entry.get("ProcessId")?.as_u64()? as u32;
+            let cmdline = entry.get("CommandLine")?.as_str()?;
+            if cmdline.contains(" rcd ") && cmdline.contains(config_path_str) {
+                Some(pid)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Equivalente Windows di `cleanup_orphaned_rcd_processes` sopra — colma il
+/// gap segnalato da Simone il 10/8/2026: chiudere l'app (che resta in tray)
+/// o disinstallarla può lasciare `rclone.exe` in esecuzione (nessun
+/// gestore SIGTERM/SIGINT equivalente su Windows, vedi
+/// `spawn_signal_shutdown_handler` in `lib.rs`), bloccando poi un
+/// reinstall/aggiornamento successivo ("Error opening file for writing" —
+/// risolto anche lato installer in `windows/hooks.nsh`, questo è il lato
+/// runtime dello stesso problema). Best-effort, come la versione Linux: un
+/// fallimento qui (PowerShell non disponibile, nessun processo trovato) non
+/// deve impedire l'avvio dell'app.
+#[cfg(all(target_os = "windows", not(test)))]
+fn cleanup_orphaned_rcd_processes(config_path: &Path) {
+    let config_path_str = config_path.to_string_lossy().to_string();
+    let mut command = std::process::Command::new("powershell");
+    command.args([
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_Process -Filter \"Name='rclone.exe'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
+    ]);
+    crate::rclone_bin::hide_console_window(&mut command);
+    let Ok(output) = command.output() else { return };
+    let Ok(text) = String::from_utf8(output.stdout) else { return };
+
+    for pid in find_orphaned_rclone_pids_windows(&text, &config_path_str) {
+        eprintln!("trovato un 'rclone rcd' orfano di una sessione precedente (pid {pid}), lo termino");
+        let mut kill = std::process::Command::new("taskkill");
+        kill.args(["/F", "/PID", &pid.to_string()]);
+        crate::rclone_bin::hide_console_window(&mut kill);
+        let _ = kill.status();
+    }
+}
+
 /// `password`: se la config è protetta (vedi `config_password.rs`), la
 /// passphrase da passare a rclone via `RCLONE_CONFIG_PASS`. Una password
 /// sbagliata **non** fa fallire l'avvio del demone né `wait_until_ready`:
@@ -333,7 +398,7 @@ async fn start_rcd_in(config_path: &Path, password: Option<&str>) -> Result<RcdP
             .map_err(|e| format!("impossibile creare la cartella di configurazione '{}': {e}", parent.display()))?;
     }
 
-    #[cfg(all(target_os = "linux", not(test)))]
+    #[cfg(any(all(target_os = "linux", not(test)), all(target_os = "windows", not(test))))]
     cleanup_orphaned_rcd_processes(config_path);
 
     let port = pick_free_port()?;
@@ -510,6 +575,34 @@ pub(crate) mod tests {
         let args: Vec<String> =
             ["cat", "/a/rclone.conf"].into_iter().map(String::from).collect();
         assert!(!is_our_orphaned_rcd(&args, "/a/rclone.conf"));
+    }
+
+    #[test]
+    fn find_orphaned_rclone_pids_windows_matches_our_config_path_as_a_single_object() {
+        let json = r#"{"ProcessId":1234,"CommandLine":"\"C:\\Users\\simone\\AppData\\Local\\rclone-easy\\rclone.exe\" rcd --rc-addr 127.0.0.1:9999 --config \"C:\\Users\\simone\\AppData\\Roaming\\RcloneEasy\\rclone.conf\""}"#;
+        let pids = find_orphaned_rclone_pids_windows(json, r"C:\Users\simone\AppData\Roaming\RcloneEasy\rclone.conf");
+        assert_eq!(pids, vec![1234]);
+    }
+
+    #[test]
+    fn find_orphaned_rclone_pids_windows_matches_multiple_results_as_an_array() {
+        let json = r#"[
+            {"ProcessId":1,"CommandLine":"\"rclone.exe\" rcd --config \"C:\\a\\rclone.conf\""},
+            {"ProcessId":2,"CommandLine":"\"rclone.exe\" rcd --config \"C:\\b\\rclone.conf\""}
+        ]"#;
+        assert_eq!(find_orphaned_rclone_pids_windows(json, r"C:\a\rclone.conf"), vec![1]);
+    }
+
+    #[test]
+    fn find_orphaned_rclone_pids_windows_ignores_a_non_rcd_invocation() {
+        let json = r#"{"ProcessId":5,"CommandLine":"\"rclone.exe\" version --config \"C:\\a\\rclone.conf\""}"#;
+        assert!(find_orphaned_rclone_pids_windows(json, r"C:\a\rclone.conf").is_empty());
+    }
+
+    #[test]
+    fn find_orphaned_rclone_pids_windows_handles_no_results() {
+        assert!(find_orphaned_rclone_pids_windows("", r"C:\a\rclone.conf").is_empty());
+        assert!(find_orphaned_rclone_pids_windows("null", r"C:\a\rclone.conf").is_empty());
     }
 
     #[test]
