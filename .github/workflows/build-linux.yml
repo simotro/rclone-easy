@@ -18,7 +18,7 @@ jobs:
     # riconosce, facendo fallire il bundling AppImage.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Installa le dipendenze di sistema di Tauri
         run: |
@@ -35,9 +35,9 @@ jobs:
             libssl-dev \
             libgtk-3-dev
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -55,7 +55,7 @@ jobs:
         run: npm run tauri build
 
       - name: Carica i pacchetti come artefatti
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rclone-easy-linux
           path: |
