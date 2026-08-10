@@ -323,10 +323,50 @@ pub async fn mount_now_and_open(app: AppHandle, state: tauri::State<'_, RcdState
     let config_dir = app_config_dir(&app)?;
     if let Ok(mounts) = load_from_dir(&config_dir) {
         if let Some(mount) = mounts.iter().find(|m| m.name == name) {
-            let _ = tauri_plugin_opener::open_path(&mount.mount_point, None::<&str>);
+            open_in_file_manager(&mount.mount_point);
         }
     }
     Ok(())
+}
+
+/// Apre `path` nel file manager di sistema. Variante Linux: chiama
+/// `xdg-open` direttamente invece di passare da `tauri_plugin_opener`,
+/// ripulendo esplicitamente l'ambiente del sottoprocesso dalle variabili
+/// iniettate dal runtime AppImage (`LD_LIBRARY_PATH` e affini, puntano alle
+/// librerie bundlate nell'AppImage — vedi `AppRun` generato da
+/// `linuxdeploy`). Senza questo, `xdg-open` — che internamente parla con
+/// gio/D-Bus per chiedere al file manager reale di aprire la cartella —
+/// carica le librerie glib/gio sbagliate quando l'app gira da un'AppImage e
+/// fallisce in silenzio: il montaggio riesce ma la cartella non si apre mai
+/// (riprodotto: funzionava con `npm run tauri dev`, che non ha questo
+/// inquinamento d'ambiente, non nell'AppImage pacchettizzata). Innocuo se le
+/// variabili non erano già impostate (fuori da un'AppImage).
+#[cfg(target_os = "linux")]
+fn open_in_file_manager(path: &str) {
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(path);
+    for var in [
+        "LD_LIBRARY_PATH",
+        "XDG_DATA_DIRS",
+        "GSETTINGS_SCHEMA_DIR",
+        "GST_PLUGIN_SYSTEM_PATH",
+        "GST_PLUGIN_SYSTEM_PATH_1_0",
+        "QT_PLUGIN_PATH",
+        "PERLLIB",
+        "PYTHONPATH",
+        "GIO_MODULE_DIR",
+        "GIO_EXTRA_MODULES",
+    ] {
+        command.env_remove(var);
+    }
+    let _ = command.spawn();
+}
+
+/// Altre piattaforme: nessun runtime AppImage a inquinare l'ambiente,
+/// `tauri_plugin_opener` basta.
+#[cfg(not(target_os = "linux"))]
+fn open_in_file_manager(path: &str) {
+    let _ = tauri_plugin_opener::open_path(path, None::<&str>);
 }
 
 #[tauri::command]
