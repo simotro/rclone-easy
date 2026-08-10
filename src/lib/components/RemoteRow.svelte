@@ -282,6 +282,7 @@
     mountFormAuto = mountEntry?.autoMount ?? false;
     mountFormRemotePath = mountEntry ? remoteSubPathOf(mountEntry.remote) : "";
     mountError = null;
+    winFspInstallStarted = false;
     mountModalOpen = true;
   }
 
@@ -323,6 +324,26 @@
       mountError = String(error);
     } finally {
       mountBusy = false;
+    }
+  }
+
+  // Riconosce il messaggio tradotto da `friendly_mount_error` (mounts.rs) —
+  // la parola "WinFsp" è parte del contratto tra backend e frontend, non
+  // solo testo a caso: mostra il pulsante "Installa WinFsp" invece del solo
+  // messaggio d'errore quando il mount fallisce per questo motivo specifico.
+  let mountErrorNeedsWinFsp = $derived(mountError?.includes("WinFsp") ?? false);
+  let winFspInstallBusy = $state(false);
+  let winFspInstallStarted = $state(false);
+
+  async function installWinFsp() {
+    winFspInstallBusy = true;
+    try {
+      await invoke("download_and_launch_winfsp_installer");
+      winFspInstallStarted = true;
+    } catch (error) {
+      mountError = String(error);
+    } finally {
+      winFspInstallBusy = false;
     }
   }
 
@@ -735,6 +756,17 @@
     {/if}
     {#if mountError}
       <p class="error">✗ {mountError}</p>
+    {/if}
+    {#if mountErrorNeedsWinFsp}
+      {#if winFspInstallStarted}
+        <p class="hint">
+          Installer di WinFsp avviato in una finestra separata: completalo, poi torna qui e riprova a montare.
+        </p>
+      {:else}
+        <button type="button" onclick={installWinFsp} disabled={winFspInstallBusy}>
+          {winFspInstallBusy ? "Scaricamento in corso…" : "Installa WinFsp"}
+        </button>
+      {/if}
     {/if}
     <div class="row-actions modal-actions">
       {#if mountEntry?.mounted}

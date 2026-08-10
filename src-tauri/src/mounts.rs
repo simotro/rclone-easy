@@ -357,6 +357,105 @@ fn record_mount_event(config_dir: &Path, name: &str, action: &str, result: &Resu
     let _ = save_to_dir(config_dir, &mounts);
 }
 
+/// Su Windows, montare senza WinFsp installato fallisce con un messaggio di
+/// rclone tecnico e in inglese (`cgofuse: cannot find winfsp`, con un link
+/// all'installer) — WinFsp non è bundlato né rilevato in anticipo dall'app
+/// (richiede un installer MSI a parte, fuori dal nostro controllo), quindi
+/// l'errore va e viene esattamente quando l'utente ci sbatte contro per la
+/// prima volta. Qui lo si riconosce e si sostituisce con un messaggio
+/// comprensibile nella stessa lingua del resto dell'app, con l'indicazione
+/// diretta di dove scaricarlo — altri errori di mount passano invariati.
+fn friendly_mount_error(raw: String) -> String {
+    if raw.to_lowercase().contains("cannot find winfsp") {
+        "Per montare un remote su Windows serve WinFsp, non incluso in Rclone Easy. Usa il pulsante \"Installa WinFsp\" qui sotto, poi riprova a montare.".to_string()
+    } else {
+        raw
+    }
+}
+
+/// Estrae l'URL di download dell'ultimo installer `.msi` di WinFsp dalla
+/// risposta JSON di GitHub (`GET .../releases/latest`) — separata dalla
+/// chiamata di rete per poterla testare con dati sintetici.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn find_msi_download_url(release: &serde_json::Value) -> Result<String, String> {
+    release
+        .get("assets")
+        .and_then(|assets| assets.as_array())
+        .and_then(|assets| {
+            assets.iter().find_map(|asset| {
+                let name = asset.get("name")?.as_str()?;
+                if !name.ends_with(".msi") {
+                    return None;
+                }
+                asset.get("browser_download_url")?.as_str().map(str::to_string)
+            })
+        })
+        .ok_or_else(|| "nessun installer .msi trovato nell'ultima release di WinFsp su GitHub".to_string())
+}
+
+/// Scarica ed esegue l'installer ufficiale di WinFsp, invece di ridistribuirlo
+/// dentro il pacchetto di Rclone Easy: la licenza di WinFsp (GPLv3 con
+/// un'eccezione FLOSS, più una licenza commerciale a pagamento) non è stata
+/// verificata da noi per la ridistribuzione, mentre scaricarlo al momento dal
+/// repository ufficiale non solleva questo dubbio. Interroga la API "ultima
+/// release" di GitHub invece di un URL fisso, perché il nome del file `.msi`
+/// include il numero di versione e cambia a ogni release. L'installer viene
+/// lanciato in modo interattivo (non silenzioso, niente flag `/quiet`): mostra
+/// la propria interfaccia e i propri termini di licenza, lasciando all'utente
+/// la scelta di accettarli — evita anche a noi di dover decidere se
+/// un'installazione silenziosa sarebbe lecita senza un consenso esplicito.
+/// Il comando torna appena l'installer è stato avviato, senza aspettare che
+/// l'utente lo completi: la UI deve invitarlo a riprovare a montare dopo.
+/// Registrato per tutte le piattaforme (serve un unico elenco di comandi in
+/// `lib.rs`), ma ha senso solo su Windows: altrove fallisce subito senza
+/// toccare la rete né lanciare nulla.
+#[tauri::command]
+pub async fn download_and_launch_winfsp_installer() -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        return Err("WinFsp serve solo su Windows: questa piattaforma non ne ha bisogno".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    download_and_launch_winfsp_installer_windows().await
+}
+
+#[cfg(target_os = "windows")]
+async fn download_and_launch_winfsp_installer_windows() -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .user_agent("rclone-easy")
+        .build()
+        .map_err(|e| format!("impossibile preparare la richiesta a GitHub: {e}"))?;
+
+    let release: serde_json::Value = client
+        .get("https://api.github.com/repos/winfsp/winfsp/releases/latest")
+        .send()
+        .await
+        .map_err(|e| format!("impossibile contattare GitHub per scaricare WinFsp: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("risposta di GitHub non interpretabile: {e}"))?;
+    let asset_url = find_msi_download_url(&release)?;
+
+    let bytes = client
+        .get(&asset_url)
+        .send()
+        .await
+        .map_err(|e| format!("impossibile scaricare l'installer di WinFsp: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("impossibile scaricare l'installer di WinFsp: {e}"))?;
+
+    let installer_path = std::env::temp_dir().join("rclone-easy-winfsp-installer.msi");
+    std::fs::write(&installer_path, &bytes)
+        .map_err(|e| format!("impossibile salvare l'installer di WinFsp: {e}"))?;
+
+    let mut command = std::process::Command::new("msiexec");
+    command.args(["/i", &installer_path.to_string_lossy()]);
+    command.spawn().map_err(|e| format!("impossibile avviare l'installer di WinFsp: {e}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn mount_now(app: AppHandle, state: tauri::State<'_, RcdState>, name: String) -> Result<(), String> {
     let config_dir = app_config_dir(&app)?;
@@ -369,7 +468,8 @@ pub async fn mount_now(app: AppHandle, state: tauri::State<'_, RcdState>, name: 
     let result = match prepare_windows_mount_point(&mount.mount_point) {
         Ok(()) => rcd::call(&state, "mount/mount", serde_json::json!({ "fs": mount.remote, "mountPoint": mount.mount_point }))
             .await
-            .map(|_| ()),
+            .map(|_| ())
+            .map_err(friendly_mount_error),
         Err(e) => Err(e),
     };
     record_mount_event(&config_dir, &name, "mount", &result);
@@ -591,6 +691,40 @@ mod tests {
     fn delete_mount_fails_for_unknown_name() {
         let dir = TempDir::new("mounts-delete-unknown");
         assert!(delete_mount_in(&dir.path, "non-esiste").is_err());
+    }
+
+    #[test]
+    fn friendly_mount_error_translates_the_missing_winfsp_case() {
+        let raw = "failed to mount FUSE fs: mount stopped before calling Init: mount failed: cgofuse: cannot find winfsp Hint: Install WinFsp from https://winfsp.dev/rel/".to_string();
+        // Il frontend riconosce questo caso specifico cercando "WinFsp" nel
+        // messaggio per mostrare il pulsante "Installa WinFsp" — la presenza
+        // letterale della parola è quindi parte del contratto, non solo un
+        // dettaglio del testo.
+        assert!(friendly_mount_error(raw).contains("WinFsp"));
+    }
+
+    #[test]
+    fn friendly_mount_error_leaves_other_errors_unchanged() {
+        let raw = "qualche altro errore di rclone".to_string();
+        assert_eq!(friendly_mount_error(raw.clone()), raw);
+    }
+
+    #[test]
+    fn find_msi_download_url_picks_the_msi_asset_among_others() {
+        let release = serde_json::json!({
+            "tag_name": "v2.1",
+            "assets": [
+                { "name": "winfsp-tests-2.1.25156.zip", "browser_download_url": "https://example.com/tests.zip" },
+                { "name": "winfsp-2.1.25156.msi", "browser_download_url": "https://example.com/winfsp-2.1.25156.msi" }
+            ]
+        });
+        assert_eq!(find_msi_download_url(&release).unwrap(), "https://example.com/winfsp-2.1.25156.msi");
+    }
+
+    #[test]
+    fn find_msi_download_url_fails_when_no_msi_asset_is_present() {
+        let release = serde_json::json!({ "tag_name": "v2.1", "assets": [] });
+        assert!(find_msi_download_url(&release).is_err());
     }
 
     #[test]

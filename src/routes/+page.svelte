@@ -251,29 +251,43 @@
     ) {
       return;
     }
+    // Si tenta prima senza password: un backup salvato in chiaro (nessuna
+    // password scelta in fase di export) va importato subito, senza
+    // interrompere l'utente con un modal inutile. Solo se il backend segnala
+    // esplicitamente che il file è cifrato si chiede la password.
     pendingImportSource = source;
-    importPassword = "";
-    importPasswordModalOpen = true;
+    await attemptImport(source, null);
   }
 
   let restartNeededModalOpen = $state(false);
+
+  async function attemptImport(source: string, password: string | null) {
+    importExportBusy = true;
+    try {
+      await invoke("import_backup", { sourcePath: source, password });
+      importExportModalOpen = false;
+      restartNeededModalOpen = true;
+      pendingImportSource = null;
+      await Promise.all([loadOwnRemotes(), loadServices()]);
+    } catch (error) {
+      const message = String(error);
+      if (password === null && message.includes("è cifrato")) {
+        importPassword = "";
+        importPasswordModalOpen = true;
+      } else {
+        importExportError = message;
+        pendingImportSource = null;
+      }
+    } finally {
+      importExportBusy = false;
+    }
+  }
 
   async function confirmImportPassword() {
     const source = pendingImportSource;
     if (!source) return;
     importPasswordModalOpen = false;
-    importExportBusy = true;
-    try {
-      await invoke("import_backup", { sourcePath: source, password: importPassword.trim() === "" ? null : importPassword });
-      importExportModalOpen = false;
-      restartNeededModalOpen = true;
-      await Promise.all([loadOwnRemotes(), loadServices()]);
-    } catch (error) {
-      importExportError = String(error);
-    } finally {
-      importExportBusy = false;
-      pendingImportSource = null;
-    }
+    await attemptImport(source, importPassword.trim() === "" ? null : importPassword);
   }
 
   async function restartNow() {
@@ -407,10 +421,7 @@
 
 <Modal bind:open={importPasswordModalOpen} title="Password del backup">
   <div class="stack-form">
-    <p class="hint">
-      Inserisci la password scelta al momento del backup. Lascia vuoto se il backup è stato salvato in chiaro,
-      senza password.
-    </p>
+    <p class="hint">Questo backup è protetto da una password: inserisci quella scelta al momento dell'esportazione.</p>
     <label class="stack-field">
       Password
       <input type="password" bind:value={importPassword} />

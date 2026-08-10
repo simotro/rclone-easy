@@ -36,7 +36,10 @@ mod jobs;
 use jobs::{create_job, delete_job, list_jobs, run_job, update_job};
 
 mod mounts;
-use mounts::{create_mount, delete_mount, list_mounts, mount_now, mount_now_and_open, unmount_now, update_mount};
+use mounts::{
+    create_mount, delete_mount, download_and_launch_winfsp_installer, list_mounts, mount_now, mount_now_and_open,
+    unmount_now, update_mount,
+};
 
 mod bisync;
 use bisync::{create_bisync_job, delete_bisync_job, list_bisync_jobs, run_bisync_job, update_bisync_job};
@@ -237,6 +240,7 @@ pub fn run() {
             mount_now,
             mount_now_and_open,
             unmount_now,
+            download_and_launch_winfsp_installer,
             list_bisync_jobs,
             create_bisync_job,
             update_bisync_job,
