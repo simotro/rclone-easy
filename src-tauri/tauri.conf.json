@@ -32,11 +32,29 @@
     "shortDescription": "Interfaccia grafica per rclone",
     "longDescription": "Un'interfaccia grafica semplice per rclone, pensata come alternativa più leggera a client come Insync, Google Drive Sync o MEGAsync, capace di collegarsi a decine di provider cloud diversi grazie al motore di rclone.",
     "icon": [
+      "icons/icon.svg",
       "icons/128x128@2x.png",
       "icons/128x128.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/rclone"]
+    "externalBin": ["binaries/rclone"],
+    "linux": {
+      "appimage": {
+        "files": {
+          "usr/share/icons/hicolor/scalable/apps/rclone-easy.svg": "icons/icon.svg"
+        }
+      },
+      "deb": {
+        "files": {
+          "/usr/share/icons/hicolor/scalable/apps/rclone-easy.svg": "icons/icon.svg"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/share/icons/hicolor/scalable/apps/rclone-easy.svg": "icons/icon.svg"
+        }
+      }
+    }
   }
 }

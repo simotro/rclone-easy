@@ -1,0 +1,52 @@
+name: Build Windows
+
+# Manuale, stesso motivo di build-linux.yml: progetto ancora sperimentale,
+# niente build automatiche ad ogni push.
+#
+# Compilare per Windows solo via runner Windows reale (windows-latest), mai
+# in locale via cross-compile da Linux: per un'app Tauri con WebView2 il
+# cross-compile è un percorso poco affidabile e mai verificato — l'app non
+# ha mai girato su Windows prima d'ora, meglio partire dall'ambiente più
+# vicino possibile a quello reale degli utenti.
+"on":
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Installa le dipendenze npm
+        run: npm ci
+
+      - name: Scarica il binario rclone incluso nell'app
+        run: ./scripts/fetch-rclone-sidecar.ps1
+
+      # Solo NSIS (installer .exe): niente MSI, che con "targets": "all" in
+      # tauri.conf.json verrebbe generato comunque su Windows — scelto NSIS
+      # perché è il percorso più maturo/meno soggetto ad attrito di Tauri
+      # per Windows (MSIX servirebbe firma del codice per un sideload
+      # comodo, MSI serve più che altro per deployment aziendale via Group
+      # Policy, qui non necessario). Il download del runtime WebView2 se
+      # mancante è già il comportamento di default di Tauri, nessuna
+      # configurazione aggiuntiva richiesta.
+      - name: Build
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Carica l'installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: rclone-easy-windows-nsis
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
