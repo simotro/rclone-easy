@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    rclone_easy_lib::run()
+    rclone_easy_lib::run_or_password_helper()
 }

@@ -51,30 +51,38 @@ pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ICON_SIZE: u32 = 64;
 const TRAY_FRAME_BYTE_LEN: usize = (TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usize;
 const IDLE_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-idle.rgba");
-/// Sequenza di fotogrammi di una dissolvenza morbida teal→ambra→teal
-/// ("respiro"), mostrata in loop mentre almeno un job di backup o bisync è
-/// in esecuzione — vedi `watch_activity`. Usa la stessa API multipiattaforma
-/// di Tauri per l'icona della tray (nessun trucco specifico per Linux),
-/// quindi la stessa affidabilità vale anche per Windows/macOS in futuro.
-/// 24 fotogrammi, interpolazione con easing a coseno (transizione più lenta
-/// agli estremi, più rapida a metà, per un effetto "respiro" naturale
-/// invece che lineare) generata una volta con Pillow da
-/// `icons/tray/tray-idle.png`.
-const BREATHE_FRAME_BYTES: &[u8] = include_bytes!("../icons/tray/tray-breathe.rgba");
-/// Stessa animazione "respiro" di `BREATHE_FRAME_BYTES` (stessa formula di
-/// easing, stessi 24 fotogrammi, stessa silhouette), ma tra ambra e rosso
-/// acceso invece che teal e ambra — mostrata in loop al posto dell'icona
-/// idle statica quando l'ultima esecuzione registrata di un job di backup o
-/// bisync (qualunque remote) è fallita, finché non ne va a buon fine una
-/// successiva. Un badge statico era troppo poco visibile nella tray a
-/// dimensione reale; un cambio di colore persistente si nota molto di più.
+/// Sequenza di fotogrammi del logo che ruota su se stesso di 360°, mostrata
+/// in loop mentre almeno un job di backup o bisync è in esecuzione — vedi
+/// `watch_activity`. Sostituisce la precedente dissolvenza di colore
+/// teal→ambra: un cambio di colore a colpo d'occhio in una tray si nota
+/// meno di un movimento (richiesta di Simone dopo aver notato che la sola
+/// tinta non risaltava abbastanza). Usa la stessa API multipiattaforma di
+/// Tauri per l'icona della tray (nessun trucco specifico per Linux), quindi
+/// la stessa affidabilità vale anche per Windows/macOS in futuro. 24
+/// fotogrammi (rotazione di 15° l'uno) generati una volta con Pillow da
+/// `icons/tray/tray-idle.png`, ruotando su un canvas allargato a
+/// dimensione-diagonale per non tagliare gli angoli del logo, poi
+/// ridotti a 64×64.
+const SPIN_FRAME_BYTES: &[u8] = include_bytes!("../icons/tray/tray-spin.rgba");
+/// Dissolvenza morbida ambra→rosso acceso ("respiro", stessa formula di
+/// easing a coseno per una transizione più naturale agli estremi che a
+/// metà) — mostrata in loop al posto dell'icona idle statica quando
+/// l'ultima esecuzione registrata di un job di backup o bisync (qualunque
+/// remote) è fallita, finché non ne va a buon fine una successiva. Un
+/// badge statico era troppo poco visibile nella tray a dimensione reale;
+/// un cambio di colore persistente si nota molto di più. A differenza
+/// dello stato "in esecuzione" sopra, qui resta un cambio di colore e non
+/// una rotazione: è uno stato persistente (può durare ore), non un'attesa
+/// attiva, quindi non deve sembrare "in corso qualcosa adesso".
 const ERROR_BREATHE_FRAME_BYTES: &[u8] = include_bytes!("../icons/tray/tray-error-breathe.rgba");
-const BREATHE_FRAME_COUNT: usize = 24;
-/// Intervallo tra un fotogramma e il successivo: abbastanza fitto da
-/// sembrare fluido per una transizione di solo colore (non richiede la
-/// stessa frequenza di un'animazione con movimento), abbastanza largo da
-/// restare affidabile su qualunque implementazione di tray/menu bar.
-const BREATHE_FRAME_INTERVAL: Duration = Duration::from_millis(120);
+/// Conteggio fotogrammi condiviso da entrambe le animazioni sopra (rotazione
+/// e respiro), stesso valore per costruzione.
+const ANIMATION_FRAME_COUNT: usize = 24;
+/// Intervallo tra un fotogramma e il successivo, condiviso dalle due
+/// animazioni: abbastanza fitto da sembrare fluido, abbastanza largo da
+/// restare affidabile su qualunque implementazione di tray/menu bar. Per la
+/// rotazione, un giro completo dura quindi 24 × 120ms ≈ 2,9s.
+const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(120);
 /// Intervallo di controllo quando non c'è nulla in esecuzione — nessuna
 /// icona da aggiornare in quella finestra, un controllo più rado va bene.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -132,7 +140,7 @@ fn try_build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             match id {
                 SHOW_HIDE_ID => toggle_main_window(app),
-                QUIT_ID => app.exit(0),
+                QUIT_ID => perform_quit(app),
                 _ => dispatch_action(app, id),
             }
         })
@@ -160,7 +168,7 @@ fn set_tray_tooltip(app: &AppHandle, text: &str) {
     let _ = tray.0.set_tooltip(Some(text));
 }
 
-fn breathe_frame(frames: &[u8], frame: usize) -> &[u8] {
+fn animation_frame(frames: &[u8], frame: usize) -> &[u8] {
     let start = frame * TRAY_FRAME_BYTE_LEN;
     &frames[start..start + TRAY_FRAME_BYTE_LEN]
 }
@@ -202,7 +210,7 @@ const TOOLTIP_OK: &str = "Rclone Easy - Ultimi lavori eseguiti con successo";
 
 /// Ogni ~120ms, mentre almeno un job è in esecuzione oppure mentre l'ultima
 /// esecuzione registrata di un job è fallita, mostra il fotogramma
-/// successivo della relativa dissolvenza (teal→ambra per "in corso",
+/// successivo della relativa animazione (rotazione per "in corso", respiro
 /// ambra→rosso per "problema"); appena torna tutto normale mostra l'icona
 /// statica idle, controllato ogni ~500ms. Il tooltip riflette lo stesso
 /// stato, aggiornato solo al cambio di stato (non ad ogni fotogramma) per
@@ -236,14 +244,14 @@ async fn watch_activity(app: AppHandle) {
 
         match state {
             ActivityState::Running => {
-                set_tray_icon(&app, breathe_frame(BREATHE_FRAME_BYTES, frame));
-                frame = (frame + 1) % BREATHE_FRAME_COUNT;
-                tokio::time::sleep(BREATHE_FRAME_INTERVAL).await;
+                set_tray_icon(&app, animation_frame(SPIN_FRAME_BYTES, frame));
+                frame = (frame + 1) % ANIMATION_FRAME_COUNT;
+                tokio::time::sleep(ANIMATION_FRAME_INTERVAL).await;
             }
             ActivityState::Error => {
-                set_tray_icon(&app, breathe_frame(ERROR_BREATHE_FRAME_BYTES, frame));
-                frame = (frame + 1) % BREATHE_FRAME_COUNT;
-                tokio::time::sleep(BREATHE_FRAME_INTERVAL).await;
+                set_tray_icon(&app, animation_frame(ERROR_BREATHE_FRAME_BYTES, frame));
+                frame = (frame + 1) % ANIMATION_FRAME_COUNT;
+                tokio::time::sleep(ANIMATION_FRAME_INTERVAL).await;
             }
             ActivityState::Ok => {
                 set_tray_icon(&app, IDLE_ICON_BYTES);
@@ -468,8 +476,17 @@ async fn watch_menu(app: AppHandle) {
 /// Esegue l'azione codificata nell'id della voce di menu dinamica cliccata
 /// (vedi `build_remote_submenu`), in un task separato perché
 /// `on_menu_event` non è async e queste azioni (mount/sync reali) possono
-/// durare a lungo. Un fallimento arriva all'utente come notifica desktop —
-/// da qui non c'è nessun'altra UI a cui mostrarlo.
+/// durare a lungo.
+///
+/// Il lavoro vero gira in un secondo task annidato (`work` sotto) solo per
+/// poterne intercettare un eventuale panic tramite il suo `JoinHandle`:
+/// prima di questa modifica un panic in un task "fire and forget" come
+/// questo moriva in silenzio (visibile solo nello stderr del processo, mai
+/// all'utente) — corrisponde esattamente al sintomo segnalato da Simone
+/// ("clicco 'Sincronizza ora' dalla tray e non succede niente"), qualunque
+/// fosse la causa esatta del singolo caso. Un fallimento normale (`Err`) o
+/// un panic arrivano ora entrambi come la stessa notifica desktop, l'unica
+/// UI raggiungibile da qui.
 fn dispatch_action(app: &AppHandle, id: &str) {
     let Some((prefix, name)) = id.split_once(':') else { return };
     let prefix = format!("{prefix}:");
@@ -477,31 +494,120 @@ fn dispatch_action(app: &AppHandle, id: &str) {
     let app = app.clone();
 
     tauri::async_runtime::spawn(async move {
-        let result: Result<(), String> = match prefix.as_str() {
-            MOUNT_PREFIX => {
-                let state = app.state::<RcdState>();
-                crate::mounts::mount_now_and_open(app.clone(), state, name.clone()).await
-            }
-            UNMOUNT_PREFIX => {
-                let state = app.state::<RcdState>();
-                crate::mounts::unmount_now(app.clone(), state, name.clone()).await
-            }
-            BACKUP_PREFIX => {
-                let state = app.state::<RcdState>();
-                crate::jobs::run_job(app.clone(), state, name.clone()).await
-            }
-            BISYNC_PREFIX => crate::bisync::run_bisync_job(app.clone(), name.clone()).await.map(|_| ()),
-            _ => return,
+        let work = {
+            let app = app.clone();
+            let name = name.clone();
+            let prefix = prefix.clone();
+            tauri::async_runtime::spawn(async move {
+                match prefix.as_str() {
+                    MOUNT_PREFIX => {
+                        let state = app.state::<RcdState>();
+                        crate::mounts::mount_now_and_open(app.clone(), state, name.clone()).await
+                    }
+                    UNMOUNT_PREFIX => {
+                        let state = app.state::<RcdState>();
+                        crate::mounts::unmount_now(app.clone(), state, name.clone()).await
+                    }
+                    BACKUP_PREFIX => {
+                        let state = app.state::<RcdState>();
+                        crate::jobs::run_job(app.clone(), state, name.clone()).await
+                    }
+                    BISYNC_PREFIX => {
+                        let state = app.state::<RcdState>();
+                        // A differenza di jobs::run_job, un fallimento
+                        // riportato da rclone stesso (password sbagliata,
+                        // conflitti irrisolvibili, ecc.) non arriva come
+                        // `Err` ma come `Ok(BisyncRunResult { success:
+                        // false, .. })` — va tradotto qui in `Err`, altrimenti
+                        // il ramo sotto lo tratterebbe come un successo e
+                        // mostrerebbe "completato" anche per un run fallito.
+                        match crate::bisync::run_bisync_job(app.clone(), state, name.clone()).await {
+                            Ok(result) if result.success => Ok(()),
+                            Ok(result) => Err(result.message),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    _ => Ok(()),
+                }
+            })
         };
-        if let Err(message) = result {
-            notify_error(&app, &name, &message);
+
+        match work.await {
+            // Richiesta esplicita di Simone: ogni azione lanciata dalla tray
+            // (Monta/Smonta, Backup ora, Sincronizza ora) deve dare un
+            // riscontro con l'esito, non solo mount (che in più apre la
+            // cartella, ma senza notifica l'utente restava comunque incerto
+            // se il click fosse partito).
+            Ok(Ok(())) => notify_done(&app, &name, &prefix),
+            Ok(Err(message)) => notify_error(&app, &name, &message),
+            Err(_) => notify_error(&app, &name, "l'operazione si è interrotta inaspettatamente, riprova"),
         }
     });
 }
 
+/// Entrambe le notifiche sotto girano su un thread OS a parte, non nel task
+/// tokio chiamante: chiamare l'API di notifica da dentro un task già in
+/// esecuzione sulla runtime manda in panic con "Cannot start a runtime from
+/// within a runtime" — il plugin apre una propria runtime per il D-Bus di
+/// sistema, cosa che Tokio non permette da un suo stesso worker thread.
+/// Osservato in pratica (log reale di Simone): il panic terminava il task
+/// silenziosamente subito dopo un'azione riuscita, la notifica non
+/// appariva mai — combinato con `bisync`'s `success: false` trattato come
+/// esito positivo (corretto a parte in `dispatch_action`), risultava in
+/// "clicco e non ho alcun riscontro".
 fn notify_error(app: &AppHandle, name: &str, message: &str) {
-    use tauri_plugin_notification::NotificationExt;
-    let _ = app.notification().builder().title("Rclone Easy").body(format!("'{name}' non è riuscito: {message}")).show();
+    let app = app.clone();
+    let name = name.to_string();
+    let message = message.to_string();
+    std::thread::spawn(move || {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app.notification().builder().title("Rclone Easy").body(format!("'{name}' non è riuscito: {message}")).show();
+    });
+}
+
+fn notify_done(app: &AppHandle, name: &str, prefix: &str) {
+    let app = app.clone();
+    let body = match prefix {
+        MOUNT_PREFIX => format!("'{name}' montato."),
+        UNMOUNT_PREFIX => format!("'{name}' smontato."),
+        _ => format!("'{name}' completato."),
+    };
+    std::thread::spawn(move || {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app.notification().builder().title("Rclone Easy").body(body).show();
+    });
+}
+
+/// Non usa `app.exit(0)`: quello passa dal normale ciclo eventi di Tauri/
+/// tao, che sul bug Wayland/KDE con le decorazioni CSD (vedi il commento su
+/// `tauri.conf.json::decorations`) può restare bloccato se la finestra è
+/// nello stato "decorazioni non responsive" (osservato: "Esci" dal tray in
+/// quello stato lasciava l'app in uno stato inconsistente, serviva killarla
+/// a mano). Spegnere il demone e terminare direttamente il processo —
+/// stesso schema già usato per SIGTERM in `spawn_signal_shutdown_handler`
+/// (`lib.rs`) — garantisce l'uscita anche se il loop eventi della finestra
+/// è bloccato.
+fn perform_quit(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<RcdState>();
+        crate::rcd::shutdown(&state).await;
+        std::process::exit(0);
+    });
+}
+
+/// Nasconde la finestra dall'interfaccia stessa — da quando la finestra non
+/// ha più una barra del titolo nativa (bug Wayland/KDE aggirato eliminando
+/// del tutto le decorazioni CSD, vedi `tauri.conf.json`), la X non esiste
+/// più: questo bottone in `+layout.svelte` la sostituisce con lo stesso
+/// comportamento (nasconde in tray, l'app resta attiva) di `SHOW_HIDE_ID`.
+/// Niente equivalente in-app per l'uscita vera (era un secondo comando
+/// `quit_app`, tolto su richiesta di Simone: due pulsanti confondevano
+/// l'utente) — resta raggiungibile solo da "Esci" nel menu della tray
+/// (`QUIT_ID` sopra, tramite `perform_quit`).
+#[tauri::command]
+pub fn hide_window(app: AppHandle) {
+    hide_main_window(&app);
 }
 
 fn toggle_main_window(app: &AppHandle) {

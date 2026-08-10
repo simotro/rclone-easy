@@ -54,10 +54,13 @@
 
 <style>
 .theme-toggle {
-  position: fixed;
-  top: 0.9em;
-  right: 1.1em;
-  z-index: 50;
+  /* Non più auto-posizionato: da quando esiste `WindowControls.svelte`
+     (nasconde/chiudi, sostituti della X nativa rimossa) questo componente
+     è un figlio flex della stessa barra fissa in `+layout.svelte`, che si
+     occupa lei di `position: fixed` — qui basta restare `relative` perché
+     `.menu` sotto (`position: absolute`) continui ad ancorarsi a questo
+     bottone e non alla barra intera. */
+  position: relative;
 }
 
 .trigger {

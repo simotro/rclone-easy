@@ -468,9 +468,9 @@
   }
 
   // Disabilita un backup attivo e chiude subito il modal — non lascia la
-  // possibilità di cliccare "Salva" subito dopo per errore, che con il
-  // form ancora sull'intervallo precedente riabiliterebbe l'automazione
-  // appena spenta invece di lasciarla disattivata.
+  // possibilità di cliccare "Salva e chiudi" subito dopo per errore, che
+  // con il form ancora sull'intervallo precedente riabiliterebbe
+  // l'automazione appena spenta invece di lasciarla disattivata.
   async function disableBackupAndClose() {
     backupBusy = true;
     backupError = null;
@@ -787,7 +787,7 @@
         <button type="button" onclick={runBackupNow} disabled={backupBusy}>{backupBusy ? "In corso…" : "Esegui ora"}</button>
       {/if}
       <button type="button" onclick={saveBackup} disabled={backupBusy || backupFormLocalPath.trim() === ""}>
-        {backupBusy ? "Salvataggio…" : "Salva"}
+        {backupBusy ? "Salvataggio…" : "Salva e chiudi"}
       </button>
       {#if backupWasActiveOnOpen}
         <button type="button" onclick={disableBackupAndClose} disabled={backupBusy}>Disabilita</button>
@@ -865,7 +865,7 @@
         <button type="button" onclick={runBisyncNow} disabled={bisyncBusy}>{bisyncBusy ? "In corso…" : "Esegui ora"}</button>
       {/if}
       <button type="button" onclick={saveBisync} disabled={bisyncBusy || bisyncFormLocalPath.trim() === ""}>
-        {bisyncBusy ? "Salvataggio…" : "Salva"}
+        {bisyncBusy ? "Salvataggio…" : "Salva e chiudi"}
       </button>
       {#if bisyncWasActiveOnOpen}
         <button type="button" onclick={disableBisyncAndClose} disabled={bisyncBusy}>Disabilita</button>

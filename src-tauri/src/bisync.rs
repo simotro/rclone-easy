@@ -295,12 +295,23 @@ fn error_requires_resync(message: &str) -> bool {
 /// un fallimento riportato da rclone stesso (exit code diverso da zero)
 /// resta dentro il `BisyncRunResult` con `success: false`, così il
 /// chiamante può comunque salvare last_run e decidere se serve un resync.
+///
+/// `config_password`: a differenza di sync/mount (che passano dal demone
+/// `rcd`, già avviato con `RCLONE_CONFIG_PASS` — vedi `rcd::start_rcd_in`),
+/// questo è un processo `rclone` a sé, che non eredita nulla dal demone.
+/// Senza questa password quando la config è protetta, rclone prova a
+/// chiederla interattivamente su stdin, che qui è `Stdio::null()`: fallisce
+/// subito con un errore "Failed to read line: EOF" invece di un messaggio
+/// sensato — bug osservato da Simone dopo aver protetto la config con una
+/// password (`config_password.rs`), la sincronizzazione bidirezionale
+/// smetteva di funzionare silenziosamente.
 async fn execute_bisync(
     config_path: &Path,
     workdir: &Path,
     path1: &str,
     path2: &str,
     resync: bool,
+    config_password: Option<&str>,
 ) -> Result<BisyncRunResult, String> {
     std::fs::create_dir_all(workdir)
         .map_err(|e| format!("impossibile creare la cartella di lavoro '{}': {e}", workdir.display()))?;
@@ -334,12 +345,12 @@ async fn execute_bisync(
         args.push("newer".to_string());
     }
 
-    let output = tokio::process::Command::new(crate::rclone_bin::resolve_rclone_binary())
-        .args(&args)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| format!("impossibile avviare 'rclone bisync': {e}"))?;
+    let mut command = tokio::process::Command::new(crate::rclone_bin::resolve_rclone_binary());
+    command.args(&args).stdin(Stdio::null());
+    if let Some(password) = config_password {
+        command.env("RCLONE_CONFIG_PASS", password);
+    }
+    let output = command.output().await.map_err(|e| format!("impossibile avviare 'rclone bisync': {e}"))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let conflict_paths = extract_conflict_paths(&stderr);
@@ -377,23 +388,31 @@ fn is_job_running(name: &str) -> bool {
     running_jobs().lock().unwrap().contains(name)
 }
 
-pub(crate) async fn run_bisync_job_by_name(config_dir: &Path, name: &str) -> Result<BisyncRunResult, String> {
+/// `config_password`: vedi il commento su `execute_bisync` — `None` se la
+/// config non è protetta.
+pub(crate) async fn run_bisync_job_by_name(
+    config_dir: &Path,
+    config_password: Option<&str>,
+    name: &str,
+) -> Result<BisyncRunResult, String> {
     if !running_jobs().lock().unwrap().insert(name.to_string()) {
         return Err(format!("il job '{name}' è già in esecuzione"));
     }
 
-    let result = run_bisync_job_by_name_inner(config_dir, name).await;
+    let result = run_bisync_job_by_name_inner(config_dir, config_password, name).await;
 
     running_jobs().lock().unwrap().remove(name);
     result
 }
 
-async fn run_bisync_job_by_name_inner(config_dir: &Path, name: &str) -> Result<BisyncRunResult, String> {
+async fn run_bisync_job_by_name_inner(config_dir: &Path, config_password: Option<&str>, name: &str) -> Result<BisyncRunResult, String> {
     let mut jobs = load_from_dir(config_dir)?;
     let job = jobs.iter().find(|j| j.name == name).cloned().ok_or_else(|| format!("nessun job bisync chiamato '{name}'"))?;
 
     let workdir = workdir_for(config_dir, name);
-    let result = execute_bisync(&config_dir.join("rclone.conf"), &workdir, &job.path1, &job.path2, job.needs_resync).await?;
+    let result =
+        execute_bisync(&config_dir.join("rclone.conf"), &workdir, &job.path1, &job.path2, job.needs_resync, config_password)
+            .await?;
 
     if let Some(stored) = jobs.iter_mut().find(|j| j.name == name) {
         stored.needs_resync = if result.success { false } else { error_requires_resync(&result.message) };
@@ -485,21 +504,34 @@ pub fn delete_bisync_job(app: AppHandle, name: String) -> Result<(), String> {
 /// manda una notifica desktop solo in quel caso (un run senza conflitti non
 /// ha nulla da far rivedere all'utente).
 #[tauri::command]
-pub async fn run_bisync_job(app: AppHandle, name: String) -> Result<BisyncRunResult, String> {
+pub async fn run_bisync_job(app: AppHandle, state: tauri::State<'_, RcdState>, name: String) -> Result<BisyncRunResult, String> {
     let config_dir = app_config_dir(&app)?;
-    let result = run_bisync_job_by_name(&config_dir, &name).await?;
+    let password = crate::rcd::current_config_password(&state).await;
+    let result = run_bisync_job_by_name(&config_dir, password.as_deref(), &name).await?;
 
     if result.success && !result.conflict_paths.is_empty() {
-        use tauri_plugin_notification::NotificationExt;
+        // Su un thread a parte: chiamare l'API di notifica da dentro un task
+        // tokio già in esecuzione (qui siamo in un comando async) manda in
+        // panic con "Cannot start a runtime from within a runtime" — il
+        // plugin apre una propria runtime per il D-Bus di sistema, cosa che
+        // Tokio non permette da un suo stesso worker thread. Osservato in
+        // pratica: il panic terminava questo task silenziosamente, la
+        // notifica non appariva mai. Un thread OS a parte non ha questo
+        // vincolo. Stesso schema in `tray.rs::notify_error`/`notify_done`.
+        let app = app.clone();
+        let name = name.clone();
         let count = result.conflict_paths.len();
-        let _ = app
-            .notification()
-            .builder()
-            .title("Rclone Easy — conflitto rilevato")
-            .body(format!(
-                "Il job '{name}' ha trovato {count} file modificati su entrambi i lati: nessuna versione è stata persa, entrambe sono state salvate con un suffisso. Apri Rclone Easy per rivederle."
-            ))
-            .show();
+        std::thread::spawn(move || {
+            use tauri_plugin_notification::NotificationExt;
+            let _ = app
+                .notification()
+                .builder()
+                .title("Rclone Easy — conflitto rilevato")
+                .body(format!(
+                    "Il job '{name}' ha trovato {count} file modificati su entrambi i lati: nessuna versione è stata persa, entrambe sono state salvate con un suffisso. Apri Rclone Easy per rivederle."
+                ))
+                .show();
+        });
     }
 
     Ok(result)
@@ -774,7 +806,7 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(&jobs_dir.path).unwrap();
 
-        let result = run_bisync_job_by_name(&jobs_dir.path, "prova").await.unwrap();
+        let result = run_bisync_job_by_name(&jobs_dir.path, None, "prova").await.unwrap();
         assert!(result.success, "il resync dovrebbe riuscire: {result:?}");
 
         let path1_content = std::fs::read_to_string(path1_dir.path.join("documento.txt")).unwrap();
@@ -816,14 +848,14 @@ mod tests {
         // esista, il file stesso non serve (rclone usa i default se manca).
         std::fs::create_dir_all(&jobs_dir.path).unwrap();
 
-        let baseline = run_bisync_job_by_name(&jobs_dir.path, "prova").await.unwrap();
+        let baseline = run_bisync_job_by_name(&jobs_dir.path, None, "prova").await.unwrap();
         assert!(baseline.success, "il resync iniziale dovrebbe riuscire: {baseline:?}");
         assert!(!load_from_dir(&jobs_dir.path).unwrap()[0].needs_resync, "dopo un run riuscito non serve più resync");
 
         std::fs::write(path1_dir.path.join("documento.txt"), "versione lato 1").unwrap();
         std::fs::write(path2_dir.path.join("documento.txt"), "versione lato 2, più lunga delle altre").unwrap();
 
-        let result = run_bisync_job_by_name(&jobs_dir.path, "prova").await.unwrap();
+        let result = run_bisync_job_by_name(&jobs_dir.path, None, "prova").await.unwrap();
         assert!(result.success, "un conflitto risolto da rclone non è un errore per noi: {result:?}");
         assert_eq!(result.conflict_paths.len(), 2, "un conflitto genera due copie rinominate: {result:?}");
 
@@ -846,7 +878,7 @@ mod tests {
     #[tokio::test]
     async fn run_bisync_job_fails_cleanly_for_an_unknown_job() {
         let dir = TempDir::new("bisync-run-unknown");
-        let result = run_bisync_job_by_name(&dir.path, "non-esiste").await;
+        let result = run_bisync_job_by_name(&dir.path, None, "non-esiste").await;
         assert!(result.is_err());
     }
 
@@ -873,8 +905,8 @@ mod tests {
         .unwrap();
 
         let (first, second) = tokio::join!(
-            run_bisync_job_by_name(&jobs_dir.path, "job-concorrenza-unico"),
-            run_bisync_job_by_name(&jobs_dir.path, "job-concorrenza-unico"),
+            run_bisync_job_by_name(&jobs_dir.path, None, "job-concorrenza-unico"),
+            run_bisync_job_by_name(&jobs_dir.path, None, "job-concorrenza-unico"),
         );
 
         assert!(first.is_ok(), "la prima delle due chiamate dovrebbe riuscire: {first:?}");

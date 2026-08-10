@@ -21,6 +21,7 @@ mod oauth_remote;
 use oauth_remote::{answer_oauth_question, cancel_oauth, create_oauth_remote, PendingOAuthAnswer};
 
 mod tray;
+use tray::hide_window;
 
 mod background_portal;
 
@@ -37,6 +38,9 @@ mod scheduler;
 
 mod backup;
 use backup::{export_backup, import_backup};
+
+mod config_password;
+use config_password::{config_password_status, needs_unlock, remove_config_password, set_config_password, unlock_config, PASSWORD_HELPER_ARG};
 
 /// Riavvia l'app — usata dopo un ripristino di backup, che sovrascrive i
 /// file di config sotto `app_config_dir()` senza far ripartire da sé il
@@ -70,15 +74,24 @@ fn hide_instead_of_close(app: &tauri::AppHandle) {
             api.prevent_close();
             tray::hide_main_window(&app_handle);
             TRAY_NOTICE_SHOWN.call_once(|| {
-                use tauri_plugin_notification::NotificationExt;
-                let _ = app_handle
-                    .notification()
-                    .builder()
-                    .title("Rclone Easy")
-                    .body(
-                        "L'app continua a funzionare in background. Trovi l'icona nella tray di sistema; usa \"Esci\" dal suo menu per chiuderla davvero.",
-                    )
-                    .show();
+                // Thread OS a parte, non il thread/task chiamante: stessa
+                // cautela di tray.rs::notify_error sul crash "Cannot start a
+                // runtime from within a runtime" del plugin di notifica —
+                // qui probabilmente innocuo (questo handler non gira su un
+                // worker tokio), ma costa nulla essere coerenti ovunque si
+                // chiami questa API.
+                let app_handle = app_handle.clone();
+                std::thread::spawn(move || {
+                    use tauri_plugin_notification::NotificationExt;
+                    let _ = app_handle
+                        .notification()
+                        .builder()
+                        .title("Rclone Easy")
+                        .body(
+                            "L'app continua a funzionare in background. Trovi l'icona nella tray di sistema; usa \"Esci\" dal suo menu per chiuderla davvero.",
+                        )
+                        .show();
+                });
             });
         }
     });
@@ -110,6 +123,20 @@ fn spawn_signal_shutdown_handler(app: tauri::AppHandle) {
     });
 }
 
+/// Punto d'ingresso vero e proprio (`main.rs`): prima di avviare l'app
+/// Tauri, intercetta la modalità "aiutante" usata come `--password-command`
+/// da `rclone config encryption set/remove` (`config_password.rs`) — se
+/// invocato così, stampa la password su stdout ed esce subito, senza mai
+/// avviare una seconda istanza dell'app vera. Evita di dover scrivere la
+/// password su un file temporaneo solo per passarla a un sottoprocesso.
+pub fn run_or_password_helper() {
+    if std::env::args().nth(1).as_deref() == Some(PASSWORD_HELPER_ARG) {
+        config_password::print_helper_password();
+        return;
+    }
+    run();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -124,7 +151,16 @@ pub fn run() {
                 .path()
                 .app_config_dir()
                 .expect("impossibile determinare la cartella di configurazione dell'app");
-            let rcd_state: RcdState = tauri::async_runtime::block_on(rcd::build_state(config_dir.join("rclone.conf")));
+            let config_path = config_dir.join("rclone.conf");
+            // Config protetta da password (config_password.rs): non avviare
+            // il demone adesso, resta nello stato segnaposto finché la UI
+            // non manda la password giusta tramite `unlock_config` — vedi
+            // `needs_unlock`/`unlock` in rcd.rs.
+            let rcd_state: RcdState = if rcd::config_is_encrypted(&config_path) {
+                rcd::locked_state()
+            } else {
+                tauri::async_runtime::block_on(rcd::build_state(config_path))
+            };
             app.manage(rcd_state);
             app.manage(PendingOAuthAnswer::default());
             #[cfg(unix)]
@@ -188,7 +224,13 @@ pub fn run() {
             run_bisync_job,
             export_backup,
             import_backup,
-            restart_app
+            restart_app,
+            needs_unlock,
+            unlock_config,
+            config_password_status,
+            set_config_password,
+            remove_config_password,
+            hide_window
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

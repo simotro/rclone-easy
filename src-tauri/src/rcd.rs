@@ -20,12 +20,92 @@ struct RcdProcess {
     user: String,
     pass: String,
     client: reqwest::Client,
+    /// `Some` se la config è protetta da password (`config_password.rs`) —
+    /// tenuta qui in memoria per la durata della sessione così l'utente non
+    /// deve reinserirla per cambiarla o rimuoverla: l'ha già data una volta
+    /// per sbloccare l'app, non ha senso richiederla di nuovo nella stessa
+    /// sessione. Mai scritta su disco da questa app (rclone stesso la
+    /// legge solo dalla variabile d'ambiente che le passiamo all'avvio).
+    config_password: Option<String>,
 }
 
 /// Stato gestito da Tauri. `Err` quando l'avvio del demone è fallito (es.
 /// rclone non installato) — l'errore resta visibile ai comandi invece di
-/// far fallire silenziosamente l'avvio dell'app.
+/// far fallire silenziosamente l'avvio dell'app. Usato anche per
+/// rappresentare "in attesa della password" (vedi `LOCKED_SENTINEL`)
+/// quando la config risulta protetta: stesso schema "Err = non ancora
+/// utilizzabile", senza bisogno di un terzo stato dedicato.
 pub struct RcdState(Mutex<Result<RcdProcess, String>>);
+
+/// Valore speciale (mai un vero messaggio d'errore di rclone, che parla
+/// sempre di connessioni/processi) usato come segnaposto in `RcdState`
+/// finché la config protetta da password non viene sbloccata — distingue
+/// "in attesa della password" (mostra la schermata di sblocco) da "rcd
+/// davvero non disponibile" (mostra l'avviso generico), vedi `needs_unlock`.
+const LOCKED_SENTINEL: &str = "__rclone_easy_config_locked__";
+
+/// Stato iniziale quando la config risulta protetta da password
+/// all'avvio dell'app: nessun demone avviato finché non arriva
+/// `unlock` con la password giusta.
+pub(crate) fn locked_state() -> RcdState {
+    RcdState(Mutex::new(Err(LOCKED_SENTINEL.to_string())))
+}
+
+/// La config sotto `config_path` è protetta da password se inizia con il
+/// commento che rclone stesso scrive in testa a una config cifrata (poi
+/// seguito dal marker `RCLONE_ENCRYPT_V0:` su una riga successiva, non la
+/// prima — verificato guardando l'output reale di `rclone config
+/// encryption set`) — nessuna chiamata esterna necessaria, un file assente
+/// o illeggibile conta come "non protetta" (comportamento di sempre, mai
+/// bloccare l'avvio per questo).
+pub(crate) fn config_is_encrypted(config_path: &Path) -> bool {
+    std::fs::read(config_path).map(|bytes| bytes.starts_with(b"# Encrypted rclone configuration File")).unwrap_or(false)
+}
+
+/// `true` se l'app è in attesa che l'utente sblocchi la config con la
+/// password — la UI usa questo per decidere se mostrare la schermata di
+/// sblocco invece della home.
+pub(crate) async fn needs_unlock(state: &RcdState) -> bool {
+    matches!(&*state.0.lock().await, Err(e) if e == LOCKED_SENTINEL)
+}
+
+/// Avvia il demone con la password fornita. Solo un successo sostituisce lo
+/// stato segnaposto (`locked_state`) con il processo vero — un fallimento
+/// (password sbagliata inclusa) lascia lo stato invariato, ancora "in
+/// attesa di sblocco" (`needs_unlock` resta `true`), così la UI può
+/// mostrare l'errore restituito qui e permettere un altro tentativo senza
+/// dover riavviare l'app né perdere il segnaposto che la distingue da un
+/// rcd genuinamente non disponibile.
+pub(crate) async fn unlock(state: &RcdState, config_path: &Path, password: &str) -> Result<(), String> {
+    match start_rcd_in(config_path, Some(password)).await {
+        Ok(process) => {
+            *state.0.lock().await = Ok(process);
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Password attualmente in uso per la config, se protetta — `None` sia se
+/// non è protetta sia se il demone non è (ancora) avviato. Usata da
+/// `config_password.rs` per cambiare/rimuovere la protezione senza dover
+/// richiedere di nuovo la password corrente all'utente.
+pub(crate) async fn current_config_password(state: &RcdState) -> Option<String> {
+    match &*state.0.lock().await {
+        Ok(process) => process.config_password.clone(),
+        Err(_) => None,
+    }
+}
+
+/// Aggiorna la password ricordata in memoria dopo un cambio/rimozione
+/// riuscita (`config_password.rs`) — il demone già in esecuzione non ha
+/// bisogno di riavviare: ha la config già in memoria da quando è partito,
+/// il file su disco cambia password "sotto di lui" senza che se ne accorga.
+pub(crate) async fn update_remembered_password(state: &RcdState, new_password: Option<String>) {
+    if let Ok(process) = &mut *state.0.lock().await {
+        process.config_password = new_password;
+    }
+}
 
 fn random_token(len: usize) -> String {
     rand::thread_rng().sample_iter(&Alphanumeric).take(len).map(char::from).collect()
@@ -238,7 +318,16 @@ fn cleanup_orphaned_rcd_processes(config_path: &Path) {
     }
 }
 
-async fn start_rcd_in(config_path: &Path) -> Result<RcdProcess, String> {
+/// `password`: se la config è protetta (vedi `config_password.rs`), la
+/// passphrase da passare a rclone via `RCLONE_CONFIG_PASS`. Una password
+/// sbagliata **non** fa fallire l'avvio del demone né `wait_until_ready`:
+/// `core/version` risponde comunque, rclone non tenta di decifrare la
+/// config finché non serve davvero — verificato a mano contro un demone
+/// reale. Per questo, quando è stata data una password, dopo l'avvio si fa
+/// anche una `config/listremotes` (che quella sì costringe rclone a
+/// decifrare) apposta per far emergere subito una password sbagliata,
+/// invece di scoprirlo alla prima azione dell'utente sui suoi remote.
+async fn start_rcd_in(config_path: &Path, password: Option<&str>) -> Result<RcdProcess, String> {
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("impossibile creare la cartella di configurazione '{}': {e}", parent.display()))?;
@@ -268,6 +357,10 @@ async fn start_rcd_in(config_path: &Path) -> Result<RcdProcess, String> {
         .stderr(Stdio::null())
         .kill_on_drop(true);
 
+    if let Some(password) = password {
+        command.env("RCLONE_CONFIG_PASS", password);
+    }
+
     #[cfg(test)]
     {
         let fake_bin = fake_xdg_open_path_prefix();
@@ -277,15 +370,25 @@ async fn start_rcd_in(config_path: &Path) -> Result<RcdProcess, String> {
 
     let child = command.spawn().map_err(|e| format!("impossibile avviare 'rclone rcd': {e}"))?;
 
-    let process = RcdProcess {
+    let mut process = RcdProcess {
         child,
         base_url: format!("http://127.0.0.1:{port}"),
         user,
         pass,
         client: reqwest::Client::new(),
+        config_password: password.map(str::to_string),
     };
 
     wait_until_ready(&process).await?;
+
+    if password.is_some() {
+        if let Err(e) = rc_call(&process, "config/listremotes", &serde_json::json!({})).await {
+            let _ = process.child.start_kill();
+            let _ = process.child.wait().await;
+            return Err(e);
+        }
+    }
+
     Ok(process)
 }
 
@@ -293,9 +396,11 @@ async fn start_rcd_in(config_path: &Path) -> Result<RcdProcess, String> {
 /// `rclone.conf` di sistema) e produce lo stato da passare a
 /// `tauri::Manager::manage`. Non propaga l'errore al chiamante: un
 /// fallimento (es. rclone non installato) deve restare consultabile da
-/// `rcd_status` invece di impedire l'avvio dell'app.
+/// `rcd_status` invece di impedire l'avvio dell'app. Chiamata solo quando
+/// la config non è protetta da password — altrimenti si parte da
+/// `locked_state()` e si passa da `unlock`, vedi `lib.rs`.
 pub async fn build_state(config_path: PathBuf) -> RcdState {
-    RcdState(Mutex::new(start_rcd_in(&config_path).await))
+    RcdState(Mutex::new(start_rcd_in(&config_path, None).await))
 }
 
 /// Punto d'ingresso per gli altri moduli (es. `remotes.rs`) che devono
@@ -370,10 +475,10 @@ pub(crate) mod tests {
 
     #[test]
     fn parse_cmdline_splits_on_nul_bytes_and_drops_empty_entries() {
-        let raw = b"rclone\0rcd\0--config\0/home/utente/.config/com.rcloneeasy.app/rclone.conf\0";
+        let raw = b"rclone\0rcd\0--config\0/home/utente/.config/RcloneEasy/rclone.conf\0";
         assert_eq!(
             parse_cmdline(raw),
-            vec!["rclone", "rcd", "--config", "/home/utente/.config/com.rcloneeasy.app/rclone.conf"]
+            vec!["rclone", "rcd", "--config", "/home/utente/.config/RcloneEasy/rclone.conf"]
         );
     }
 
@@ -465,7 +570,7 @@ pub(crate) mod tests {
         // Richiede rclone installato nell'ambiente di test.
         let dir = TempDir::new("kill-on-drop");
         let process =
-            start_rcd_in(&dir.config_path()).await.expect("rclone rcd dovrebbe avviarsi correttamente");
+            start_rcd_in(&dir.config_path(), None).await.expect("rclone rcd dovrebbe avviarsi correttamente");
         let version = query_version(&process).await.expect("il demone dovrebbe rispondere");
         assert!(version.starts_with('v'));
 
@@ -492,7 +597,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&mount_dir.path).unwrap();
         std::fs::write(source_dir.path.join("prova.txt"), "contenuto").unwrap();
 
-        let process = start_rcd_in(&rcd_dir.config_path()).await.expect("rclone rcd dovrebbe avviarsi correttamente");
+        let process = start_rcd_in(&rcd_dir.config_path(), None).await.expect("rclone rcd dovrebbe avviarsi correttamente");
         rc_call(
             &process,
             "mount/mount",
@@ -523,7 +628,7 @@ pub(crate) mod tests {
     async fn shutdown_kills_the_running_daemon() {
         let dir = TempDir::new("shutdown");
         let process =
-            start_rcd_in(&dir.config_path()).await.expect("rclone rcd dovrebbe avviarsi correttamente");
+            start_rcd_in(&dir.config_path(), None).await.expect("rclone rcd dovrebbe avviarsi correttamente");
         let pid = process.child.id().expect("il processo dovrebbe avere un pid mentre è vivo");
         let state = RcdState(Mutex::new(Ok(process)));
 
@@ -548,7 +653,7 @@ pub(crate) mod tests {
     async fn start_rcd_uses_the_given_config_path_not_the_system_one() {
         let dir = TempDir::new("own-config");
         let config_path = dir.config_path();
-        let process = start_rcd_in(&config_path).await.expect("rclone rcd dovrebbe avviarsi correttamente");
+        let process = start_rcd_in(&config_path, None).await.expect("rclone rcd dovrebbe avviarsi correttamente");
 
         let body = rc_call(&process, "config/paths", &serde_json::json!({}))
             .await

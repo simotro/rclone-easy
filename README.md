@@ -18,8 +18,13 @@ Costruita con [Tauri 2](https://tauri.app/) (Rust) + [SvelteKit](https://kit.sve
 - **Sincronizzazione bidirezionale**: tiene allineate due cartelle (locale e remota) in entrambe le direzioni, con gestione esplicita dei conflitti.
 - **Automazione**: ogni backup/sincronizzazione può girare da solo a intervalli regolari, senza bisogno di cron o systemd timer.
 - **Icona nella tray**: stato a colpo d'occhio (in corso / ultimo errore), menu rapido per montare/smontare e avviare i job direttamente da lì.
-- **Backup/ripristino cifrato** della configurazione dell'app (protetto da password: le credenziali dei tuoi remote non finiscono mai su disco in chiaro).
+- **Backup/ripristino cifrato**: il file di backup esportato è protetto da una password scelta da te, quindi può essere spostato/salvato altrove senza esporre le credenziali dei tuoi remote. (La configurazione live sul disco locale segue invece il comportamento nativo di rclone — vedi l'avviso sulla sicurezza qui sotto.)
+- **Password opzionale per la configurazione**: se preferisci, puoi proteggere `rclone.conf` con una password scelta da te — da quel momento l'app te la chiede ad ogni avvio.
 - **Wizard guidato** per collegare un provider, incluso un percorso passo-passo per creare un proprio client OAuth per Google Drive (Google ritirerà l'identità condivisa storica di rclone nel corso del 2026).
+
+## Sicurezza
+
+Rclone Easy usa la configurazione nativa di rclone (`rclone.conf`), salvata in `~/.config/RcloneEasy/` su Linux. Per default, come in rclone stesso, le credenziali dei remote lì dentro sono solo **offuscate** (un XOR reversibile, pensato contro lo sbirciare accidentale, non una vera cifratura) — non sono al sicuro da chi ha accesso al tuo disco. Puoi proteggerla per davvero con una password a tua scelta (pulsante "Imposta password" nell'app): da quel momento la configurazione viene cifrata sul disco e l'app la richiede ad ogni avvio. È facoltativa ma consigliata — se la dimentichi, però, non c'è modo di recuperarla. Il *file di backup esportato* è invece sempre cifrato con la password scelta al momento dell'export, indipendentemente da questa impostazione.
 
 ## Provare l'app
 

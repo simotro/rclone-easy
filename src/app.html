@@ -17,6 +17,16 @@
       spuntava fuori posto) — bug noto di WebKit con quella proprietà,
       niente qui dipende dalla sua trasparenza di layout (nessun
       flex/grid su body che si aspetti figli diretti).
+
+      Trascinamento della finestra (niente più barra del titolo nativa,
+      `decorations: false` in tauri.conf.json — vedi tray.rs): NON qui.
+      Marcare `<body>` o contenitori di pagina con `data-tauri-drag-region`
+      (approccio precedente, abbandonato) causava su WebKitGTK containing
+      block sbagliati per i `position: fixed` discendenti — stesso bug di
+      `display: contents` sopra, ma innescato dal marcatore invece che
+      dalla proprietà. Il trascinamento vive ora solo nella striscia
+      dedicata in alto (`.title-bar` in +layout.svelte), isolata da
+      qualunque contenuto/modal dell'app.
     -->
     %sveltekit.body%
   </body>

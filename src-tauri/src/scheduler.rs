@@ -75,9 +75,16 @@ async fn run_due_jobs(app: &AppHandle, config_dir: &Path) {
                 continue;
             }
             let name = job.name.clone();
+            let app = app.clone();
             let config_dir = config_dir.to_path_buf();
             tauri::async_runtime::spawn(async move {
-                let _ = crate::bisync::run_bisync_job_by_name(&config_dir, &name).await;
+                let state = app.state::<RcdState>();
+                // Senza la password (quando la config è protetta,
+                // config_password.rs), questo job automatico fallirebbe in
+                // silenzio esattamente come il click manuale "Sincronizza
+                // ora" — vedi il commento su `bisync::execute_bisync`.
+                let password = crate::rcd::current_config_password(&state).await;
+                let _ = crate::bisync::run_bisync_job_by_name(&config_dir, password.as_deref(), &name).await;
             });
         }
     }

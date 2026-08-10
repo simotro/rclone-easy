@@ -5,6 +5,7 @@
   import RemoteRow from "$lib/components/RemoteRow.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import ImportRemotesPanel from "$lib/components/ImportRemotesPanel.svelte";
+  import PasswordField from "$lib/components/PasswordField.svelte";
   import type { MountEntry, SyncJob, BisyncJob } from "$lib/types";
 
   type CheckState<T> = { status: "loading" } | { status: "ok"; value: T } | { status: "error"; message: string };
@@ -66,6 +67,13 @@
     });
     loadOwnRemotes();
     loadServices();
+    // Solo per l'etichetta del bottone ("Imposta password" vs "Gestisci
+    // password", richiesta di Simone) — lo stato effettivo per il
+    // contenuto del modal viene comunque riletto fresco ad ogni apertura
+    // in openPasswordModal().
+    invoke<boolean>("config_password_status")
+      .then((value) => (passwordAlreadySet = value))
+      .catch(() => {});
     // 10s: abbastanza spesso da tenere il countdown della prossima
     // esecuzione automatica ragionevolmente aggiornato, abbastanza raro da
     // non pesare (tre chiamate IPC leggere ogni 10s, indipendentemente da
@@ -73,6 +81,75 @@
     const id = setInterval(loadServices, 10000);
     return () => clearInterval(id);
   });
+
+  // --- Password della configurazione (rclone.conf), diversa da quella del
+  // singolo file di backup esportato: protegge la config live sul disco,
+  // vedi config_password.rs. ---
+  let passwordModalOpen = $state(false);
+  let passwordAlreadySet = $state(false);
+  let passwordCurrent = $state("");
+  let passwordNew = $state("");
+  let passwordConfirm = $state("");
+  let passwordBusy = $state(false);
+  let passwordError = $state<string | null>(null);
+
+  async function openPasswordModal() {
+    passwordCurrent = "";
+    passwordNew = "";
+    passwordConfirm = "";
+    passwordError = null;
+    passwordModalOpen = true;
+    try {
+      passwordAlreadySet = await invoke<boolean>("config_password_status");
+    } catch {
+      passwordAlreadySet = false;
+    }
+  }
+
+  async function submitPassword() {
+    if (passwordAlreadySet && passwordCurrent.trim() === "") {
+      passwordError = "Inserisci la password attuale.";
+      return;
+    }
+    if (passwordNew.length < 8) {
+      passwordError = "La password deve avere almeno 8 caratteri.";
+      return;
+    }
+    if (passwordNew !== passwordConfirm) {
+      passwordError = "Le due password non coincidono.";
+      return;
+    }
+    passwordBusy = true;
+    passwordError = null;
+    try {
+      await invoke("set_config_password", {
+        currentPassword: passwordAlreadySet ? passwordCurrent : null,
+        newPassword: passwordNew,
+      });
+      passwordModalOpen = false;
+    } catch (error) {
+      passwordError = String(error);
+    } finally {
+      passwordBusy = false;
+    }
+  }
+
+  async function removePassword() {
+    if (passwordCurrent.trim() === "") {
+      passwordError = "Inserisci la password attuale per rimuoverla.";
+      return;
+    }
+    passwordBusy = true;
+    passwordError = null;
+    try {
+      await invoke("remove_config_password", { currentPassword: passwordCurrent });
+      passwordModalOpen = false;
+    } catch (error) {
+      passwordError = String(error);
+    } finally {
+      passwordBusy = false;
+    }
+  }
 
   let importExportModalOpen = $state(false);
   // "menu" = le 3 opzioni; "import-remotes" = il pannello di import
@@ -205,6 +282,7 @@
   <section>
     <div class="top-actions">
       <button type="button" onclick={() => goto("/nuovo-remote")}>Aggiungi Remote</button>
+      <button type="button" onclick={openPasswordModal}>{passwordAlreadySet ? "Gestisci password" : "Imposta password"}</button>
       <button type="button" onclick={openImportExportModal}>Importa / Esporta…</button>
     </div>
 
@@ -223,6 +301,42 @@
     {/if}
   </section>
 </main>
+
+<Modal bind:open={passwordModalOpen} title="Password della configurazione">
+  <div class="stack-form">
+    {#if passwordAlreadySet}
+      <p class="hint">
+        La configurazione è già protetta da una password. Inserisci quella attuale per cambiarla o rimuoverla.
+      </p>
+    {:else}
+      <p class="hint">
+        Protegge <code>rclone.conf</code> (dove sono salvate le credenziali dei tuoi remote) con una password: senza
+        non si può avviare l'app. Facoltativo, ma consigliato. Se la dimentichi non c'è modo di recuperarla.
+      </p>
+    {/if}
+    {#if passwordAlreadySet}
+      <PasswordField bind:value={passwordCurrent} label="Password attuale" disabled={passwordBusy} />
+    {/if}
+    <PasswordField
+      bind:value={passwordNew}
+      label={passwordAlreadySet ? "Nuova password" : "Password"}
+      placeholder="Almeno 8 caratteri"
+      disabled={passwordBusy}
+    />
+    <PasswordField bind:value={passwordConfirm} label="Conferma password" disabled={passwordBusy} />
+    {#if passwordError}
+      <p class="error">✗ {passwordError}</p>
+    {/if}
+    <div class="stack-actions">
+      {#if passwordAlreadySet}
+        <button type="button" class="link-button" onclick={removePassword} disabled={passwordBusy}>Rimuovi password</button>
+      {/if}
+      <button type="button" onclick={submitPassword} disabled={passwordBusy}>
+        {passwordBusy ? "In corso…" : passwordAlreadySet ? "Cambia password" : "Imposta password"}
+      </button>
+    </div>
+  </div>
+</Modal>
 
 <Modal bind:open={importExportModalOpen} title="Importa / Esporta">
   {#if importExportView === "menu"}
@@ -409,5 +523,11 @@ section {
 .stack-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 0.6em;
+}
+
+.stack-actions:has(.link-button) {
+  justify-content: space-between;
+  align-items: center;
 }
 </style>

@@ -771,8 +771,8 @@ mod tests {
 
     #[test]
     fn extract_config_path_reads_the_config_field() {
-        let body = serde_json::json!({"config": "/home/utente/.config/com.rcloneeasy.app/rclone.conf", "cache": "x", "temp": "y"});
-        assert_eq!(extract_config_path(&body).unwrap(), "/home/utente/.config/com.rcloneeasy.app/rclone.conf");
+        let body = serde_json::json!({"config": "/home/utente/.config/RcloneEasy/rclone.conf", "cache": "x", "temp": "y"});
+        assert_eq!(extract_config_path(&body).unwrap(), "/home/utente/.config/RcloneEasy/rclone.conf");
     }
 
     #[test]
