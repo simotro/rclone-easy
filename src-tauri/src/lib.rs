@@ -147,6 +147,18 @@ pub fn run_or_password_helper() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Deve essere il primo plugin registrato (raccomandazione di Tauri):
+        // rileva una seconda istanza già all'avvio, prima che qualunque
+        // altra cosa (demone rcd, tray) parta per davvero in quella seconda
+        // copia. Senza questo, avviare l'AppImage due volte produceva due
+        // processi completi e due icone nella tray (osservato da Simone) —
+        // nessun controllo impediva una seconda istanza. La callback gira
+        // nella PRIMA istanza quando ne viene lanciata una seconda: si
+        // limita a riportare in primo piano la finestra già esistente,
+        // stesso comportamento dell'icona della tray.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            tray::show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())

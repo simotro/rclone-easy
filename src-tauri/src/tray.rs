@@ -619,7 +619,7 @@ fn toggle_main_window(app: &AppHandle) {
     }
 }
 
-fn show_main_window(app: &AppHandle) {
+pub(crate) fn show_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else { return };
     let _ = window.show();
     let _ = window.set_focus();
