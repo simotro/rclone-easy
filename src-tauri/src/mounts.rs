@@ -369,7 +369,17 @@ fn open_in_file_manager(path: &str) {
     // volta capito cosa succede davvero.
     eprintln!("[mounts] apro '{path}' con: {command:?}");
     match command.spawn() {
-        Ok(child) => eprintln!("[mounts] xdg-open avviato, pid {:?}", child.id()),
+        Ok(mut child) => {
+            eprintln!("[mounts] xdg-open avviato, pid {:?}", child.id());
+            // Aspetta l'uscita su un thread a parte (non blocca il resto
+            // dell'app): finora non controllavamo affatto il codice di
+            // uscita di xdg-open, solo che fosse partito — potrebbe finire
+            // con un errore che non vedevamo.
+            std::thread::spawn(move || match child.wait() {
+                Ok(status) => eprintln!("[mounts] xdg-open terminato con: {status}"),
+                Err(e) => eprintln!("[mounts] impossibile attendere xdg-open: {e}"),
+            });
+        }
         Err(e) => eprintln!("[mounts] xdg-open non è partito: {e}"),
     }
 }
