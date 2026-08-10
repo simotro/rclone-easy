@@ -23,6 +23,13 @@ use oauth_remote::{answer_oauth_question, cancel_oauth, create_oauth_remote, Pen
 mod tray;
 use tray::hide_window;
 
+// xdg-desktop-portal è un concetto specifico dei desktop Linux (D-Bus) —
+// non ha senso su Windows/macOS, dove tra l'altro non esiste un bus di
+// sessione a cui connettersi (fallirebbe silenziosamente ad ogni avvio,
+// innocuo ma inutile). Escluso anche dalla compilazione, non solo
+// dall'esecuzione: evita di trascinare la dipendenza `zbus` su piattaforme
+// dove non serve a nulla.
+#[cfg(target_os = "linux")]
 mod background_portal;
 
 mod jobs;
@@ -167,6 +174,7 @@ pub fn run() {
             spawn_signal_shutdown_handler(app.handle().clone());
             tray::build_tray(app.handle());
             hide_instead_of_close(app.handle());
+            #[cfg(target_os = "linux")]
             background_portal::request_background();
             // In background, non bloccante: montare subito i mount con
             // auto_mount potrebbe richiedere secondi (connessione a un

@@ -301,7 +301,7 @@ fn is_our_orphaned_rcd(args: &[String], config_path_str: &str) -> bool {
     is_rcd && has_our_config
 }
 
-#[cfg(not(test))]
+#[cfg(all(target_os = "linux", not(test)))]
 fn cleanup_orphaned_rcd_processes(config_path: &Path) {
     let Ok(entries) = std::fs::read_dir("/proc") else { return };
     let config_path_str = config_path.to_string_lossy().to_string();
@@ -333,7 +333,7 @@ async fn start_rcd_in(config_path: &Path, password: Option<&str>) -> Result<RcdP
             .map_err(|e| format!("impossibile creare la cartella di configurazione '{}': {e}", parent.display()))?;
     }
 
-    #[cfg(not(test))]
+    #[cfg(all(target_os = "linux", not(test)))]
     cleanup_orphaned_rcd_processes(config_path);
 
     let port = pick_free_port()?;

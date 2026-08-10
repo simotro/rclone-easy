@@ -2,9 +2,19 @@ use std::path::Path;
 use tokio::process::Command;
 
 /// Nome del sidecar Tauri per rclone (`externalBin` in tauri.conf.json),
-/// convenzione `<nome>-<target-triple>` — solo Linux x86_64 per ora, coerente
-/// con la fase attuale solo-Linux del progetto (vedi SPEC.md).
+/// convenzione `<nome>-<target-triple>[.exe su Windows]`.
+#[cfg(target_os = "windows")]
+const SIDECAR_NAME: &str = "rclone-x86_64-pc-windows-msvc.exe";
+#[cfg(not(target_os = "windows"))]
 const SIDECAR_NAME: &str = "rclone-x86_64-unknown-linux-gnu";
+
+/// Nome che Tauri dà al sidecar dopo averlo copiato accanto all'eseguibile
+/// principale in un'app pacchettizzata (senza più il suffisso di
+/// target-triple) — `.exe` su Windows, nessuna estensione altrove.
+#[cfg(target_os = "windows")]
+const BUNDLED_NAME: &str = "rclone.exe";
+#[cfg(not(target_os = "windows"))]
+const BUNDLED_NAME: &str = "rclone";
 
 /// Risolve il percorso del binario rclone da usare, dato il percorso
 /// dell'eseguibile corrente — separata da `resolve_rclone_binary` solo per
@@ -22,7 +32,7 @@ const SIDECAR_NAME: &str = "rclone-x86_64-unknown-linux-gnu";
 ///    PATH di sistema, lo stesso comportamento di prima di questo slice.
 fn resolve_rclone_binary_from(exe: &Path) -> String {
     if let Some(parent) = exe.parent() {
-        let candidate = parent.join("rclone");
+        let candidate = parent.join(BUNDLED_NAME);
         if candidate.is_file() {
             return candidate.to_string_lossy().to_string();
         }
