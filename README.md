@@ -1,5 +1,6 @@
 <div align="center">
-  <img src="docs/screenshot-dark.png" alt="Rclone Easy — schermata principale" width="700">
+  <img src="docs/screenshot-dark.png" alt="Rclone Easy — schermata principale, tema scuro" width="49%">
+  <img src="docs/screenshot-light.png" alt="Rclone Easy — schermata principale, tema chiaro" width="49%">
 </div>
 
 # Rclone Easy
