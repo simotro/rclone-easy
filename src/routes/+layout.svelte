@@ -64,6 +64,22 @@
   display: flex;
   flex-direction: column;
   min-height: 100vh;
+  /* Senza barra del titolo nativa (`decorations: false`, vedi
+     tao_wayland_x_button_bug — scelta finale, non provvisoria: il bug del
+     pulsante X su KDE/Wayland è fisso solo in tao >= 0.36, non ancora
+     raggiungibile dalla versione di Tauri usata qui) la finestra non ha più
+     un bordo/ombra propri forniti dal window manager, quindi si confonde
+     con lo sfondo del desktop dietro di essa (segnalato da Simone
+     l'11/8/2026). Un bordo sottile disegnato da noi risolve senza
+     riaprire la questione delle decorazioni. `box-sizing: border-box`
+     tiene il bordo dentro il budget di `min-height: 100vh` invece di
+     sommarcisi sopra — stessa cautela già presa per il margine di default
+     di `body` (vedi shared-styles.css), che causava una scrollbar
+     ingiustificata per un motivo simile.
+  */
+  box-sizing: border-box;
+  border: 1px solid var(--border-color);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
 }
 
 .title-bar {

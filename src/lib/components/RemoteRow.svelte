@@ -669,7 +669,7 @@
     <div class="row-actions">
       <button
         type="button"
-        class="icon-button"
+        class="icon-button action-mount"
         class:active={activeService === "mount"}
         title="Mount: collega questo remote come cartella locale"
         onclick={() => onServiceIconClick("mount")}
@@ -678,7 +678,7 @@
       </button>
       <button
         type="button"
-        class="icon-button"
+        class="icon-button action-backup"
         class:active={activeService === "backup"}
         title="Backup: sincronizzazione in una sola direzione"
         onclick={() => onServiceIconClick("backup")}
@@ -687,7 +687,7 @@
       </button>
       <button
         type="button"
-        class="icon-button"
+        class="icon-button action-bisync"
         class:active={activeService === "bisync"}
         title="Sincronizzazione bidirezionale"
         onclick={() => onServiceIconClick("bisync")}
@@ -703,7 +703,7 @@
       </a>
       <button
         type="button"
-        class="icon-button"
+        class="icon-button action-delete"
         title="Elimina remote"
         onclick={openDeleteRemoteModal}
         disabled={deletingRemote}
@@ -1079,24 +1079,40 @@
   margin: 0 0.1em;
 }
 
+/* Un colore per azione (mount = accento dell'app, backup = blu, bisync =
+   viola) invece di un unico stile piatto: da spento è un contorno tenue
+   con l'icona già nel suo colore, da attivo il chip si riempie a tinta
+   piena con un alone colorato che lo fa "accendere" — modifica resta
+   sempre neutro (nessun concetto di attivo/spento), elimina si colora di
+   rosso solo al passaggio del mouse, mai a riposo. Elevazione leggera
+   (ombra + sollevamento in hover) per l'effetto "piatto ma con un po' di
+   profondità" richiesto, invece del semplice `filter: brightness` di
+   prima. */
 .icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.6em;
-  height: 2.6em;
+  width: 2.7em;
+  height: 2.7em;
   font-size: 1rem;
-  border-radius: 8px;
+  border-radius: 12px;
   border: 1px solid var(--border-color-subtle);
   background-color: var(--surface-tint);
   color: var(--text-color);
   cursor: pointer;
   text-decoration: none;
-  transition: background-color 0.12s ease, border-color 0.12s ease;
+  box-shadow: var(--shadow-icon-rest);
+  transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease,
+    transform 0.14s cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 
 .icon-button:hover:not(:disabled) {
-  filter: brightness(1.15);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-icon-hover);
+}
+
+.icon-button:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .icon-button:disabled {
@@ -1104,10 +1120,51 @@
   opacity: 0.5;
 }
 
-.icon-button.active {
-  background-color: var(--accent-bg);
+.icon-button.action-mount {
   color: var(--accent);
-  border-color: var(--accent);
+  background-color: var(--accent-bg);
+}
+
+.icon-button.action-backup {
+  color: var(--blue);
+  background-color: var(--blue-bg);
+}
+
+.icon-button.action-bisync {
+  color: var(--violet);
+  background-color: var(--violet-bg);
+}
+
+.icon-button.action-mount.active {
+  color: var(--bg-surface);
+  background-color: var(--accent);
+  border-color: transparent;
+  box-shadow: var(--shadow-icon-rest), 0 0 0 4px var(--accent-bg);
+}
+
+.icon-button.action-backup.active {
+  color: var(--bg-surface);
+  background-color: var(--blue);
+  border-color: transparent;
+  box-shadow: var(--shadow-icon-rest), 0 0 0 4px var(--blue-bg);
+}
+
+.icon-button.action-bisync.active {
+  color: var(--bg-surface);
+  background-color: var(--violet);
+  border-color: transparent;
+  box-shadow: var(--shadow-icon-rest), 0 0 0 4px var(--violet-bg);
+}
+
+.icon-button.active:hover:not(:disabled) {
+  box-shadow: var(--shadow-icon-hover);
+}
+
+.icon-button.action-delete:hover:not(:disabled),
+.icon-button.action-delete:focus-visible {
+  color: var(--bg-surface);
+  background-color: var(--status-red);
+  border-color: transparent;
 }
 
 .modal-form {

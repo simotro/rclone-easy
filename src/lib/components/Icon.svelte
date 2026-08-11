@@ -3,21 +3,24 @@
 </script>
 
 {#if kind === "mount"}
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="2" y="6" width="20" height="12" rx="2" />
-    <line x1="2" y1="12" x2="22" y2="12" />
-    <circle cx="6" cy="15" r="1.1" fill="currentColor" stroke="none" />
-    <circle cx="9.8" cy="15" r="1.1" fill="currentColor" stroke="none" />
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="2.5" y="6" width="19" height="12" rx="3.5" />
+    <path d="M2.5 12.5h19" />
+    <circle cx="6.3" cy="15.2" r="1" fill="currentColor" stroke="none" />
+    <circle cx="9.6" cy="15.2" r="1" fill="currentColor" stroke="none" />
   </svg>
 {:else if kind === "backup"}
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M3 12a9 9 0 0 1 15.3-6.4L21 8" />
-    <polyline points="21 3 21 8 16 8" />
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 18a4.5 4.5 0 0 1-1-8.9 6 6 0 0 1 11.6-2A4.5 4.5 0 0 1 17 18H7Z" />
+    <path d="M12 9.5v7" />
+    <path d="M9 12.2 12 9.3l3 2.9" />
   </svg>
 {:else if kind === "bisync"}
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M4 7h13l-3-3" />
-    <path d="M20 17H7l3 3" />
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6.5 8.5A6.5 6.5 0 0 1 18 6.2" />
+    <path d="M17.5 15.5A6.5 6.5 0 0 1 6 17.8" />
+    <path d="M17.3 3.8 18 6.2l-2.5.6" />
+    <path d="M6.7 20.2 6 17.8l2.5-.6" />
   </svg>
 {:else if kind === "edit"}
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
