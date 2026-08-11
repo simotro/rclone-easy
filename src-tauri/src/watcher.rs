@@ -429,4 +429,42 @@ mod tests {
         guard.roots.remove(&source_dir.path);
         guard.pending.remove(&job);
     }
+
+    /// Il watch ricorsivo copre anche le sottocartelle create *dopo*
+    /// l'avvio dell'osservazione, non solo quelle già presenti al momento
+    /// di `watch()` — inotify di per sé non è ricorsivo a livello di
+    /// kernel, ma `notify` aggiunge dinamicamente un watch per ogni nuova
+    /// sottocartella non appena ne rileva la creazione. Nessuna attesa tra
+    /// la creazione della sottocartella e la scrittura al suo interno: è
+    /// il caso reale più stringente (es. `cp -r`, estrazione di un
+    /// archivio), verificato su più tentativi per escludere una race
+    /// dovuta al breve intervallo in cui il nuovo watch non è ancora
+    /// attivo.
+    #[tokio::test]
+    async fn writing_inside_a_freshly_created_subfolder_marks_its_job_as_hot() {
+        for attempt in 0..10 {
+            let root = crate::rcd::tests::TempDir::new(&format!("watcher-subfolder-{attempt}"));
+            std::fs::create_dir_all(&root.path).unwrap();
+
+            let mut watcher = notify::recommended_watcher(on_event).expect("il watcher dovrebbe avviarsi");
+            watcher.watch(&root.path, RecursiveMode::Recursive).expect("dovrebbe riuscire a osservare una cartella reale");
+
+            let job = WatchedJob::Backup(format!("prova-sottocartella-{attempt}"));
+            {
+                let mut guard = state().lock().unwrap();
+                guard.roots.insert(root.path.clone(), vec![job.clone()]);
+            }
+
+            let sub = root.path.join("sottocartella");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join("dentro.txt"), "contenuto").unwrap();
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(is_hot(&job), "tentativo {attempt}: un file scritto in una sottocartella appena creata dovrebbe marcare il job come caldo");
+
+            let mut guard = state().lock().unwrap();
+            guard.roots.remove(&root.path);
+            guard.pending.remove(&job);
+        }
+    }
 }

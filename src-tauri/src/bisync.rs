@@ -330,6 +330,10 @@ async fn execute_bisync(
         "conflitto".to_string(),
         "--suffix-keep-extension".to_string(),
         "--use-json-log".to_string(),
+        // Sincronizza anche la creazione (e cancellazione) delle cartelle
+        // vuote tra i due lati — senza questo, `bisync` le ignora del
+        // tutto, anche se esistono davvero su uno dei due lati.
+        "--create-empty-src-dirs".to_string(),
     ];
     if resync {
         args.push("--resync".to_string());
@@ -810,6 +814,40 @@ mod tests {
         assert_eq!(
             path1_content, "versione nuova",
             "la versione più recente deve vincere sul resync, non semplicemente quella locale"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_bisync_job_also_syncs_empty_directories_between_both_sides() {
+        let jobs_dir = TempDir::new("bisync-empty-dirs-jobs");
+        let path1_dir = TempDir::new("bisync-empty-dirs-path1");
+        let path2_dir = TempDir::new("bisync-empty-dirs-path2");
+        std::fs::create_dir_all(&path1_dir.path).unwrap();
+        std::fs::create_dir_all(&path2_dir.path).unwrap();
+        // Un placeholder evita la baseline non valida su due cartelle
+        // completamente vuote, stesso motivo del test del conflitto sopra.
+        std::fs::write(path1_dir.path.join("placeholder.txt"), "presente fin dall'inizio").unwrap();
+
+        create_bisync_job_in(
+            &jobs_dir.path,
+            "prova-cartelle-vuote",
+            &path1_dir.path.to_string_lossy(),
+            &path2_dir.path.to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&jobs_dir.path).unwrap();
+
+        let baseline = run_bisync_job_by_name(&jobs_dir.path, None, "prova-cartelle-vuote").await.unwrap();
+        assert!(baseline.success, "il resync iniziale dovrebbe riuscire: {baseline:?}");
+
+        std::fs::create_dir_all(path1_dir.path.join("cartella-vuota")).unwrap();
+
+        let result = run_bisync_job_by_name(&jobs_dir.path, None, "prova-cartelle-vuote").await.unwrap();
+        assert!(result.success, "{result:?}");
+        assert!(
+            path2_dir.path.join("cartella-vuota").is_dir(),
+            "una cartella vuota creata su un lato dovrebbe comparire anche sull'altro"
         );
     }
 

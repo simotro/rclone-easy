@@ -226,8 +226,13 @@ async fn execute_sync(state: &RcdState, source: &str, destination: &str, propaga
     let info = rcd::connection_info(state).await?;
 
     let endpoint = if propagate_deletions { "sync/sync" } else { "sync/copy" };
-    let created =
-        info.call(endpoint, serde_json::json!({ "srcFs": source, "dstFs": destination, "_async": true })).await?;
+    // Le cartelle vuote della sorgente vengono comunque create nella
+    // destinazione — senza questo, `sync/copy`/`sync/sync` le ignorano del
+    // tutto, anche se esistono davvero in sorgente (comportamento di
+    // default di rclone, non specifico di questa app).
+    let created = info
+        .call(endpoint, serde_json::json!({ "srcFs": source, "dstFs": destination, "createEmptySrcDirs": true, "_async": true }))
+        .await?;
     let job_id = created
         .get("jobid")
         .and_then(|v| v.as_i64())
@@ -581,6 +586,34 @@ mod tests {
         let last_run = jobs[0].history.first().expect("la cronologia dovrebbe contenere l'esecuzione appena fatta");
         assert!(last_run.success);
         assert_eq!(last_run.message, "");
+    }
+
+    #[tokio::test]
+    async fn run_job_also_creates_empty_source_directories_on_the_destination() {
+        let rcd_dir = TempDir::new("jobs-run-empty-rcd");
+        let jobs_dir = TempDir::new("jobs-run-empty-jobs");
+        let source_dir = TempDir::new("jobs-run-empty-source");
+        let dest_dir = TempDir::new("jobs-run-empty-dest");
+        std::fs::create_dir_all(source_dir.path.join("cartella-vuota")).unwrap();
+        std::fs::create_dir_all(&dest_dir.path).unwrap();
+
+        let state = rcd::build_state(rcd_dir.config_path()).await;
+        create_job_in(
+            &jobs_dir.path,
+            "copia-cartella-vuota",
+            &source_dir.path.to_string_lossy(),
+            &dest_dir.path.to_string_lossy(),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let result = run_job_by_name(&jobs_dir.path, &state, "copia-cartella-vuota").await;
+        assert!(result.is_ok(), "la sync dovrebbe riuscire: {result:?}");
+        assert!(
+            dest_dir.path.join("cartella-vuota").is_dir(),
+            "la cartella vuota della sorgente dovrebbe comunque comparire nella destinazione"
+        );
     }
 
     #[tokio::test]
