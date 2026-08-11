@@ -1,5 +1,6 @@
 use crate::rcd::RcdState;
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::ModifyKind;
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -49,12 +50,30 @@ fn is_local_path(fs: &str) -> bool {
     fs.starts_with('/')
 }
 
+/// `true` per un evento che rappresenta davvero una modifica al contenuto
+/// (creazione, scrittura, rinomina, cancellazione) — `false` per la sola
+/// lettura/apertura di un file o un tocco di metadati senza cambio di
+/// contenuto (`ATTRIB`, es. mtime). La distinzione è cruciale: `rclone`
+/// legge (apre e chiude) ogni file della cartella locale sia per un
+/// backup sia per la scansione di un bisync, e sul backend inotify di
+/// Linux quella lettura produce comunque eventi (`OPEN`/`CLOSE_NOWRITE`,
+/// mappati da `notify` su `EventKind::Access`). Senza questo filtro, la
+/// sincronizzazione stessa marcherebbe la propria cartella come "appena
+/// modificata", riavviando il debounce e ripartendo da sola senza fine.
+fn changes_content(kind: &EventKind) -> bool {
+    match kind {
+        EventKind::Access(_) => false,
+        EventKind::Modify(ModifyKind::Metadata(_)) => false,
+        _ => true,
+    }
+}
+
 /// Aggiorna lo stato "in attesa di quiete" per i job la cui cartella
 /// contiene il percorso dell'evento — gira sul thread dedicato di
 /// `notify`, non nel runtime async.
 fn on_event(res: notify::Result<Event>) {
     let Ok(event) = res else { return };
-    if event.paths.is_empty() {
+    if event.paths.is_empty() || !changes_content(&event.kind) {
         return;
     }
     let mut guard = state().lock().unwrap();
@@ -327,6 +346,51 @@ mod tests {
         assert!(!is_settled(last_event, last_event + Duration::from_secs(7), debounce), "non ancora quieta un secondo prima");
         assert!(is_settled(last_event, last_event + debounce, debounce), "quieta esattamente al periodo di debounce");
         assert!(is_settled(last_event, last_event + Duration::from_secs(30), debounce), "quieta ben oltre il debounce");
+    }
+
+    #[test]
+    fn changes_content_ignores_reads_and_metadata_only_touches() {
+        assert!(!changes_content(&EventKind::Access(notify::event::AccessKind::Open(notify::event::AccessMode::Read))));
+        assert!(!changes_content(&EventKind::Access(notify::event::AccessKind::Close(notify::event::AccessMode::Read))));
+        assert!(!changes_content(&EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::WriteTime))));
+        assert!(changes_content(&EventKind::Create(notify::event::CreateKind::File)));
+        assert!(changes_content(&EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any))));
+        assert!(changes_content(&EventKind::Remove(notify::event::RemoveKind::File)));
+    }
+
+    /// Riproduce esattamente il bug corretto in questo modulo: `rclone` che
+    /// legge un file della cartella osservata (come fa per caricarlo in un
+    /// backup, o per scansionarlo durante un bisync) non deve marcare il
+    /// job come "caldo" — altrimenti la sincronizzazione stessa
+    /// innescherebbe la successiva, senza fine.
+    #[tokio::test]
+    async fn reading_a_file_in_a_watched_folder_does_not_mark_its_job_as_hot() {
+        let source_dir = crate::rcd::tests::TempDir::new("watcher-fs-read-only");
+        std::fs::create_dir_all(&source_dir.path).unwrap();
+        let file_path = source_dir.path.join("prova.txt");
+        std::fs::write(&file_path, "contenuto di prova").unwrap();
+
+        let mut watcher = notify::recommended_watcher(on_event).expect("il watcher dovrebbe avviarsi");
+        watcher.watch(&source_dir.path, RecursiveMode::Recursive).expect("dovrebbe riuscire a osservare una cartella reale");
+
+        let job = WatchedJob::Backup("prova-watcher-lettura".to_string());
+        {
+            let mut guard = state().lock().unwrap();
+            guard.roots.insert(source_dir.path.clone(), vec![job.clone()]);
+        }
+
+        // Apre e legge il file per intero, poi lo chiude — lo stesso
+        // pattern (open, read, close) che `rclone` esegue per caricare un
+        // file in un backup, senza mai scriverci sopra.
+        let _ = std::fs::read(&file_path).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert!(!is_hot(&job), "una semplice lettura non dovrebbe marcare il job come caldo");
+
+        let mut guard = state().lock().unwrap();
+        guard.roots.remove(&source_dir.path);
+        guard.pending.remove(&job);
     }
 
     /// Verifica il pezzo che i test puri sopra non possono coprire: che una
