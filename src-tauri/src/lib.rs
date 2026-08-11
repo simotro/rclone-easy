@@ -45,6 +45,7 @@ mod bisync;
 use bisync::{create_bisync_job, delete_bisync_job, list_bisync_jobs, run_bisync_job, update_bisync_job};
 
 mod scheduler;
+mod watcher;
 
 mod backup;
 use backup::{export_backup, import_backup};
@@ -206,6 +207,10 @@ pub fn run() {
             // automatica configurata — vedi scheduler.rs sul perché non un
             // systemd user timer esterno.
             scheduler::spawn(app.handle().clone(), config_dir.clone());
+            // Osserva le cartelle locali di backup/bisync con automazione
+            // attiva, per anticipare la sincronizzazione rispetto al solo
+            // intervallo fisso — vedi watcher.rs.
+            watcher::spawn(app.handle().clone(), config_dir.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

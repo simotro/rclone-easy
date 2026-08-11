@@ -1,6 +1,6 @@
 [package]
 name = "rclone-easy"
-version = "0.2.0"
+version = "0.3.0"
 description = "Un'interfaccia grafica semplice per rclone"
 authors = ["simotro"]
 license = "MIT"
@@ -32,6 +32,7 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 toml = "1"
 age = "0.12.1"
 tauri-plugin-single-instance = "2.4.3"
+notify = "8.2.0"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
