@@ -26,9 +26,13 @@ Costruita con [Tauri 2](https://tauri.app/) (Rust) + [SvelteKit](https://kit.sve
 
 Rclone Easy usa la configurazione nativa di rclone (`rclone.conf`), salvata in `~/.config/RcloneEasy/` su Linux. Per default, come in rclone stesso, le credenziali dei remote lì dentro sono solo **offuscate** (un XOR reversibile, pensato contro lo sbirciare accidentale, non una vera cifratura) — non sono al sicuro da chi ha accesso al tuo disco. Puoi proteggerla per davvero con una password a tua scelta (pulsante "Imposta password" nell'app): da quel momento la configurazione viene cifrata sul disco e l'app la richiede ad ogni avvio. È facoltativa ma consigliata — se la dimentichi, però, non c'è modo di recuperarla. Il *file di backup esportato* è invece sempre cifrato con la password scelta al momento dell'export, indipendentemente da questa impostazione.
 
-## Provare l'app
+## Scaricare l'app
 
-Il progetto è ancora agli inizi: non ci sono ancora build precompilate, va compilato da sorgente.
+**[⬇ Scarica l'ultima versione](../../releases/latest)** — installer Windows (.exe) e pacchetti Linux (.deb, .rpm, AppImage). Lo storico completo delle versioni precedenti è nella [pagina delle release](../../releases).
+
+Nessuna firma del codice per ora: Windows mostrerà l'avviso SmartScreen ("Windows ha protetto il tuo PC") al primo avvio — clicca "Ulteriori informazioni" poi "Esegui comunque". macOS non è ancora supportato.
+
+### Compilare da sorgente
 
 ```bash
 git clone https://github.com/simotro/rclone-easy.git
