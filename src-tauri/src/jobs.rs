@@ -99,11 +99,14 @@ fn save_to_dir(config_dir: &Path, jobs: &[SyncJob]) -> Result<(), String> {
 }
 
 /// Nome del remote referenziato da una stringa `fs` (`remoto:percorso`),
-/// `None` se è un percorso locale — riconosciuto dal `/` iniziale (tutti i
-/// percorsi locali scelti dal selettore di cartelle sono assoluti, nessun
-/// nome di remote rclone può iniziare per `/`).
+/// `None` se è un percorso locale — riconosciuto tramite `Path::is_absolute`
+/// (tutti i percorsi locali scelti dal selettore di cartelle sono
+/// assoluti), consapevole della piattaforma: un controllo sul solo `/`
+/// iniziale classificherebbe erroneamente ogni percorso locale Windows
+/// (`C:\Users\...`, che non inizia per `/`) come se fosse un riferimento a
+/// un remote, scambiando la lettera di unità per un finto nome di remote.
 fn remote_name_of(fs: &str) -> Option<&str> {
-    if fs.starts_with('/') {
+    if Path::new(fs).is_absolute() {
         return None;
     }
     fs.split_once(':').map(|(name, _)| name)

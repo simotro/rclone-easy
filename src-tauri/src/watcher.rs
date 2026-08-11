@@ -42,12 +42,16 @@ fn state() -> &'static Mutex<WatcherState> {
 }
 
 /// Un percorso locale (scelto dal selettore di cartelle del frontend) è
-/// sempre assoluto; nessun nome di remote rclone può iniziare per `/` —
-/// stessa logica duplicata in `jobs.rs`/`bisync.rs`/`mounts.rs`, qui
-/// riscritta invece di condivisa per restare indipendente dagli altri
-/// moduli.
+/// sempre assoluto. `Path::is_absolute` è consapevole della piattaforma:
+/// su Linux/macOS riconosce il `/` iniziale, su Windows un prefisso di
+/// unità (`C:\...`) o UNC (`\\server\share`) — un controllo su un solo
+/// carattere iniziale (`starts_with('/')`, come nella logica analoga di
+/// `jobs.rs`/`bisync.rs`/`mounts.rs`) classifica erroneamente OGNI
+/// percorso locale Windows come se fosse un riferimento a un remote
+/// (`C:\Users\...` non inizia per `/`), escludendo il job dal watcher
+/// ancora prima di provare a osservarlo.
 fn is_local_path(fs: &str) -> bool {
-    fs.starts_with('/')
+    Path::new(fs).is_absolute()
 }
 
 /// `true` per un evento che rappresenta davvero una modifica al contenuto
