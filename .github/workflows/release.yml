@@ -122,7 +122,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v${{ inputs.version }}" dist/* \
+          # "dist/*" da solo prende anche le sottocartelle deb/rpm/appimage
+          # (l'artefatto Linux mantiene la struttura relativa ai tre percorsi
+          # dati a upload-artifact, che condividono un antenato comune) — gh
+          # release create tenta di caricarle come fossero file e fallisce.
+          # find isola i file veri, a qualunque profondità si trovino.
+          mapfile -t FILES < <(find dist -type f)
+          gh release create "v${{ inputs.version }}" "${FILES[@]}" \
             --repo "${{ github.repository }}" \
             --title "Rclone Easy v${{ inputs.version }}" \
             --generate-notes
