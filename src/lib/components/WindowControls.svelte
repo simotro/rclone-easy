@@ -6,10 +6,10 @@
   // tutto (`decorations: false` in tauri.conf.json) per un bug di tao su
   // Wayland/KDE che rendeva la X non cliccabile — vedi `tray.rs`. Nasconde
   // soltanto (stessa azione della X di sempre, `hide_window` in tray.rs):
-  // un secondo pulsante "chiudi definitivamente" accanto a questo
-  // confondeva l'utente (richiesta esplicita di Simone) — l'uscita vera
-  // resta raggiungibile solo da "Esci" nel menu della tray, unico posto
-  // dove ci si aspetta un'azione distruttiva del genere.
+  // niente secondo pulsante "chiudi definitivamente" accanto a questo, per
+  // non confondere l'utente — l'uscita vera resta raggiungibile solo da
+  // "Esci" nel menu della tray, unico posto dove ci si aspetta un'azione
+  // distruttiva del genere.
   async function hide() {
     await invoke("hide_window");
   }

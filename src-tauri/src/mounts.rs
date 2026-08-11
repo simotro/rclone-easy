@@ -504,16 +504,13 @@ pub async fn mount_now_and_open(app: AppHandle, state: tauri::State<'_, RcdState
 /// - `LD_LIBRARY_PATH` e affini (`GIO_MODULE_DIR`, `QT_PLUGIN_PATH`, ecc.)
 ///   puntano alle librerie bundlate nell'AppImage, non quelle di sistema;
 /// - `PATH` antepone `$APPDIR/usr/bin`, dove l'AppDir bundla una propria
-///   copia di `xdg-open` — identica byte per byte a quella di sistema
-///   (verificato), eppure invocata da lì non apre il file manager (spawn
-///   riuscito, `exit status: 0`, nessuna finestra — causa non identificata
-///   con certezza, ma il sintomo sparisce forzando la risoluzione verso la
-///   copia di sistema).
-/// Confermato risolto da Simone su AppImage reale dopo aver aggiunto anche
-/// il reset di `PATH` (il solo `env_remove` delle altre variabili non
-/// bastava). Senza questo fix il montaggio riesce ma la cartella non si
-/// apre mai, solo nell'AppImage pacchettizzata — funzionava già con `npm
-/// run tauri dev`, che non ha questo inquinamento d'ambiente.
+///   copia di `xdg-open` — identica byte per byte a quella di sistema, eppure
+///   invocata da lì non apre il file manager (spawn riuscito, `exit status:
+///   0`, nessuna finestra — causa non identificata con certezza, ma il
+///   sintomo sparisce forzando la risoluzione verso la copia di sistema).
+/// Senza questo fix il montaggio riesce ma la cartella non si apre mai, solo
+/// nell'AppImage pacchettizzata — funziona già con `npm run tauri dev`, che
+/// non ha questo inquinamento d'ambiente.
 #[cfg(target_os = "linux")]
 fn open_in_file_manager(path: &str) {
     let mut command = std::process::Command::new("xdg-open");

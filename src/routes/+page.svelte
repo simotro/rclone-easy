@@ -68,9 +68,8 @@
     loadOwnRemotes();
     loadServices();
     // Solo per l'etichetta del bottone ("Imposta password" vs "Gestisci
-    // password", richiesta di Simone) — lo stato effettivo per il
-    // contenuto del modal viene comunque riletto fresco ad ogni apertura
-    // in openPasswordModal().
+    // password") — lo stato effettivo per il contenuto del modal viene
+    // comunque riletto fresco ad ogni apertura in openPasswordModal().
     invoke<boolean>("config_password_status")
       .then((value) => (passwordAlreadySet = value))
       .catch(() => {});
@@ -153,9 +152,8 @@
 
   let importExportModalOpen = $state(false);
   // "menu" = le 3 opzioni; "import-remotes" = il pannello di import
-  // incorporato, sostituisce la navigazione verso /importa-remote di
-  // prima — restare dentro il modal invece di "aprire una finestra" a
-  // parte, richiesta esplicita di Simone.
+  // incorporato, resta dentro il modal invece di navigare verso una
+  // pagina a parte.
   let importExportView = $state<"menu" | "import-remotes">("menu");
   let importExportBusy = $state(false);
   let importExportError = $state<string | null>(null);

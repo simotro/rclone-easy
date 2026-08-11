@@ -242,8 +242,7 @@
   // Punto d'ingresso dei 3 pulsanti icona mount/backup/bisync: se un
   // servizio diverso è già attivo per questo remote, avvisa PRIMA di far
   // compilare qualunque campo — non al momento del salvataggio, quando
-  // l'utente avrebbe già perso tempo a configurare (richiesta esplicita:
-  // l'avviso deve arrivare prima della possibilità di inserire i dati).
+  // l'utente avrebbe già perso tempo a configurare.
   function onServiceIconClick(kind: ServiceKind) {
     if (activeService !== null && activeService !== kind) {
       conflictTargetKind = kind;

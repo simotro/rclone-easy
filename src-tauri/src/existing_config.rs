@@ -278,10 +278,9 @@ mod tests {
     #[tokio::test]
     async fn dump_remote_parameters_reads_a_real_remote_when_one_exists() {
         // Non si può assumere che un remote specifico esista nel rclone.conf
-        // reale di sviluppo (può cambiare, ed è cambiato durante lo
-        // sviluppo di questo stesso slice) — si interroga prima
-        // detect_existing_remotes_in per sapere cosa c'è davvero, senza mai
-        // legare il test a un nome fisso.
+        // reale di sviluppo — si interroga prima detect_existing_remotes_in
+        // per sapere cosa c'è davvero, senza mai legare il test a un nome
+        // fisso.
         let existing = detect_existing_remotes_in(None).await.unwrap();
         let Some(remote) = existing.first() else {
             return; // nessun remote nel config di sistema: nulla da verificare qui.

@@ -2,10 +2,10 @@ use crate::rcd::RcdState;
 use std::path::Path;
 
 /// Uno dei tre servizi che si possono configurare per un remote. Al più
-/// uno alla volta può essere "attivo" (vedi `ensure_no_other_active_service`)
-/// — la richiesta esplicita dell'utente è di evitare i rischi di avere,
-/// per esempio, mount e bisync attivi insieme sullo stesso remote (bisync
-/// confronterebbe il remote con se stesso attraverso due percorsi diversi).
+/// uno alla volta può essere "attivo" (vedi `ensure_no_other_active_service`),
+/// per evitare i rischi di avere, per esempio, mount e bisync attivi insieme
+/// sullo stesso remote (bisync confronterebbe il remote con se stesso
+/// attraverso due percorsi diversi).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceKind {
     Mount,

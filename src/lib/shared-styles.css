@@ -147,27 +147,23 @@
 }
 
 body {
-  /* Il margine di default del browser (8px su ogni lato, mai azzerato
-     finora) sommato a `.app-shell { min-height: 100vh }` (+layout.svelte)
-     spingeva sempre il contenuto oltre l'altezza della finestra di 16px
-     fissi, indipendentemente da quanto contenuto c'è davvero — la
-     scrollbar risultante è quasi invisibile su Linux/WebKitGTK (sottile,
-     sfuma) ma ben visibile e ingiustificata su Windows/WebView2
-     (segnalato da Simone l'11/8/2026, con solo 3 remote e molto spazio
-     sotto). */
+  /* Il margine di default del browser (8px su ogni lato) sommato a
+     `.app-shell { min-height: 100vh }` (+layout.svelte) spinge sempre il
+     contenuto oltre l'altezza della finestra di 16px fissi, indipendentemente
+     da quanto contenuto c'è davvero — la scrollbar risultante è quasi
+     invisibile su Linux/WebKitGTK (sottile, sfuma) ma ben visibile e
+     ingiustificata su Windows/WebView2, anche con poco contenuto e molto
+     spazio libero sotto. */
   margin: 0;
   color: var(--text-color);
   background-color: var(--bg-page);
 }
 
-/* Nessuna regola dell'app definiva mai un outline/:focus-visible esplicito:
-   il contorno di messa a fuoco mostrato finora era quindi quello di
-   default del motore (WebView2 su Windows, WebKitGTK su Linux) — non
-   legato al tema/colore accento del sistema operativo (verificato: non
-   coincide né col teal dell'app né con l'accento scelto da Simone su
-   Windows/KDE), semplicemente un blu/viola fisso del motore. Un colore
-   esplicito qui vince sempre su qualunque default, indipendentemente da
-   dove venisse prima. */
+/* Senza questa regola, il contorno di messa a fuoco è quello di default
+   del motore (WebView2 su Windows, WebKitGTK su Linux) — un blu/viola
+   fisso del motore, non legato al tema/colore accento del sistema
+   operativo né a quello dell'app. Un colore esplicito qui vince sempre sul
+   default. */
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

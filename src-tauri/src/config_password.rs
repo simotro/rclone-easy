@@ -114,10 +114,9 @@ pub async fn config_password_status(state: tauri::State<'_, RcdState>) -> Result
 /// — stesso comando rclone in entrambi i casi, la differenza è solo se
 /// forniamo o no la password corrente per aprire la config esistente.
 /// `current_password` arriva dalla UI (campo "Password attuale", mostrato
-/// solo quando la config è già protetta): richiesta esplicita di Simone,
-/// niente più auto-compilazione dalla password ricordata in sessione, per
-/// evitare che chiunque acceda all'app già sbloccata possa cambiare la
-/// password senza conoscere quella attuale.
+/// solo quando la config è già protetta) — niente auto-compilazione dalla
+/// password ricordata in sessione, per evitare che chiunque acceda all'app
+/// già sbloccata possa cambiare la password senza conoscere quella attuale.
 #[tauri::command]
 pub async fn set_config_password(
     app: AppHandle,

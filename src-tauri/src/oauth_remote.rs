@@ -72,8 +72,7 @@ fn initial_parameters(client_id: Option<&str>, client_secret: Option<&str>) -> H
 /// succedere. Non apre il browser da qui: rclone stesso lo apre già (via
 /// `xdg-open`/equivalente) non appena la sua domanda `config_is_local`
 /// riceve `true`, cosa che questa app fa sempre — un'apertura nostra in
-/// più qui, come faceva in passato, produceva due tab di login per lo
-/// stesso OAuth (verificato dall'utente in produzione). Gira come task
+/// più qui produrrebbe due tab di login per lo stesso OAuth. Gira come task
 /// separato, concorrente alla chiamata bloccante di `config/create` che
 /// avvia davvero l'attesa OAuth.
 fn spawn_oauth_url_watcher<R: tauri::Runtime>(app: AppHandle<R>, info: rcd::ConnectionInfo) {
@@ -155,16 +154,16 @@ async fn ask_user_for_answer<R: tauri::Runtime>(
 /// Guida il flusso multi-passo di `config/create` per un backend OAuth
 /// (drive/dropbox/onedrive) fino al completamento, gestendo il passo di
 /// autorizzazione nel browser. Vedi il modulo `remotes.rs` per il gemello
-/// non-OAuth (`create_remote_in`) e la spiegazione del meccanismo generale
-/// nel piano di questo slice.
+/// non-OAuth (`create_remote_in`).
+///
 /// `config/create` scrive già una entry (incompleta) al primo passo, ben
-/// prima che qualunque domanda sia stata risposta — verificato: annullando
+/// prima che qualunque domanda sia stata risposta: annullando
 /// un'autorizzazione (credenziali mancanti, utente ripensa) a metà del
-/// flusso, il nome restava comunque tra i remote propri perché solo il
-/// fallimento della verifica finale in `verify_and_cleanup` veniva ripulito,
-/// non un fallimento/annullamento durante il ciclo di domande. Questo
-/// wrapper ripulisce con `config/delete` per qualunque errore dopo la
-/// creazione iniziale, non solo quello della verifica finale.
+/// flusso, il nome resterebbe tra i remote propri se si ripulisse solo il
+/// fallimento della verifica finale in `verify_and_cleanup`, non un
+/// fallimento/annullamento durante il ciclo di domande. Questo wrapper
+/// ripulisce con `config/delete` per qualunque errore dopo la creazione
+/// iniziale, non solo quello della verifica finale.
 async fn run_oauth_flow<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &RcdState,
@@ -433,9 +432,9 @@ mod tests {
         assert!(outcome.is_ok(), "run_oauth_flow dovrebbe terminare dopo l'annullamento, non restare bloccato");
         assert!(outcome.unwrap().unwrap().is_err(), "il flusso annullato deve restituire un errore");
 
-        // Il bug segnalato dall'utente: config/create scrive già una entry
-        // al primissimo passo, ben prima che qualunque domanda sia stata
-        // risposta — un annullamento a metà flusso non deve lasciarla lì.
+        // config/create scrive già una entry al primissimo passo, ben prima
+        // che qualunque domanda sia stata risposta — un annullamento a metà
+        // flusso non deve lasciarla lì.
         let listremotes = rcd::call(&state, "config/listremotes", serde_json::json!({})).await.unwrap();
         let remaining: Vec<&str> =
             listremotes.get("remotes").and_then(|v| v.as_array()).unwrap().iter().filter_map(|v| v.as_str()).collect();

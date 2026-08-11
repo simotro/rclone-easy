@@ -53,10 +53,9 @@ const TRAY_FRAME_BYTE_LEN: usize = (TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usiz
 const IDLE_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-idle.rgba");
 /// Sequenza di fotogrammi del logo che ruota su se stesso di 360°, mostrata
 /// in loop mentre almeno un job di backup o bisync è in esecuzione — vedi
-/// `watch_activity`. Sostituisce la precedente dissolvenza di colore
-/// teal→ambra: un cambio di colore a colpo d'occhio in una tray si nota
-/// meno di un movimento (richiesta di Simone dopo aver notato che la sola
-/// tinta non risaltava abbastanza). Usa la stessa API multipiattaforma di
+/// `watch_activity`. Preferita a una dissolvenza di colore teal→ambra: un
+/// cambio di colore a colpo d'occhio in una tray si nota meno di un
+/// movimento. Usa la stessa API multipiattaforma di
 /// Tauri per l'icona della tray (nessun trucco specifico per Linux), quindi
 /// la stessa affidabilità vale anche per Windows/macOS in futuro. 24
 /// fotogrammi (rotazione di 15° l'uno) generati una volta con Pillow da
@@ -479,14 +478,12 @@ async fn watch_menu(app: AppHandle) {
 /// durare a lungo.
 ///
 /// Il lavoro vero gira in un secondo task annidato (`work` sotto) solo per
-/// poterne intercettare un eventuale panic tramite il suo `JoinHandle`:
-/// prima di questa modifica un panic in un task "fire and forget" come
-/// questo moriva in silenzio (visibile solo nello stderr del processo, mai
-/// all'utente) — corrisponde esattamente al sintomo segnalato da Simone
-/// ("clicco 'Sincronizza ora' dalla tray e non succede niente"), qualunque
-/// fosse la causa esatta del singolo caso. Un fallimento normale (`Err`) o
-/// un panic arrivano ora entrambi come la stessa notifica desktop, l'unica
-/// UI raggiungibile da qui.
+/// poterne intercettare un eventuale panic tramite il suo `JoinHandle`: un
+/// panic in un task "fire and forget" come questo morirebbe altrimenti in
+/// silenzio (visibile solo nello stderr del processo, mai all'utente) — un
+/// clic su "Sincronizza ora" dalla tray sembrerebbe non fare nulla. Un
+/// fallimento normale (`Err`) o un panic arrivano ora entrambi come la
+/// stessa notifica desktop, l'unica UI raggiungibile da qui.
 fn dispatch_action(app: &AppHandle, id: &str) {
     let Some((prefix, name)) = id.split_once(':') else { return };
     let prefix = format!("{prefix}:");
@@ -533,11 +530,10 @@ fn dispatch_action(app: &AppHandle, id: &str) {
         };
 
         match work.await {
-            // Richiesta esplicita di Simone: ogni azione lanciata dalla tray
-            // (Monta/Smonta, Backup ora, Sincronizza ora) deve dare un
-            // riscontro con l'esito, non solo mount (che in più apre la
-            // cartella, ma senza notifica l'utente restava comunque incerto
-            // se il click fosse partito).
+            // Ogni azione lanciata dalla tray (Monta/Smonta, Backup ora,
+            // Sincronizza ora) deve dare un riscontro con l'esito, non solo
+            // mount (che in più apre la cartella, ma senza notifica
+            // l'utente resterebbe comunque incerto se il click fosse partito).
             Ok(Ok(())) => notify_done(&app, &name, &prefix),
             Ok(Err(message)) => notify_error(&app, &name, &message),
             Err(_) => notify_error(&app, &name, "l'operazione si è interrotta inaspettatamente, riprova"),
@@ -549,12 +545,9 @@ fn dispatch_action(app: &AppHandle, id: &str) {
 /// tokio chiamante: chiamare l'API di notifica da dentro un task già in
 /// esecuzione sulla runtime manda in panic con "Cannot start a runtime from
 /// within a runtime" — il plugin apre una propria runtime per il D-Bus di
-/// sistema, cosa che Tokio non permette da un suo stesso worker thread.
-/// Osservato in pratica (log reale di Simone): il panic terminava il task
-/// silenziosamente subito dopo un'azione riuscita, la notifica non
-/// appariva mai — combinato con `bisync`'s `success: false` trattato come
-/// esito positivo (corretto a parte in `dispatch_action`), risultava in
-/// "clicco e non ho alcun riscontro".
+/// sistema, cosa che Tokio non permette da un suo stesso worker thread. Un
+/// panic qui terminerebbe il task silenziosamente, senza che la notifica
+/// appaia mai.
 fn notify_error(app: &AppHandle, name: &str, message: &str) {
     let app = app.clone();
     let name = name.to_string();
@@ -602,9 +595,9 @@ fn perform_quit(app: &AppHandle) {
 /// più: questo bottone in `+layout.svelte` la sostituisce con lo stesso
 /// comportamento (nasconde in tray, l'app resta attiva) di `SHOW_HIDE_ID`.
 /// Niente equivalente in-app per l'uscita vera (era un secondo comando
-/// `quit_app`, tolto su richiesta di Simone: due pulsanti confondevano
-/// l'utente) — resta raggiungibile solo da "Esci" nel menu della tray
-/// (`QUIT_ID` sopra, tramite `perform_quit`).
+/// `quit_app`, tolto perché due pulsanti confondevano l'utente) — resta
+/// raggiungibile solo da "Esci" nel menu della tray (`QUIT_ID` sopra,
+/// tramite `perform_quit`).
 #[tauri::command]
 pub fn hide_window(app: AppHandle) {
     hide_main_window(&app);

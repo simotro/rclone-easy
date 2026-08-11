@@ -65,7 +65,7 @@ const BUNDLED_NAME: &str = "rclone";
 ///    è diversa tra il binario dell'app e i binari di test;
 /// 3. nessun sidecar trovato (repository appena clonato, prima di eseguire
 ///    `scripts/fetch-rclone-sidecar.sh`): ripiega sul comando `rclone` nel
-///    PATH di sistema, lo stesso comportamento di prima di questo slice.
+///    PATH di sistema.
 fn resolve_rclone_binary_from(exe: &Path) -> String {
     if let Some(parent) = exe.parent() {
         let candidate = parent.join(BUNDLED_NAME);

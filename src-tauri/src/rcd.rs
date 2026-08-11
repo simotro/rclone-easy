@@ -7,13 +7,11 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
 /// Rappresenta l'istanza in background di `rclone rcd` usata da Rclone Easy
-/// per tutte le operazioni verso rclone (mount/sync/bisync/test connessione
-/// nei prossimi slice). `child` ha `kill_on_drop` attivo come rete di
-/// sicurezza, ma non basta da solo: Tauri non garantisce che il Drop di
-/// questo stato giri alla chiusura normale dell'app (verificato empiricamente
-/// — il processo restava orfano anche chiudendo la finestra normalmente).
-/// La terminazione affidabile è quella esplicita in `shutdown`, agganciata a
-/// `RunEvent::Exit` in `lib.rs`.
+/// per tutte le operazioni verso rclone (mount/sync/bisync/test connessione).
+/// `child` ha `kill_on_drop` attivo come rete di sicurezza, ma non basta da
+/// solo: Tauri non garantisce che il Drop di questo stato giri alla chiusura
+/// normale dell'app. La terminazione affidabile è quella esplicita in
+/// `shutdown`, agganciata a `RunEvent::Exit` in `lib.rs`.
 struct RcdProcess {
     child: Child,
     base_url: String,
@@ -52,12 +50,10 @@ pub(crate) fn locked_state() -> RcdState {
 }
 
 /// La config sotto `config_path` è protetta da password se inizia con il
-/// commento che rclone stesso scrive in testa a una config cifrata (poi
-/// seguito dal marker `RCLONE_ENCRYPT_V0:` su una riga successiva, non la
-/// prima — verificato guardando l'output reale di `rclone config
-/// encryption set`) — nessuna chiamata esterna necessaria, un file assente
-/// o illeggibile conta come "non protetta" (comportamento di sempre, mai
-/// bloccare l'avvio per questo).
+/// commento che rclone stesso scrive in testa a una config cifrata (il
+/// marker `RCLONE_ENCRYPT_V0:` segue su una riga successiva, non la prima)
+/// — nessuna chiamata esterna necessaria, un file assente o illeggibile
+/// conta come "non protetta", mai bloccare l'avvio per questo.
 pub(crate) fn config_is_encrypted(config_path: &Path) -> bool {
     std::fs::read(config_path).map(|bytes| bytes.starts_with(b"# Encrypted rclone configuration File")).unwrap_or(false)
 }
@@ -160,12 +156,10 @@ async fn rc_call_with(
 /// risposte di errore dell'RC API sono un oggetto JSON con un campo
 /// `"error"` già pulito e descrittivo (es. "InvalidAccessKeyId: ..."):
 /// usarlo direttamente invece di mostrare l'intero corpo JSON grezzo con lo
-/// stato HTTP in testa, che seppellisce il messaggio utile sotto del
-/// rumore tecnico (osservato con un remote S3 mal configurato: l'utente
-/// vedeva solo "500 Internal Server Error" invece del vero motivo).
-/// Ripiega sul comportamento precedente (stato + testo grezzo) per risposte
-/// che non sono nel formato JSON atteso, es. errori di rete/proxy dove
-/// rclone stesso non ha gestito la richiesta.
+/// stato HTTP in testa, che seppellisce il messaggio utile sotto rumore
+/// tecnico. Ripiega su stato + testo grezzo per risposte che non sono nel
+/// formato JSON atteso, es. errori di rete/proxy dove rclone stesso non ha
+/// gestito la richiesta.
 fn error_message_from_response(status: reqwest::StatusCode, body_text: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body_text)
         .ok()
@@ -233,17 +227,14 @@ async fn wait_until_ready(process: &RcdProcess) -> Result<String, String> {
     Err(format!("rclone rcd non ha risposto entro il timeout di avvio: {last_err}"))
 }
 
-/// Solo nei test: `rclone rcd` reale apre **da solo** un browser via
-/// `xdg-open` non appena il flusso OAuth (`oauth_remote.rs`) risponde
-/// `true` a `config_is_local` — è un comportamento interno di rclone
-/// stesso, non del nostro `open_in_browser` (che infatti è già no-op sotto
-/// `#[cfg(test)]`, ma questo non ha alcun effetto su un sottoprocesso
-/// esterno). Verificato con `xdg-open` genuinamente eseguito da `rclone rcd`
-/// durante `run_oauth_flow_reaches_oauth_wait_...`, che esercita il flusso
-/// vero end-to-end. Anteponendo alla PATH del processo figlio una cartella
-/// con un `xdg-open` finto (no-op) si neutralizza solo per questo
-/// sottoprocesso di test, senza toccare in alcun modo l'app reale (questo
-/// codice non esiste nemmeno nel binario di produzione, `cfg(test)`).
+/// Solo nei test: `rclone rcd` apre **da solo** un browser via `xdg-open`
+/// non appena il flusso OAuth (`oauth_remote.rs`) risponde `true` a
+/// `config_is_local` — comportamento interno di rclone, non del nostro
+/// `open_in_browser` (già no-op sotto `#[cfg(test)]`, ma senza effetto su
+/// un sottoprocesso esterno). Anteponendo alla PATH del processo figlio una
+/// cartella con un `xdg-open` finto (no-op) si neutralizza solo per il
+/// sottoprocesso di test, senza toccare l'app reale (`cfg(test)`, non esiste
+/// nel binario di produzione).
 #[cfg(test)]
 fn fake_xdg_open_path_prefix() -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -259,20 +250,14 @@ fn fake_xdg_open_path_prefix() -> PathBuf {
 
 /// All'avvio, ripulisce eventuali `rclone rcd` orfani lasciati da
 /// un'istanza precedente di Rclone Easy che non è riuscita a fare uno
-/// shutdown pulito — `kill -9`, crash, spegnimento forzato del PC, o (molto
-/// comune in sviluppo) il watcher di `cargo tauri dev`, che termina il
-/// processo precedente con SIGKILL ad ogni modifica: un segnale non
-/// intercettabile in alcun modo, quindi impossibile da gestire con un
-/// handler nostro (il gestore SIGTERM in `lib.rs` copre solo gli altri
-/// casi, dove il segnale può davvero essere intercettato). Non solo un
-/// problema di sviluppo: anche un utente reale può incappare in uno
-/// spegnimento forzato o un crash, con lo stesso risultato.
+/// shutdown pulito — `kill -9`, crash, spegnimento forzato del PC, o un
+/// segnale non intercettabile (il gestore SIGTERM in `lib.rs` copre solo i
+/// casi dove il segnale può essere intercettato).
 ///
 /// Riconosciuti per corrispondenza esatta del percorso di config passato
 /// con `--config`: solo un rcd avviato da QUESTA app (con QUESTA cartella
 /// di configurazione) viene considerato, mai un rclone rcd generico
-/// dell'utente per altri scopi. Solo Linux per ora (legge `/proc`, coerente
-/// con la fase attuale solo-Linux del progetto). Best-effort: un
+/// dell'utente per altri scopi. Solo Linux (legge `/proc`). Best-effort: un
 /// fallimento qui (es. `/proc` non leggibile) non deve impedire l'avvio
 /// dell'app.
 ///
@@ -280,9 +265,8 @@ fn fake_xdg_open_path_prefix() -> PathBuf {
 /// momento del crash, questa pulizia termina comunque il suo rcd (non
 /// abbiamo le sue credenziali RC per chiedergli uno smontaggio pulito,
 /// perse insieme all'istanza che è morta) — il mountpoint può restare
-/// "stale" finché non lo si smonta a mano (`fusermount -u`). Stesso rischio
-/// residuo già presente prima di questa funzione per uno spegnimento
-/// forzato, non peggiorato da questo fix.
+/// "stale" finché non lo si smonta a mano (`fusermount -u`).
+///
 /// `/proc/<pid>/cmdline` è una sequenza di argomenti separati da byte NUL
 /// (nessuno spazio) — questa funzione fa solo il parsing, separata dalla
 /// lettura del file per poterla testare con dati sintetici invece che con
@@ -327,8 +311,7 @@ fn cleanup_orphaned_rcd_processes(config_path: &Path) {
 /// un oggetto singolo (non un array) quando c'è un solo risultato — entrambe
 /// le forme vanno gestite. Riconosciuto per corrispondenza esatta del
 /// percorso di config passato con `--config` (mai un rclone.exe generico
-/// dell'utente per altri scopi), più la presenza di `rcd` come sottocomando
-/// (non solo nel percorso, che potrebbe contenerlo per caso).
+/// dell'utente per altri scopi), più la presenza di `rcd` come sottocomando.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn find_orphaned_rclone_pids_windows(cim_json: &str, config_path_str: &str) -> Vec<u32> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(cim_json) else { return Vec::new() };
@@ -351,13 +334,12 @@ fn find_orphaned_rclone_pids_windows(cim_json: &str, config_path_str: &str) -> V
         .collect()
 }
 
-/// Equivalente Windows di `cleanup_orphaned_rcd_processes` sopra — colma il
-/// gap segnalato da Simone il 10/8/2026: chiudere l'app (che resta in tray)
-/// o disinstallarla può lasciare `rclone.exe` in esecuzione (nessun
-/// gestore SIGTERM/SIGINT equivalente su Windows, vedi
+/// Equivalente Windows di `cleanup_orphaned_rcd_processes` sopra: chiudere
+/// l'app (che resta in tray) o disinstallarla può lasciare `rclone.exe` in
+/// esecuzione (nessun gestore SIGTERM/SIGINT equivalente su Windows, vedi
 /// `spawn_signal_shutdown_handler` in `lib.rs`), bloccando poi un
 /// reinstall/aggiornamento successivo ("Error opening file for writing" —
-/// risolto anche lato installer in `windows/hooks.nsh`, questo è il lato
+/// mitigato anche lato installer in `windows/hooks.nsh`, questo è il lato
 /// runtime dello stesso problema). Best-effort, come la versione Linux: un
 /// fallimento qui (PowerShell non disponibile, nessun processo trovato) non
 /// deve impedire l'avvio dell'app.
@@ -387,11 +369,11 @@ fn cleanup_orphaned_rcd_processes(config_path: &Path) {
 /// passphrase da passare a rclone via `RCLONE_CONFIG_PASS`. Una password
 /// sbagliata **non** fa fallire l'avvio del demone né `wait_until_ready`:
 /// `core/version` risponde comunque, rclone non tenta di decifrare la
-/// config finché non serve davvero — verificato a mano contro un demone
-/// reale. Per questo, quando è stata data una password, dopo l'avvio si fa
-/// anche una `config/listremotes` (che quella sì costringe rclone a
-/// decifrare) apposta per far emergere subito una password sbagliata,
-/// invece di scoprirlo alla prima azione dell'utente sui suoi remote.
+/// config finché non serve davvero. Per questo, quando è stata data una
+/// password, dopo l'avvio si fa anche una `config/listremotes` (che quella
+/// sì costringe rclone a decifrare) apposta per far emergere subito una
+/// password sbagliata, invece di scoprirlo alla prima azione dell'utente
+/// sui suoi remote.
 async fn start_rcd_in(config_path: &Path, password: Option<&str>) -> Result<RcdProcess, String> {
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)
@@ -492,10 +474,10 @@ pub async fn rcd_status(state: tauri::State<'_, RcdState>) -> Result<String, Str
 /// terminato resta zombie (visibile in `/proc` finché non viene raccolto).
 ///
 /// **Smontaggio prima del kill**: se un mount FUSE (`mounts.rs`) è attivo,
-/// uno `start_kill` diretto lo lascia "stale" — verificato: il mountpoint
-/// resta agganciato nel kernel ma il processo che lo serviva è morto,
-/// risultato "Transport endpoint not connected" finché non si smonta a mano
-/// con `fusermount -u`. Il mount FUSE vive dentro lo stesso processo di
+/// uno `start_kill` diretto lo lascia "stale": il mountpoint resta
+/// agganciato nel kernel ma il processo che lo serviva è morto, risultato
+/// "Transport endpoint not connected" finché non si smonta a mano con
+/// `fusermount -u`. Il mount FUSE vive dentro lo stesso processo di
 /// `rclone rcd`, quindi non ha modo di negoziare uno smontaggio pulito una
 /// volta ucciso. Chiamare `mount/unmountall` mentre il demone è ancora vivo
 /// e risponde evita il problema: best-effort, un errore qui (es. nessun
@@ -579,8 +561,8 @@ pub(crate) mod tests {
 
     #[test]
     fn find_orphaned_rclone_pids_windows_matches_our_config_path_as_a_single_object() {
-        let json = r#"{"ProcessId":1234,"CommandLine":"\"C:\\Users\\simone\\AppData\\Local\\rclone-easy\\rclone.exe\" rcd --rc-addr 127.0.0.1:9999 --config \"C:\\Users\\simone\\AppData\\Roaming\\RcloneEasy\\rclone.conf\""}"#;
-        let pids = find_orphaned_rclone_pids_windows(json, r"C:\Users\simone\AppData\Roaming\RcloneEasy\rclone.conf");
+        let json = r#"{"ProcessId":1234,"CommandLine":"\"C:\\Users\\utente\\AppData\\Local\\rclone-easy\\rclone.exe\" rcd --rc-addr 127.0.0.1:9999 --config \"C:\\Users\\utente\\AppData\\Roaming\\RcloneEasy\\rclone.conf\""}"#;
+        let pids = find_orphaned_rclone_pids_windows(json, r"C:\Users\utente\AppData\Roaming\RcloneEasy\rclone.conf");
         assert_eq!(pids, vec![1234]);
     }
 

@@ -10,8 +10,7 @@ use tauri::{AppHandle, Manager};
 /// specifiche di QUESTA macchina (mountpoint, cartelle sincronizzate), che
 /// su un altro PC — il caso d'uso principale di un backup/trasferimento —
 /// quasi certamente non esistono o sono diverse. Riportarli porterebbe job
-/// già rotti in partenza, puntati a percorsi inesistenti (segnalato da
-/// Simone dopo un ripristino reale su un'altra macchina). Decisione
+/// già rotti in partenza, puntati a percorsi inesistenti. Decisione
 /// esplicita: niente opzione per includerli comunque, per tenere il
 /// comportamento semplice e senza sorprese. `None` per `rclone_conf`
 /// significa "nessun remote ancora configurato quando è stato fatto il

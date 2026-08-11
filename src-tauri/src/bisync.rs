@@ -302,9 +302,7 @@ fn error_requires_resync(message: &str) -> bool {
 /// Senza questa password quando la config è protetta, rclone prova a
 /// chiederla interattivamente su stdin, che qui è `Stdio::null()`: fallisce
 /// subito con un errore "Failed to read line: EOF" invece di un messaggio
-/// sensato — bug osservato da Simone dopo aver protetto la config con una
-/// password (`config_password.rs`), la sincronizzazione bidirezionale
-/// smetteva di funzionare silenziosamente.
+/// sensato, interrompendo silenziosamente la sincronizzazione bidirezionale.
 async fn execute_bisync(
     config_path: &Path,
     workdir: &Path,
@@ -693,12 +691,10 @@ mod tests {
 
     /// Costruisce una riga di log JSON come la scrive davvero `rclone
     /// --use-json-log`: i codici colore ANSI dentro `msg` sono codificati
-    /// come sequenza di escape JSON valida (``, 6 caratteri ASCII),
-    /// non come byte ESC grezzo — un byte di controllo non escaped
-    /// renderebbe la riga JSON non valida e la farebbe scartare in
-    /// silenzio da `serde_json::from_str` (bug scoperto scrivendo questo
-    /// stesso test: una prima versione con un ESC letterale incollato a
-    /// mano produceva sempre un vec vuoto).
+    /// come sequenza di escape JSON valida (``, 6 caratteri ASCII), non
+    /// come byte ESC grezzo — un byte di controllo non escaped renderebbe
+    /// la riga JSON non valida e la farebbe scartare in silenzio da
+    /// `serde_json::from_str`.
     fn json_log_line(level: &str, msg_with_esc_markers: &str) -> String {
         let esc = "\\u001b";
         let msg = msg_with_esc_markers.replace("<ESC>", esc);
@@ -831,10 +827,10 @@ mod tests {
         std::fs::create_dir_all(&path2_dir.path).unwrap();
         // Un resync su due cartelle del tutto vuote produce una baseline che
         // rclone stesso considera non valida ("Cannot sync to an empty
-        // directory") e richiede un altro resync per riprendersi — scoperto
-        // scrivendo questo test. Un file già presente evita il caso limite,
-        // più vicino comunque a un uso reale (nessuno crea un job bisync su
-        // due cartelle che restano vuote per sempre).
+        // directory") e richiede un altro resync per riprendersi. Un file
+        // già presente evita il caso limite, più vicino comunque a un uso
+        // reale (nessuno crea un job bisync su due cartelle che restano
+        // vuote per sempre).
         std::fs::write(path1_dir.path.join("placeholder.txt"), "presente fin dall'inizio").unwrap();
 
         create_bisync_job_in(
