@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import PasswordField from "./PasswordField.svelte";
+  import { t } from "$lib/i18n";
 
   let { onUnlocked }: { onUnlocked: () => void } = $props();
 
@@ -29,14 +30,14 @@
   <div class="unlock-box">
     <img src="/app-icon.png" alt="" class="app-icon" />
     <h1>Rclone Easy</h1>
-    <p class="subtitle">La configurazione è protetta da una password. Inseriscila per continuare.</p>
+    <p class="subtitle">{$t("unlock.subtitle")}</p>
     <form onsubmit={(e) => { e.preventDefault(); submit(); }}>
-      <PasswordField bind:value={password} label="Password" autofocus disabled={submitting} />
+      <PasswordField bind:value={password} label={$t("unlock.passwordLabel")} autofocus disabled={submitting} />
       {#if error}
         <p class="error">✗ {error}</p>
       {/if}
       <button type="submit" disabled={submitting || password.trim() === ""}>
-        {submitting ? "Sblocco in corso…" : "Sblocca"}
+        {submitting ? $t("unlock.submitting") : $t("unlock.submit")}
       </button>
     </form>
   </div>

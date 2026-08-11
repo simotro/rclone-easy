@@ -3,6 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { goto } from "$app/navigation";
+  import { t } from "$lib/i18n";
 
   type ProviderKind = "s3" | "b2" | "mega" | "drive" | "dropbox" | "onedrive";
   type S3ProviderOption = { value: string; help: string };
@@ -201,96 +202,89 @@
 </script>
 
 <main class="container">
-  <h1>Aggiungi un remote</h1>
+  <h1>{$t("newRemote.title")}</h1>
 
   {#if step === 1}
-    <a href="/" class="back-link">← Torna alla schermata principale</a>
-    <p class="subtitle">Scegli il tipo di spazio di archiviazione da collegare.</p>
+    <a href="/" class="back-link">← {$t("newRemote.backToHome")}</a>
+    <p class="subtitle">{$t("newRemote.subtitle")}</p>
     <div class="cards">
       <button class="card" onclick={() => goto("/importa-remote")}>
-        <strong>Importa remote esistenti</strong>
-        <span>Hai già dei remote configurati con rclone? Importali invece di ricrearli.</span>
+        <strong>{$t("home.importExistingRemotes")}</strong>
+        <span>{$t("newRemote.importCardDesc")}</span>
       </button>
       <button class="card" onclick={() => selectKind("s3")}>
-        <strong>S3 e compatibili</strong>
-        <span>Incluso Cubbit, Wasabi e altri provider S3-compatibili con endpoint personalizzato.</span>
+        <strong>{$t("newRemote.s3Card")}</strong>
+        <span>{$t("newRemote.s3CardDesc")}</span>
       </button>
       <button class="card" onclick={() => selectKind("b2")}>
         <strong>Backblaze B2</strong>
-        <span>Account ID e Application Key.</span>
+        <span>{$t("newRemote.b2CardDesc")}</span>
       </button>
       <button class="card" onclick={() => selectKind("mega")}>
         <strong>MEGA</strong>
-        <span>Email e password dell'account.</span>
+        <span>{$t("newRemote.megaCardDesc")}</span>
       </button>
       <button class="card" onclick={() => selectKind("drive")}>
         <strong>Google Drive</strong>
-        <span>Autorizzazione nel browser. Google ritirerà l'identità condivisa usata finora da rclone durante il 2026 — al passo successivo puoi già creare la tua.</span>
+        <span>{$t("newRemote.driveCardDesc")}</span>
       </button>
       <button class="card" onclick={() => selectKind("dropbox")}>
         <strong>Dropbox</strong>
-        <span>Autorizzazione nel browser.</span>
+        <span>{$t("newRemote.oauthCardDesc")}</span>
       </button>
       <button class="card" onclick={() => selectKind("onedrive")}>
         <strong>OneDrive</strong>
-        <span>Autorizzazione nel browser.</span>
+        <span>{$t("newRemote.oauthCardDesc")}</span>
       </button>
     </div>
   {:else if step === 2 && isOAuthKind(kind)}
     <form onsubmit={(e) => { e.preventDefault(); submitOAuth(); }}>
       <label>
-        Nome del remote
-        <input type="text" bind:value={name} placeholder="es. lavoro-cloud" disabled={oauthWaiting} />
+        {$t("newRemote.remoteNameLabel")}
+        <input type="text" bind:value={name} placeholder={$t("newRemote.remoteNamePlaceholder")} disabled={oauthWaiting} />
       </label>
 
       {#if kind === "drive" && !oauthWaiting}
         <div class="own-client-box">
-          <p class="own-client-title">Usa un client Google tuo (consigliato)</p>
+          <p class="own-client-title">{$t("newRemote.ownClientTitle")}</p>
           <p class="own-client-explainer">
-            Google disattiverà l'identità condivisa usata finora da rclone nel corso del 2026: da quel momento
-            Google Drive smetterà di funzionare per chi non ha un client proprio. Crearne uno richiede circa 5
-            minuti su Google Cloud Console ed è gratuito. Puoi anche saltare questo passo per ora — l'identità
-            condivisa funziona ancora — e farlo più avanti ricreando il remote.
+            {$t("newRemote.ownClientExplainer")}
           </p>
           <details class="own-client-steps">
-            <summary>Come si crea?</summary>
+            <summary>{$t("newRemote.ownClientHow")}</summary>
             <ol>
               <li>
-                Vai su
+                {$t("newRemote.step1Before")}
                 <button type="button" class="link-button inline" onclick={openGoogleCloudConsole}>
                   console.cloud.google.com
                 </button>
                 .
               </li>
               <li>
-                Clicca in alto a sinistra su "Seleziona un progetto": scegline uno esistente oppure clicca "Nuovo
-                progetto" e dagli un nome, es. "Rclone".
+                {$t("newRemote.step2")}
               </li>
               <li>
-                "API e servizi" → "Libreria": usa il filtro di ricerca in alto per trovare
-                <strong>Google Drive API</strong> e abilitala.
+                {$t("newRemote.step3Before")}
+                <strong>Google Drive API</strong> {$t("newRemote.step3After")}
               </li>
               <li>
-                "API e servizi" → "Credenziali" → "Configura schermata di consenso" (se non l'hai già fatto): tipo
-                utente <strong>Esterno</strong> (Interno solo se hai un account Google Workspace), nome app ed
-                email di supporto.
+                {$t("newRemote.step4Before")}
+                <strong>{$t("newRemote.externalType")}</strong> {$t("newRemote.step4After")}
               </li>
               <li>
-                Nella sezione "Accesso ai dati": aggiungi gli ambiti <code>drive</code>,
-                <code>drive.metadata.readonly</code> e <code>docs</code> (quelli che rclone stesso usa).
+                {$t("newRemote.step5Before")} <code>drive</code>,
+                <code>drive.metadata.readonly</code> {$t("newRemote.step5And")} <code>docs</code> {$t("newRemote.step5After")}
               </li>
               <li>
-                Solo se hai scelto Esterno: nel menu "Pubblico" aggiungi il tuo indirizzo email tra gli "utenti di
-                test" (l'app resta "non verificata": va bene per uso personale, ma solo gli utenti di test
-                elencati possono accedere), poi pubblicala da lì.
+                {$t("newRemote.step6")}
               </li>
               <li>
-                Nel menu "Client": clicca "Crea client", tipo <strong>Applicazione Desktop</strong>.
+                {$t("newRemote.step7Before")} <strong>{$t("newRemote.desktopAppType")}</strong>.
               </li>
-              <li>Copia il Client ID e il Client Secret generati e incollali qui sotto.</li>
+              <li>{$t("newRemote.step8")}</li>
             </ol>
             <button type="button" class="link-button" onclick={openGoogleDriveClientIdGuide}>
-              Guida ufficiale di rclone, per approfondire
+              {$t("newRemote.officialGuideLink")}
             </button>
           </details>
           <label>
@@ -302,17 +296,17 @@
             <input type="password" bind:value={driveClientSecret} />
           </label>
           {#if (driveClientId.trim() === "") !== (driveClientSecret.trim() === "")}
-            <p class="error">✗ Servono sia il Client ID sia il Client Secret, non uno solo.</p>
+            <p class="error">✗ {$t("newRemote.clientIdSecretBothRequired")}</p>
           {/if}
         </div>
       {/if}
 
       {#if oauthWaiting && !oauthQuestion}
         <div class="oauth-wait">
-          <p>Si è aperto il browser per l'autorizzazione con {OAUTH_LABELS[kind ?? ""]} — completa l'accesso lì.</p>
+          <p>{$t("newRemote.oauthOpenedBrowser", { values: { provider: OAUTH_LABELS[kind ?? ""] } })}</p>
           {#if oauthUrl}
             <button type="button" class="link-button" onclick={openOAuthUrlManually}>
-              Non si è aperto automaticamente? Apri il link
+              {$t("newRemote.oauthOpenLinkManually")}
             </button>
           {/if}
         </div>
@@ -332,7 +326,7 @@
           {:else}
             <div class="oauth-question-choices">
               <input type="text" bind:value={oauthFreeTextAnswer} />
-              <button type="button" onclick={() => answerOAuthQuestion(oauthFreeTextAnswer)}>Conferma</button>
+              <button type="button" onclick={() => answerOAuthQuestion(oauthFreeTextAnswer)}>{$t("common.confirm")}</button>
             </div>
           {/if}
         </div>
@@ -344,11 +338,11 @@
 
       <div class="actions">
         {#if oauthWaiting}
-          <button type="button" onclick={cancelOAuth}>Annulla</button>
+          <button type="button" onclick={cancelOAuth}>{$t("common.cancel")}</button>
         {:else}
-          <button type="button" onclick={backToStep1} disabled={submitting}>Indietro</button>
+          <button type="button" onclick={backToStep1} disabled={submitting}>{$t("newRemote.back")}</button>
           <button type="submit" disabled={!canSubmit || submitting}>
-            Autorizza con {OAUTH_LABELS[kind ?? ""]}
+            {$t("newRemote.authorizeWith", { values: { provider: OAUTH_LABELS[kind ?? ""] } })}
           </button>
         {/if}
       </div>
@@ -356,22 +350,22 @@
   {:else if step === 2}
     <form onsubmit={(e) => { e.preventDefault(); submit(); }}>
       <label>
-        Nome del remote
-        <input type="text" bind:value={name} placeholder="es. lavoro-cloud" />
+        {$t("newRemote.remoteNameLabel")}
+        <input type="text" bind:value={name} placeholder={$t("newRemote.remoteNamePlaceholder")} />
       </label>
 
       {#if kind === "s3"}
         <label>
           Provider
           <select bind:value={s3Provider}>
-            <option value="Other">Altro / endpoint personalizzato</option>
+            <option value="Other">{$t("newRemote.otherCustomEndpoint")}</option>
             {#each s3Providers as p (p.value)}
               <option value={p.value} title={p.help}>{p.value}</option>
             {/each}
           </select>
         </label>
         <label>
-          Endpoint (richiesto per quasi tutti i provider tranne AWS)
+          {$t("newRemote.endpointLabel")}
           <input type="text" bind:value={s3Endpoint} placeholder="es. s3.cubbit.eu, s3.wasabisys.com" />
         </label>
         <label>
@@ -383,12 +377,12 @@
           <input type="password" bind:value={s3SecretAccessKey} />
         </label>
         <label>
-          Regione (facoltativa)
+          {$t("newRemote.regionLabel")}
           {#if s3RegionsForProvider.length > 0}
             <select bind:value={s3Region}>
-              <option value="">Nessuna / non specificata</option>
+              <option value="">{$t("newRemote.noRegionSpecified")}</option>
               {#each s3RegionsForProvider as r (r.value)}
-                <option value={r.value} title={r.help}>{r.value || "(vuota)"} — {r.help}</option>
+                <option value={r.value} title={r.help}>{r.value || $t("newRemote.emptyRegion")} — {r.help}</option>
               {/each}
             </select>
           {:else}
@@ -406,33 +400,33 @@
         </label>
       {:else if kind === "mega"}
         <label>
-          Email
+          {$t("newRemote.emailLabel")}
           <input type="text" bind:value={megaUser} />
         </label>
         <label>
-          Password
+          {$t("unlock.passwordLabel")}
           <input type="password" bind:value={megaPass} />
         </label>
         <label>
-          Codice 2FA (facoltativo)
+          {$t("newRemote.twoFaLabel")}
           <input type="text" bind:value={megaTwoFa} />
         </label>
       {/if}
 
       {#if errorMessage}
-        <p class="error">✗ Connessione non riuscita: {errorMessage}</p>
+        <p class="error">✗ {$t("newRemote.connectionFailed", { values: { error: errorMessage } })}</p>
       {/if}
 
       <div class="actions">
-        <button type="button" onclick={backToStep1} disabled={submitting}>Indietro</button>
+        <button type="button" onclick={backToStep1} disabled={submitting}>{$t("newRemote.back")}</button>
         <button type="submit" disabled={!canSubmit || submitting}>
-          {submitting ? "Verifica in corso…" : "Verifica e salva"}
+          {submitting ? $t("importPanel.checking") : $t("newRemote.verifyAndSave")}
         </button>
       </div>
     </form>
   {:else if step === 3}
-    <p class="ok">✓ Remote "{name}" creato e verificato correttamente.</p>
-    <a href="/">Torna alla schermata principale</a>
+    <p class="ok">✓ {$t("newRemote.remoteCreated", { values: { name } })}</p>
+    <a href="/">{$t("newRemote.backToHome")}</a>
   {/if}
 </main>
 

@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
+  import { t } from "$lib/i18n";
 
   type RemoteForEdit = { kind: string; parameters: Record<string, string> };
   type S3ProviderOption = { value: string; help: string };
@@ -118,29 +119,22 @@
 </script>
 
 <main class="container">
-  <a href="/" class="back-link">← Torna alla schermata principale</a>
-  <h1>Modifica {remoteName}</h1>
+  <a href="/" class="back-link">← {$t("newRemote.backToHome")}</a>
+  <h1>{$t("editRemote.title", { values: { remote: remoteName } })}</h1>
 
   {#if loadState.status === "loading"}
-    <p>Caricamento…</p>
+    <p>{$t("common.loading")}</p>
   {:else if loadState.status === "error"}
     <p class="error">✗ {loadState.message}</p>
   {:else if kind === "drive" && !driveHasOwnClientId}
     <p class="warning">
-      Questo remote Google Drive usa ancora l'identità condivisa di rclone, che <strong>Google disattiverà nel corso
-      del 2026</strong> — da quel momento smetterà di funzionare. Per continuare a usarlo serve un client Google
-      tuo, gratuito e veloce da creare. I remote autorizzati via browser non sono ancora modificabili da qui: per
-      passare a un client tuo, elimina questo remote dalla schermata principale e ricrealo con lo stesso nome
-      («{remoteName}») da "Aggiungi remote" → Google Drive, questa volta compilando "Usa un client Google tuo".
-      Mount, backup e sincronizzazioni collegati a questo nome restano validi, non serve ricrearli.
+      {$t("editRemote.driveSharedWarningBefore")} <strong>{$t("editRemote.driveSharedWarningStrong")}</strong>{$t("editRemote.driveSharedWarningAfter", { values: { remote: remoteName } })}
     </p>
   {:else if kind === "drive"}
-    <p class="ok">✓ Questo remote Google Drive usa già un client Google tuo, non è coinvolto dal ritiro
-      dell'identità condivisa di rclone previsto da Google nel corso del 2026.</p>
+    <p class="ok">✓ {$t("editRemote.driveOwnClientOk")}</p>
   {:else if kind === "dropbox" || kind === "onedrive"}
     <p class="warning">
-      I remote autorizzati via browser (Dropbox, OneDrive) non sono ancora modificabili da qui. Se devi cambiare
-      account, elimina questo remote dalla pagina precedente e ricrealo.
+      {$t("editRemote.oauthNotEditable")}
     </p>
   {:else}
     <form onsubmit={(e) => { e.preventDefault(); submit(); }}>
@@ -148,7 +142,7 @@
         <label>
           Provider
           <select bind:value={s3Provider} onchange={() => (s3ProviderTouchedByUser = true)}>
-            <option value="Other">Altro / endpoint personalizzato</option>
+            <option value="Other">{$t("newRemote.otherCustomEndpoint")}</option>
             {#each s3Providers as p (p.value)}
               <option value={p.value} title={p.help}>{p.value}</option>
             {/each}
@@ -164,15 +158,15 @@
         </label>
         <label>
           Secret Access Key
-          <input type="password" bind:value={s3SecretAccessKey} placeholder="lascia vuoto per non cambiarla" />
+          <input type="password" bind:value={s3SecretAccessKey} placeholder={$t("editRemote.leaveEmptyToKeep")} />
         </label>
         <label>
-          Regione (facoltativa)
+          {$t("newRemote.regionLabel")}
           {#if s3RegionsForProvider.length > 0}
             <select bind:value={s3Region}>
-              <option value="">Nessuna / non specificata</option>
+              <option value="">{$t("newRemote.noRegionSpecified")}</option>
               {#each s3RegionsForProvider as r (r.value)}
-                <option value={r.value} title={r.help}>{r.value || "(vuota)"} — {r.help}</option>
+                <option value={r.value} title={r.help}>{r.value || $t("newRemote.emptyRegion")} — {r.help}</option>
               {/each}
             </select>
           {:else}
@@ -186,7 +180,7 @@
         </label>
         <label>
           Application Key
-          <input type="password" bind:value={b2Key} placeholder="lascia vuoto per non cambiarla" />
+          <input type="password" bind:value={b2Key} placeholder={$t("editRemote.leaveEmptyToKeep")} />
         </label>
       {:else if kind === "mega"}
         <label>
@@ -194,18 +188,18 @@
           <input type="text" bind:value={megaUser} />
         </label>
         <label>
-          Password
-          <input type="password" bind:value={megaPass} placeholder="lascia vuoto per non cambiarla" />
+          {$t("unlock.passwordLabel")}
+          <input type="password" bind:value={megaPass} placeholder={$t("editRemote.leaveEmptyToKeep")} />
         </label>
       {/if}
 
       {#if errorMessage}
-        <p class="error">✗ Connessione non riuscita: {errorMessage}</p>
+        <p class="error">✗ {$t("newRemote.connectionFailed", { values: { error: errorMessage } })}</p>
       {/if}
 
       <div class="actions">
         <button type="submit" disabled={submitting}>
-          {submitting ? "Verifica in corso…" : "Verifica e salva"}
+          {submitting ? $t("importPanel.checking") : $t("newRemote.verifyAndSave")}
         </button>
       </div>
     </form>

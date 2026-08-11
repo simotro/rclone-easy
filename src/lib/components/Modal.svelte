@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import { t } from "$lib/i18n";
 
   let { open = $bindable(false), title, children }: { open: boolean; title: string; children: Snippet } = $props();
 
@@ -26,7 +27,7 @@
     <div class="dialog" role="dialog" aria-modal="true">
       <div class="header">
         <h2>{title}</h2>
-        <button type="button" class="close-button" onclick={() => (open = false)} aria-label="Chiudi">✕</button>
+        <button type="button" class="close-button" onclick={() => (open = false)} aria-label={$t("common.close")}>✕</button>
       </div>
       <div class="content">
         {@render children()}

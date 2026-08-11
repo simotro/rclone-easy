@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import { t } from "$lib/i18n";
 
   let {
     value = $bindable(""),
@@ -27,8 +28,8 @@
       class="reveal-toggle"
       onclick={() => (visible = !visible)}
       disabled={disabled}
-      aria-label={visible ? "Nascondi password" : "Mostra password"}
-      title={visible ? "Nascondi password" : "Mostra password"}
+      aria-label={visible ? $t("passwordField.hide") : $t("passwordField.show")}
+      title={visible ? $t("passwordField.hide") : $t("passwordField.show")}
     >
       <Icon kind={visible ? "eye-off" : "eye"} />
     </button>

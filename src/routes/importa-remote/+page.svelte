@@ -1,10 +1,11 @@
 <script lang="ts">
   import ImportRemotesPanel from "$lib/components/ImportRemotesPanel.svelte";
+  import { t } from "$lib/i18n";
 </script>
 
 <main class="container">
-  <a href="/" class="back-link">← Torna alla schermata principale</a>
-  <h1>Importa remote esistenti</h1>
+  <a href="/" class="back-link">← {$t("newRemote.backToHome")}</a>
+  <h1>{$t("home.importExistingRemotes")}</h1>
   <ImportRemotesPanel />
 </main>
 

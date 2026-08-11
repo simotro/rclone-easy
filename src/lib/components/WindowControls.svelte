@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
+  import { t } from "$lib/i18n";
 
   // Sostituisce il pulsante nativo della barra del titolo, rimossa del
   // tutto (`decorations: false` in tauri.conf.json) per un bug di tao su
@@ -19,8 +20,8 @@
   type="button"
   class="window-control"
   onclick={hide}
-  title="Nascondi la finestra — Rclone Easy resta attivo in background, trovi l'icona nella tray di sistema"
-  aria-label="Nascondi la finestra"
+  title={$t("windowControls.hideTitle")}
+  aria-label={$t("windowControls.hideAria")}
 >
   <Icon kind="quit" />
 </button>

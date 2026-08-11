@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import Modal from "./Modal.svelte";
+  import { t } from "$lib/i18n";
 
   let {
     open = $bindable(false),
@@ -47,17 +48,17 @@
   }
 </script>
 
-<Modal bind:open title={`Cartella su ${remoteName}`}>
+<Modal bind:open title={$t("folderPicker.title", { values: { remote: remoteName } })}>
   <div class="picker">
     {#if loading}
-      <p class="hint">Caricamento…</p>
+      <p class="hint">{$t("common.loading")}</p>
     {:else if error}
       <p class="error">✗ {error}</p>
     {/if}
 
     <ul class="entries">
       <li>
-        <button type="button" class="root-entry" onclick={() => select("")}>Usa la radice</button>
+        <button type="button" class="root-entry" onclick={() => select("")}>{$t("folderPicker.useRoot")}</button>
       </li>
       {#each entries as entry (entry.path)}
         <li>

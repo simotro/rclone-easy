@@ -1,4 +1,5 @@
-import { readable } from "svelte/store";
+import { readable, get } from "svelte/store";
+import { t } from "$lib/i18n";
 
 /// Orologio condiviso, aggiornato una volta al secondo — usato dai
 /// contatori "prossima sincronizzazione tra..." in più componenti
@@ -9,14 +10,15 @@ export const now = readable(Date.now(), (set) => {
 });
 
 export function formatCountdown(targetMs: number, nowMs: number): string {
+  const translate = get(t);
   const remaining = targetMs - nowMs;
-  if (remaining <= 0) return "a momenti";
+  if (remaining <= 0) return translate("now.momentarily");
   const totalSeconds = Math.floor(remaining / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
   const pad = (n: number) => n.toString().padStart(2, "0");
-  return `tra ${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+  return translate("now.countdown", { values: { time: `${pad(hours)}:${pad(minutes)}:${pad(seconds)}` } });
 }
 
 /// `null` se il job non ha una prossima esecuzione automatica prevista

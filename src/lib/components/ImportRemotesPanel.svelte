@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+  import { t } from "$lib/i18n";
 
   // Usato sia dalla pagina dedicata `/importa-remote` (raggiunta dal wizard
   // "Aggiungi remote") sia incorporato nel modal "Importa / Esporta" della
@@ -52,7 +53,7 @@
 
   async function chooseDifferentConfigFile() {
     const selectedFile = await openFileDialog({
-      title: "Scegli un file di configurazione rclone",
+      title: $t("importPanel.chooseFileDialogTitle"),
       multiple: false,
       defaultPath: standardConfigPath ?? undefined,
     });
@@ -102,34 +103,33 @@
 
 <div class="import-remotes">
   <p class="subtitle">
-    Remote già presenti in un <code>rclone.conf</code>: scegli quali portare nella config di Rclone Easy. Vengono
-    comunque verificati prima di essere salvati, come per un nuovo remote.
+    {$t("importPanel.subtitleBefore")} <code>rclone.conf</code>{$t("importPanel.subtitleAfter")}
   </p>
 
   <div class="config-source">
     {#if configPath}
-      <span class="hint">Sorgente: <code>{configPath}</code></span>
+      <span class="hint">{$t("importPanel.source")} <code>{configPath}</code></span>
       <button type="button" class="link-button" onclick={useSystemConfig} disabled={loading || importing}>
-        Usa il config di sistema
+        {$t("importPanel.useSystemConfig")}
       </button>
     {:else}
-      <span class="hint">Sorgente: config di sistema</span>
+      <span class="hint">{$t("importPanel.source")} {$t("importPanel.systemConfig")}</span>
     {/if}
     <button type="button" class="link-button" onclick={chooseDifferentConfigFile} disabled={loading || importing}>
-      Scegli un altro file di configurazione…
+      {$t("importPanel.chooseOtherFile")}
     </button>
   </div>
 
   {#if loading}
-    <p>Verifica in corso…</p>
+    <p>{$t("importPanel.checking")}</p>
   {:else if loadError}
     <p class="error">✗ {loadError}</p>
   {:else if existing.length === 0}
-    <p>Nessun remote trovato in questo <code>rclone.conf</code>.</p>
+    <p>{$t("importPanel.noneFoundBefore")} <code>rclone.conf</code>{$t("importPanel.noneFoundAfter")}</p>
   {:else}
     <label class="select-all">
       <input type="checkbox" checked={allSelected} onchange={toggleAll} disabled={selectableNames.length === 0} />
-      Seleziona tutti
+      {$t("importPanel.selectAll")}
     </label>
 
     <ul class="remote-list">
@@ -147,11 +147,11 @@
             {remote.name} <span class="kind">({remote.kind})</span>
           </label>
           {#if conflict}
-            <span class="hint">già presente in Rclone Easy</span>
+            <span class="hint">{$t("importPanel.alreadyPresent")}</span>
           {:else if result?.status === "importing"}
-            <span class="hint">verifica in corso…</span>
+            <span class="hint">{$t("importPanel.itemChecking")}</span>
           {:else if result?.status === "done"}
-            <span class="ok">✓ importato</span>
+            <span class="ok">✓ {$t("importPanel.imported")}</span>
           {:else if result?.status === "error"}
             <span class="error">✗ {result.message}</span>
           {/if}
@@ -160,7 +160,7 @@
     </ul>
 
     <button onclick={importSelected} disabled={selected.size === 0 || importing}>
-      {importing ? "Importazione in corso…" : "Importa selezionati"}
+      {importing ? $t("importPanel.importingButton") : $t("importPanel.importButton")}
     </button>
   {/if}
 </div>

@@ -1,16 +1,17 @@
 <script lang="ts">
   import { getTheme, setTheme, type ThemeChoice } from "$lib/theme.svelte";
+  import { t } from "$lib/i18n";
 
   const CONTRAST_ICON = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>`;
   const SUN_ICON = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="4.2" stroke="currentColor" stroke-width="2"/><path d="M12 2v2.4M12 19.6V22M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M2 12h2.4M19.6 12H22M4.9 19.1l1.7-1.7M17.4 6.6l1.7-1.7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
   const MOON_ICON = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z" fill="currentColor"/></svg>`;
   const CHEVRON_ICON = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
-  const options: { value: ThemeChoice; label: string; icon: string }[] = [
-    { value: "system", label: "Sistema", icon: CONTRAST_ICON },
-    { value: "light", label: "Chiaro", icon: SUN_ICON },
-    { value: "dark", label: "Scuro", icon: MOON_ICON },
-  ];
+  const options = $derived<{ value: ThemeChoice; label: string; icon: string }[]>([
+    { value: "system", label: $t("theme.system"), icon: CONTRAST_ICON },
+    { value: "light", label: $t("theme.light"), icon: SUN_ICON },
+    { value: "dark", label: $t("theme.dark"), icon: MOON_ICON },
+  ]);
 
   let open = $state(false);
   let container: HTMLDivElement | undefined = $state();
@@ -36,12 +37,12 @@
 <div class="theme-toggle" bind:this={container}>
   <button type="button" class="trigger" aria-haspopup="true" aria-expanded={open} onclick={() => (open = !open)}>
     <span class="icon">{@html current.icon}</span>
-    <span>Tema</span>
+    <span>{$t("theme.label")}</span>
     <span class="chevron" class:open>{@html CHEVRON_ICON}</span>
   </button>
 
   {#if open}
-    <div class="menu" role="menu" aria-label="Scegli il tema">
+    <div class="menu" role="menu" aria-label={$t("theme.label")}>
       {#each options as option (option.value)}
         <button type="button" class="item" class:active={option.value === current.value} role="menuitem" onclick={() => choose(option.value)}>
           <span class="icon">{@html option.icon}</span>

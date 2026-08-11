@@ -7,6 +7,7 @@
   import ImportRemotesPanel from "$lib/components/ImportRemotesPanel.svelte";
   import PasswordField from "$lib/components/PasswordField.svelte";
   import type { MountEntry, SyncJob, BisyncJob } from "$lib/types";
+  import { t } from "$lib/i18n";
 
   type CheckState<T> = { status: "loading" } | { status: "ok"; value: T } | { status: "error"; message: string };
 
@@ -60,10 +61,10 @@
 
   $effect(() => {
     invoke<string>("check_rclone_installed").catch((error) => {
-      startupWarning = `rclone non è disponibile: ${error}`;
+      startupWarning = $t("home.rcloneNotAvailable", { values: { error } });
     });
     invoke<string>("rcd_status").catch((error) => {
-      startupWarning = `Il servizio interno di rclone non risponde: ${error}`;
+      startupWarning = $t("home.rcdNotResponding", { values: { error } });
     });
     loadOwnRemotes();
     loadServices();
@@ -107,15 +108,15 @@
 
   async function submitPassword() {
     if (passwordAlreadySet && passwordCurrent.trim() === "") {
-      passwordError = "Inserisci la password attuale.";
+      passwordError = $t("home.enterCurrentPassword");
       return;
     }
     if (passwordNew.length < 8) {
-      passwordError = "La password deve avere almeno 8 caratteri.";
+      passwordError = $t("home.passwordMinLength");
       return;
     }
     if (passwordNew !== passwordConfirm) {
-      passwordError = "Le due password non coincidono.";
+      passwordError = $t("home.passwordsDontMatch");
       return;
     }
     passwordBusy = true;
@@ -135,7 +136,7 @@
 
   async function removePassword() {
     if (passwordCurrent.trim() === "") {
-      passwordError = "Inserisci la password attuale per rimuoverla.";
+      passwordError = $t("home.enterCurrentPasswordToRemove");
       return;
     }
     passwordBusy = true;
@@ -187,7 +188,7 @@
 
   async function confirmExportPassword() {
     if (exportPassword === "" && exportPasswordConfirm === "") {
-      if (!confirm("Senza password il backup sarà leggibile in chiaro da chiunque apra il file. Continuare comunque?")) {
+      if (!confirm($t("home.exportNoPasswordConfirm"))) {
         return;
       }
       exportPasswordModalOpen = false;
@@ -195,11 +196,11 @@
       return;
     }
     if (exportPassword.length < 8) {
-      exportPasswordError = "La password deve avere almeno 8 caratteri, oppure lasciala vuota per non cifrare il backup.";
+      exportPasswordError = $t("home.exportPasswordMinLength");
       return;
     }
     if (exportPassword !== exportPasswordConfirm) {
-      exportPasswordError = "Le due password non coincidono.";
+      exportPasswordError = $t("home.passwordsDontMatch");
       return;
     }
     const password = exportPassword;
@@ -211,17 +212,19 @@
     importExportError = null;
     importExportOk = null;
     const destination = await saveFileDialog({
-      title: "Salva backup di Rclone Easy",
+      title: $t("home.saveBackupDialogTitle"),
       defaultPath: password ? "rclone-easy-backup.age" : "rclone-easy-backup.json",
       filters: password
-        ? [{ name: "Backup Rclone Easy (cifrato)", extensions: ["age"] }]
-        : [{ name: "Backup Rclone Easy (in chiaro)", extensions: ["json"] }],
+        ? [{ name: $t("home.encryptedBackupFilterName"), extensions: ["age"] }]
+        : [{ name: $t("home.plainBackupFilterName"), extensions: ["json"] }],
     });
     if (!destination) return;
     importExportBusy = true;
     try {
       await invoke("export_backup", { destinationPath: destination, password: password ?? null });
-      importExportOk = password ? `Backup cifrato salvato in ${destination}` : `Backup in chiaro salvato in ${destination}`;
+      importExportOk = password
+        ? $t("home.encryptedBackupSaved", { values: { destination } })
+        : $t("home.plainBackupSaved", { values: { destination } });
     } catch (error) {
       importExportError = String(error);
     } finally {
@@ -237,16 +240,12 @@
     importExportError = null;
     importExportOk = null;
     const source = await openFileDialog({
-      title: "Scegli un backup di Rclone Easy da ripristinare",
+      title: $t("home.chooseBackupDialogTitle"),
       multiple: false,
-      filters: [{ name: "Backup Rclone Easy", extensions: ["age", "json"] }],
+      filters: [{ name: $t("home.backupFilterName"), extensions: ["age", "json"] }],
     });
     if (typeof source !== "string") return;
-    if (
-      !confirm(
-        "Ripristinare questo backup sovrascrive tutti i remote attuali di Rclone Easy (non mount/backup/sincronizzazioni, che restano quelli già configurati su questo PC). L'operazione non è reversibile. Continuare?",
-      )
-    ) {
+    if (!confirm($t("home.restoreConfirm"))) {
       return;
     }
     // Si tenta prima senza password: un backup salvato in chiaro (nessuna
@@ -305,17 +304,17 @@
 
   <section>
     <div class="top-actions">
-      <button type="button" onclick={() => goto("/nuovo-remote")}>Aggiungi Remote</button>
-      <button type="button" onclick={openPasswordModal}>{passwordAlreadySet ? "Gestisci password" : "Imposta password"}</button>
-      <button type="button" onclick={openImportExportModal}>Importa / Esporta…</button>
+      <button type="button" onclick={() => goto("/nuovo-remote")}>{$t("home.addRemote")}</button>
+      <button type="button" onclick={openPasswordModal}>{passwordAlreadySet ? $t("home.managePassword") : $t("home.setPassword")}</button>
+      <button type="button" onclick={openImportExportModal}>{$t("home.importExport")}</button>
     </div>
 
     {#if ownRemotes.status === "loading"}
-      <p>Verifica in corso…</p>
+      <p>{$t("home.checking")}</p>
     {:else if ownRemotes.status === "error"}
       <p class="error">✗ {ownRemotes.message}</p>
     {:else if ownRemotes.value.length === 0}
-      <p class="empty">Nessun remote ancora creato.</p>
+      <p class="empty">{$t("home.noRemotesYet")}</p>
     {:else}
       <ul class="remote-list">
         {#each ownRemotes.value as name (name)}
@@ -326,59 +325,58 @@
   </section>
 </main>
 
-<Modal bind:open={passwordModalOpen} title="Password della configurazione">
+<Modal bind:open={passwordModalOpen} title={$t("home.passwordModalTitle")}>
   <div class="stack-form">
     {#if passwordAlreadySet}
       <p class="hint">
-        La configurazione è già protetta da una password. Inserisci quella attuale per cambiarla o rimuoverla.
+        {$t("home.passwordAlreadySetHint")}
       </p>
     {:else}
       <p class="hint">
-        Protegge <code>rclone.conf</code> (dove sono salvate le credenziali dei tuoi remote) con una password: senza
-        non si può avviare l'app. Facoltativo, ma consigliato. Se la dimentichi non c'è modo di recuperarla.
+        {$t("home.passwordHintBefore")} <code>rclone.conf</code>{$t("home.passwordHintAfter")}
       </p>
     {/if}
     {#if passwordAlreadySet}
-      <PasswordField bind:value={passwordCurrent} label="Password attuale" disabled={passwordBusy} />
+      <PasswordField bind:value={passwordCurrent} label={$t("home.currentPasswordLabel")} disabled={passwordBusy} />
     {/if}
     <PasswordField
       bind:value={passwordNew}
-      label={passwordAlreadySet ? "Nuova password" : "Password"}
-      placeholder="Almeno 8 caratteri"
+      label={passwordAlreadySet ? $t("home.newPasswordLabel") : $t("unlock.passwordLabel")}
+      placeholder={$t("home.minEightChars")}
       disabled={passwordBusy}
     />
-    <PasswordField bind:value={passwordConfirm} label="Conferma password" disabled={passwordBusy} />
+    <PasswordField bind:value={passwordConfirm} label={$t("home.confirmPasswordLabel")} disabled={passwordBusy} />
     {#if passwordError}
       <p class="error">✗ {passwordError}</p>
     {/if}
     <div class="stack-actions">
       {#if passwordAlreadySet}
-        <button type="button" class="link-button" onclick={removePassword} disabled={passwordBusy}>Rimuovi password</button>
+        <button type="button" class="link-button" onclick={removePassword} disabled={passwordBusy}>{$t("home.removePassword")}</button>
       {/if}
       <button type="button" onclick={submitPassword} disabled={passwordBusy}>
-        {passwordBusy ? "In corso…" : passwordAlreadySet ? "Cambia password" : "Imposta password"}
+        {passwordBusy ? $t("common.inProgress") : passwordAlreadySet ? $t("home.changePassword") : $t("home.setPassword")}
       </button>
     </div>
   </div>
 </Modal>
 
-<Modal bind:open={importExportModalOpen} title="Importa / Esporta">
+<Modal bind:open={importExportModalOpen} title={$t("home.importExportTitle")}>
   {#if importExportView === "menu"}
     <div class="import-export-menu">
       <button type="button" class="menu-option" onclick={() => (importExportView = "import-remotes")}>
-        <strong>Importa remote esistenti</strong>
-        <span>Porta nella config di Rclone Easy i remote già configurati con rclone.</span>
+        <strong>{$t("home.importExistingRemotes")}</strong>
+        <span>{$t("home.importExistingRemotesDesc")}</span>
       </button>
       <button type="button" class="menu-option" onclick={openExportPasswordModal} disabled={importExportBusy}>
-        <strong>Crea backup Rclone Easy</strong>
-        <span>Salva i remote configurati (non mount/backup/sincronizzazioni, legati a cartelle di questo PC), opzionalmente cifrati con una password a tua scelta.</span>
+        <strong>{$t("home.createBackup")}</strong>
+        <span>{$t("home.createBackupDesc")}</span>
       </button>
       <button type="button" class="menu-option" onclick={restoreBackup} disabled={importExportBusy}>
-        <strong>Ripristina backup Rclone Easy</strong>
-        <span>Sovrascrive i remote attuali con quelli di un file di backup.</span>
+        <strong>{$t("home.restoreBackupOption")}</strong>
+        <span>{$t("home.restoreBackupDesc")}</span>
       </button>
       {#if importExportBusy}
-        <p class="hint">In corso…</p>
+        <p class="hint">{$t("common.inProgress")}</p>
       {/if}
       {#if importExportOk}
         <p class="ok">✓ {importExportOk}</p>
@@ -388,53 +386,51 @@
       {/if}
     </div>
   {:else}
-    <button type="button" class="link-button back-button" onclick={() => (importExportView = "menu")}>← Indietro</button>
+    <button type="button" class="link-button back-button" onclick={() => (importExportView = "menu")}>← {$t("home.back")}</button>
     <ImportRemotesPanel onImported={loadOwnRemotes} />
   {/if}
 </Modal>
 
-<Modal bind:open={exportPasswordModalOpen} title="Password del backup">
+<Modal bind:open={exportPasswordModalOpen} title={$t("home.backupPasswordTitle")}>
   <div class="stack-form">
     <p class="hint">
-      Il backup contiene le credenziali dei tuoi remote: scegli una password per cifrarlo. Ti servirà la stessa
-      password per ripristinarlo in futuro — se la perdi, il backup diventa inutilizzabile. Puoi anche lasciare
-      entrambi i campi vuoti: il backup verrà salvato in chiaro, leggibile da chiunque apra il file.
+      {$t("home.exportPasswordHint")}
     </p>
     <label class="stack-field">
-      Password (facoltativa)
-      <input type="password" bind:value={exportPassword} placeholder="Almeno 8 caratteri, o vuoto per non cifrare" />
+      {$t("home.exportPasswordLabel")}
+      <input type="password" bind:value={exportPassword} placeholder={$t("home.minEightCharsOrEmptyToSkipEncryption")} />
     </label>
     <label class="stack-field">
-      Conferma password
+      {$t("home.confirmPasswordLabel")}
       <input type="password" bind:value={exportPasswordConfirm} />
     </label>
     {#if exportPasswordError}
       <p class="error">✗ {exportPasswordError}</p>
     {/if}
     <div class="stack-actions">
-      <button type="button" onclick={confirmExportPassword}>Continua</button>
+      <button type="button" onclick={confirmExportPassword}>{$t("home.continueButton")}</button>
     </div>
   </div>
 </Modal>
 
-<Modal bind:open={importPasswordModalOpen} title="Password del backup">
+<Modal bind:open={importPasswordModalOpen} title={$t("home.backupPasswordTitle")}>
   <div class="stack-form">
-    <p class="hint">Questo backup è protetto da una password: inserisci quella scelta al momento dell'esportazione.</p>
+    <p class="hint">{$t("home.importPasswordHint")}</p>
     <label class="stack-field">
-      Password
+      {$t("unlock.passwordLabel")}
       <input type="password" bind:value={importPassword} />
     </label>
     <div class="stack-actions">
-      <button type="button" onclick={confirmImportPassword}>Ripristina</button>
+      <button type="button" onclick={confirmImportPassword}>{$t("home.restoreButton")}</button>
     </div>
   </div>
 </Modal>
 
-<Modal bind:open={restartNeededModalOpen} title="L'applicazione dev'essere riavviata">
+<Modal bind:open={restartNeededModalOpen} title={$t("home.restartTitle")}>
   <div class="stack-form">
-    <p class="hint">Il backup è stato ripristinato. Riavvia l'app perché i cambiamenti abbiano pieno effetto.</p>
+    <p class="hint">{$t("home.restartHint")}</p>
     <div class="stack-actions">
-      <button type="button" onclick={restartNow}>Riavvia ora</button>
+      <button type="button" onclick={restartNow}>{$t("home.restartNow")}</button>
     </div>
   </div>
 </Modal>
