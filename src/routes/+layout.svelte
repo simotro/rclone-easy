@@ -5,6 +5,7 @@
   import "$lib/i18n";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import LanguageToggle from "$lib/components/LanguageToggle.svelte";
+  import AboutButton from "$lib/components/AboutButton.svelte";
   import WindowControls from "$lib/components/WindowControls.svelte";
   import UnlockScreen from "$lib/components/UnlockScreen.svelte";
 
@@ -36,15 +37,17 @@
        presente, indipendentemente dallo stato di sblocco — l'unico modo,
        oltre alla tray, di agire sulla finestra (un secondo pulsante per
        l'uscita vera creava confusione, tolto: resta solo in "Esci" nel
-       menu della tray). Lingua e tema invece restano disponibili solo a
-       sblocco avvenuto, come già prima — e vanno prima di `WindowControls`
-       nel markup: `.title-bar` è allineata a destra (`justify-content:
-       flex-end`), quindi l'ordine nel DOM è l'ordine visivo da sinistra a
-       destra (lingua, poi tema, poi controlli finestra). -->
+       menu della tray). Lingua, tema e informazioni sull'app invece
+       restano disponibili solo a sblocco avvenuto, come già prima — e
+       vanno prima di `WindowControls` nel markup: `.title-bar` è
+       allineata a destra (`justify-content: flex-end`), quindi l'ordine
+       nel DOM è l'ordine visivo da sinistra a destra (lingua, poi tema,
+       poi informazioni sull'app, poi controlli finestra). -->
   <div class="title-bar" data-tauri-drag-region>
     {#if unlockState === "unlocked"}
       <LanguageToggle />
       <ThemeToggle />
+      <AboutButton />
     {/if}
     <WindowControls />
   </div>

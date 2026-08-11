@@ -22,6 +22,13 @@
   "language": {
     "label": "Language"
   },
+  "about": {
+    "title": "About",
+    "version": "Version",
+    "license": "License",
+    "author": "Author",
+    "repoLink": "GitHub repository"
+  },
   "windowControls": {
     "hideTitle": "Hide the window — Rclone Easy keeps running in the background, look for its icon in the system tray",
     "hideAria": "Hide the window"
