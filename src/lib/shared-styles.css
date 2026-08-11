@@ -115,6 +115,15 @@
 }
 
 body {
+  /* Il margine di default del browser (8px su ogni lato, mai azzerato
+     finora) sommato a `.app-shell { min-height: 100vh }` (+layout.svelte)
+     spingeva sempre il contenuto oltre l'altezza della finestra di 16px
+     fissi, indipendentemente da quanto contenuto c'è davvero — la
+     scrollbar risultante è quasi invisibile su Linux/WebKitGTK (sottile,
+     sfuma) ma ben visibile e ingiustificata su Windows/WebView2
+     (segnalato da Simone l'11/8/2026, con solo 3 remote e molto spazio
+     sotto). */
+  margin: 0;
   color: var(--text-color);
   background-color: var(--bg-page);
 }
