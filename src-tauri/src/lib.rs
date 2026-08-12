@@ -42,7 +42,7 @@ use mounts::{
 };
 
 mod bisync;
-use bisync::{create_bisync_job, delete_bisync_job, list_bisync_jobs, run_bisync_job, update_bisync_job};
+use bisync::{create_bisync_job, delete_bisync_job, list_bisync_jobs, run_bisync_job, run_bisync_job_forced, update_bisync_job};
 
 mod scheduler;
 mod watcher;
@@ -251,6 +251,7 @@ pub fn run() {
             update_bisync_job,
             delete_bisync_job,
             run_bisync_job,
+            run_bisync_job_forced,
             export_backup,
             import_backup,
             restart_app,

@@ -14,3 +14,6 @@ vite.config.ts.timestamp-*
 
 # Note di sviluppo, materiale sorgente e artefatti locali non destinati al repo pubblico
 /dev-notes/
+
+# Stato locale di Claude Code (lock di sessione, non destinato al repo pubblico)
+/.claude/

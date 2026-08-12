@@ -24,7 +24,14 @@ export type SyncJob = {
   isRunning: boolean;
 };
 
-export type BisyncRunEntry = { success: boolean; message: string; whenUnix: number; conflictPaths: string[] };
+export type BisyncRunEntry = {
+  success: boolean;
+  message: string;
+  whenUnix: number;
+  conflictPaths: string[];
+  log: string;
+  needsForce: boolean;
+};
 export type BisyncJob = {
   name: string;
   path1: string;

@@ -37,6 +37,21 @@ pub struct BisyncRunResult {
     pub when_unix: u64,
     #[serde(default)]
     pub conflict_paths: Vec<String>,
+    /// Trascrizione leggibile dell'intero log del run (non solo l'ultima
+    /// riga d'errore in `message`), così l'utente può capire da sé cosa è
+    /// successo davvero prima di decidere come procedere — es. nel caso
+    /// "too many deletes" (vedi `error_suggests_force`) qui compaiono i file
+    /// che rclone si accingeva a cancellare. `#[serde(default)]` per la
+    /// compatibilità con le voci di history già salvate su disco prima di
+    /// questo campo.
+    #[serde(default)]
+    pub log: String,
+    /// `true` se il fallimento è esattamente il blocco di sicurezza "too
+    /// many deletes" di rclone bisync, che si sblocca solo con `--force` —
+    /// mai applicato automaticamente (vedi `run_bisync_job_forced`), solo
+    /// su azione esplicita dell'utente dopo aver visto `log`.
+    #[serde(default)]
+    pub needs_force: bool,
 }
 
 /// `BisyncJob` unito allo stato live "in esecuzione ora" — stesso principio
@@ -292,6 +307,53 @@ fn error_requires_resync(message: &str) -> bool {
     message.to_lowercase().contains("resync")
 }
 
+/// `true` per il blocco di sicurezza specifico di rclone bisync contro
+/// cancellazioni di massa ("too many deletes (>50%, N of M) on PathN ...
+/// Run with --force if desired."), non per un errore generico — solo in
+/// questo caso ha senso offrire in UI un pulsante "esegui comunque", perché
+/// solo qui rclone stesso garantisce che aggiungere `--force` risolve senza
+/// cambiare nient'altro nel comportamento del run.
+fn error_suggests_force(message: &str) -> bool {
+    message.to_lowercase().contains("run with --force")
+}
+
+/// Numero massimo di righe di log conservate per ogni run (in `history`,
+/// persistito su disco in `bisync.toml`): un run su un albero enorme può
+/// produrre un log molto lungo, e con `HISTORY_LIMIT` run salvati per job
+/// vogliamo evitare una crescita illimitata del file. Tiene le righe più
+/// recenti (la coda), dove si trova quasi sempre il motivo di un fallimento.
+const MAX_LOG_LINES: usize = 500;
+
+/// Converte il log grezzo di rclone (una riga JSON per evento, con
+/// `--use-json-log`) in una trascrizione leggibile "livello  messaggio",
+/// ripulita dai codici ANSI — stesso principio di `extract_error_message`
+/// ma per l'intero log, non solo l'ultima riga utile. Righe non JSON (es.
+/// un crash prima dell'inizializzazione del logging) sono incluse così come
+/// sono, ripulite. Troncata alle ultime `MAX_LOG_LINES` righe se più lunga.
+fn readable_log(stderr: &str) -> String {
+    let lines: Vec<String> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(value) => {
+                let level = value.get("level").and_then(|l| l.as_str()).unwrap_or("info");
+                let msg = value.get("msg").and_then(|m| m.as_str()).unwrap_or(line);
+                format!("{level:>7}  {}", strip_ansi(msg))
+            }
+            Err(_) => strip_ansi(line),
+        })
+        .collect();
+
+    if lines.len() <= MAX_LOG_LINES {
+        return lines.join("\n");
+    }
+    let skipped = lines.len() - MAX_LOG_LINES;
+    let mut truncated = vec![format!("[log troncato: omesse le prime {skipped} righe]")];
+    truncated.extend_from_slice(&lines[skipped..]);
+    truncated.join("\n")
+}
+
 /// Esegue `rclone bisync` come sottoprocesso diretto (non c'è un endpoint RC
 /// per bisync, a differenza di sync/mount — SPEC.md prevedeva questo
 /// fallback). `Err` solo se non si riesce proprio ad avviare il processo;
@@ -312,6 +374,7 @@ async fn execute_bisync(
     path1: &str,
     path2: &str,
     resync: bool,
+    force: bool,
     config_password: Option<&str>,
 ) -> Result<BisyncRunResult, String> {
     std::fs::create_dir_all(workdir)
@@ -349,6 +412,13 @@ async fn execute_bisync(
         args.push("--resync-mode".to_string());
         args.push("newer".to_string());
     }
+    if force {
+        // Sblocca esplicitamente il blocco di sicurezza "too many deletes"
+        // di rclone (vedi `error_suggests_force`) — mai impostato di sua
+        // iniziativa dall'app, solo su conferma esplicita dell'utente dopo
+        // aver visto il log dettagliato del run fallito.
+        args.push("--force".to_string());
+    }
 
     let mut command = tokio::process::Command::new(crate::rclone_bin::resolve_rclone_binary());
     command.args(&args).stdin(Stdio::null());
@@ -360,16 +430,18 @@ async fn execute_bisync(
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let conflict_paths = extract_conflict_paths(&stderr);
+    let log = readable_log(&stderr);
 
-    let (success, message) = if output.status.success() {
-        (true, String::new())
+    let (success, message, needs_force) = if output.status.success() {
+        (true, String::new(), false)
     } else {
         let message = extract_error_message(&stderr)
             .unwrap_or_else(|| format!("rclone bisync terminato con codice {:?}", output.status.code()));
-        (false, message)
+        let needs_force = error_suggests_force(&message);
+        (false, message, needs_force)
     };
 
-    Ok(BisyncRunResult { success, message, when_unix: now_unix(), conflict_paths })
+    Ok(BisyncRunResult { success, message, when_unix: now_unix(), conflict_paths, log, needs_force })
 }
 
 /// Nomi dei job bisync attualmente in esecuzione — stessa cautela di
@@ -395,30 +467,66 @@ fn is_job_running(name: &str) -> bool {
 }
 
 /// `config_password`: vedi il commento su `execute_bisync` — `None` se la
-/// config non è protetta.
+/// config non è protetta. Non passa mai `--force` — vedi
+/// `run_bisync_job_by_name_forced` per l'unico punto d'ingresso che può.
 pub(crate) async fn run_bisync_job_by_name(
     config_dir: &Path,
     config_password: Option<&str>,
     name: &str,
 ) -> Result<BisyncRunResult, String> {
+    run_bisync_job_by_name_with_force(config_dir, config_password, name, false).await
+}
+
+/// Come `run_bisync_job_by_name`, ma con `--force` — usata solo dal comando
+/// `run_bisync_job_forced`, mai dallo scheduler interno: forzare in
+/// automatico il blocco di sicurezza "too many deletes" vanificherebbe
+/// esattamente la protezione contro cancellazioni di massa che quel blocco
+/// offre (vedi il ventesimo slice in memoria per l'analisi rischi disastro
+/// originale). Deve restare sempre un'azione manuale ed esplicita.
+pub(crate) async fn run_bisync_job_by_name_forced(
+    config_dir: &Path,
+    config_password: Option<&str>,
+    name: &str,
+) -> Result<BisyncRunResult, String> {
+    run_bisync_job_by_name_with_force(config_dir, config_password, name, true).await
+}
+
+async fn run_bisync_job_by_name_with_force(
+    config_dir: &Path,
+    config_password: Option<&str>,
+    name: &str,
+    force: bool,
+) -> Result<BisyncRunResult, String> {
     if !running_jobs().lock().unwrap().insert(name.to_string()) {
         return Err(format!("il job '{name}' è già in esecuzione"));
     }
 
-    let result = run_bisync_job_by_name_inner(config_dir, config_password, name).await;
+    let result = run_bisync_job_by_name_inner(config_dir, config_password, name, force).await;
 
     running_jobs().lock().unwrap().remove(name);
     result
 }
 
-async fn run_bisync_job_by_name_inner(config_dir: &Path, config_password: Option<&str>, name: &str) -> Result<BisyncRunResult, String> {
+async fn run_bisync_job_by_name_inner(
+    config_dir: &Path,
+    config_password: Option<&str>,
+    name: &str,
+    force: bool,
+) -> Result<BisyncRunResult, String> {
     let mut jobs = load_from_dir(config_dir)?;
     let job = jobs.iter().find(|j| j.name == name).cloned().ok_or_else(|| format!("nessun job bisync chiamato '{name}'"))?;
 
     let workdir = workdir_for(config_dir, name);
-    let result =
-        execute_bisync(&config_dir.join("rclone.conf"), &workdir, &job.path1, &job.path2, job.needs_resync, config_password)
-            .await?;
+    let result = execute_bisync(
+        &config_dir.join("rclone.conf"),
+        &workdir,
+        &job.path1,
+        &job.path2,
+        job.needs_resync,
+        force,
+        config_password,
+    )
+    .await?;
 
     if let Some(stored) = jobs.iter_mut().find(|j| j.name == name) {
         stored.needs_resync = if result.success { false } else { error_requires_resync(&result.message) };
@@ -504,6 +612,36 @@ pub fn delete_bisync_job(app: AppHandle, name: String) -> Result<(), String> {
     delete_bisync_job_in(&app_config_dir(&app)?, &name)
 }
 
+/// Su un thread a parte: chiamare l'API di notifica da dentro un task tokio
+/// già in esecuzione (qui siamo dentro un comando async) manda in panic con
+/// "Cannot start a runtime from within a runtime" — il plugin apre una
+/// propria runtime per il D-Bus di sistema, cosa che Tokio non permette da
+/// un suo stesso worker thread. Osservato in pratica: il panic terminava
+/// questo task silenziosamente, la notifica non appariva mai. Un thread OS
+/// a parte non ha questo vincolo. Stesso schema in
+/// `tray.rs::notify_error`/`notify_done`. Condivisa tra `run_bisync_job` e
+/// `run_bisync_job_forced`, che devono notificare i conflitti allo stesso
+/// modo.
+fn notify_conflicts_if_any(app: &AppHandle, name: &str, result: &BisyncRunResult) {
+    if !result.success || result.conflict_paths.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    let name = name.to_string();
+    let count = result.conflict_paths.len();
+    std::thread::spawn(move || {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app
+            .notification()
+            .builder()
+            .title("Rclone Easy — conflitto rilevato")
+            .body(format!(
+                "Il job '{name}' ha trovato {count} file modificati su entrambi i lati: nessuna versione è stata persa, entrambe sono state salvate con un suffisso. Apri Rclone Easy per rivederle."
+            ))
+            .show();
+    });
+}
+
 /// A differenza dei job di sync (`jobs::run_job`), il risultato non è solo
 /// successo/errore: anche un run riuscito può aver generato conflitti da
 /// segnalare — per questo restituisce `BisyncRunResult` invece di `()`, e
@@ -514,32 +652,22 @@ pub async fn run_bisync_job(app: AppHandle, state: tauri::State<'_, RcdState>, n
     let config_dir = app_config_dir(&app)?;
     let password = crate::rcd::current_config_password(&state).await;
     let result = run_bisync_job_by_name(&config_dir, password.as_deref(), &name).await?;
+    notify_conflicts_if_any(&app, &name, &result);
+    Ok(result)
+}
 
-    if result.success && !result.conflict_paths.is_empty() {
-        // Su un thread a parte: chiamare l'API di notifica da dentro un task
-        // tokio già in esecuzione (qui siamo in un comando async) manda in
-        // panic con "Cannot start a runtime from within a runtime" — il
-        // plugin apre una propria runtime per il D-Bus di sistema, cosa che
-        // Tokio non permette da un suo stesso worker thread. Osservato in
-        // pratica: il panic terminava questo task silenziosamente, la
-        // notifica non appariva mai. Un thread OS a parte non ha questo
-        // vincolo. Stesso schema in `tray.rs::notify_error`/`notify_done`.
-        let app = app.clone();
-        let name = name.clone();
-        let count = result.conflict_paths.len();
-        std::thread::spawn(move || {
-            use tauri_plugin_notification::NotificationExt;
-            let _ = app
-                .notification()
-                .builder()
-                .title("Rclone Easy — conflitto rilevato")
-                .body(format!(
-                    "Il job '{name}' ha trovato {count} file modificati su entrambi i lati: nessuna versione è stata persa, entrambe sono state salvate con un suffisso. Apri Rclone Easy per rivederle."
-                ))
-                .show();
-        });
-    }
-
+/// Come `run_bisync_job`, ma passa `--force` a rclone — pensato per l'unico
+/// caso in cui serve: sbloccare un run fermato dalla protezione "too many
+/// deletes" (`BisyncRunResult::needs_force`), dopo che l'utente ha esaminato
+/// `log` in UI e ha scelto esplicitamente di procedere. Il frontend è
+/// responsabile di non esporre questa azione se non a fronte di quella
+/// condizione precisa (vedi `RemoteRow.svelte`).
+#[tauri::command]
+pub async fn run_bisync_job_forced(app: AppHandle, state: tauri::State<'_, RcdState>, name: String) -> Result<BisyncRunResult, String> {
+    let config_dir = app_config_dir(&app)?;
+    let password = crate::rcd::current_config_password(&state).await;
+    let result = run_bisync_job_by_name_forced(&config_dir, password.as_deref(), &name).await?;
+    notify_conflicts_if_any(&app, &name, &result);
     Ok(result)
 }
 
@@ -781,6 +909,33 @@ mod tests {
         assert!(!error_requires_resync("rete non raggiungibile"));
     }
 
+    #[test]
+    fn error_suggests_force_matches_the_real_rclone_wording() {
+        assert!(error_suggests_force(
+            "too many deletes (>50%, 21 of 23) on Path1 \"/home/utente/foto\". Run with --force if desired."
+        ));
+        assert!(!error_suggests_force("rete non raggiungibile"));
+        assert!(!error_requires_resync("too many deletes (>50%, 21 of 23) on Path1"), "casi distinti, non si sovrappongono");
+    }
+
+    #[test]
+    fn readable_log_formats_json_lines_and_strips_ansi() {
+        let stderr = [json_log_line("error", "<ESC>[31mtroppi errori<ESC>[0m"), "riga non json".to_string()].join("\n");
+        let log = readable_log(&stderr);
+        assert_eq!(log, "  error  troppi errori\nriga non json");
+    }
+
+    #[test]
+    fn readable_log_truncates_to_the_last_lines_when_too_long() {
+        let stderr = (0..MAX_LOG_LINES + 10).map(|i| json_log_line("info", &format!("riga {i}"))).collect::<Vec<_>>().join("\n");
+        let log = readable_log(&stderr);
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), MAX_LOG_LINES + 1, "un avviso di troncamento in più oltre alle righe tenute");
+        assert!(lines[0].contains("troncato"));
+        assert!(lines[1].contains("riga 10"), "devono restare le ultime righe, non le prime: {}", lines[1]);
+        assert!(lines.last().unwrap().contains(&format!("riga {}", MAX_LOG_LINES + 9)));
+    }
+
     /// Verifica che il primissimo resync preferisca la versione modificata
     /// più di recente, non semplicemente quella locale (path1) — senza
     /// "--resync-mode newer" esplicito, rclone farebbe vincere path1 a
@@ -950,5 +1105,64 @@ mod tests {
         assert!(first.is_ok(), "la prima delle due chiamate dovrebbe riuscire: {first:?}");
         assert!(second.is_err(), "la seconda, concorrente, deve essere rifiutata: {second:?}");
         assert!(second.unwrap_err().contains("già in esecuzione"));
+    }
+
+    /// Riproduce dal vivo il caso reale segnalato dall'utente: dopo una
+    /// baseline stabilita, una cancellazione di massa su un lato (qui: un
+    /// disco/cartella locale svuotato per errore) fa scattare la protezione
+    /// di rclone contro le cancellazioni di massa ("too many deletes",
+    /// soglia di default 50%) — il run normale deve fallire SENZA propagare
+    /// le cancellazioni, esporre `needs_force`/`log`, e solo un secondo run
+    /// esplicito con `run_bisync_job_by_name_forced` deve completarle
+    /// davvero. Verifica quindi sia il blocco sia lo sblocco, non solo il
+    /// messaggio d'errore.
+    #[tokio::test]
+    async fn run_bisync_job_stops_on_too_many_deletes_and_force_unblocks_it() {
+        let jobs_dir = TempDir::new("bisync-too-many-deletes-jobs");
+        let path1_dir = TempDir::new("bisync-too-many-deletes-path1");
+        let path2_dir = TempDir::new("bisync-too-many-deletes-path2");
+        std::fs::create_dir_all(&path1_dir.path).unwrap();
+        std::fs::create_dir_all(&path2_dir.path).unwrap();
+        for i in 0..10 {
+            std::fs::write(path1_dir.path.join(format!("file{i}.txt")), format!("contenuto {i}")).unwrap();
+        }
+
+        create_bisync_job_in(
+            &jobs_dir.path,
+            "prova-troppi-cancellati",
+            &path1_dir.path.to_string_lossy(),
+            &path2_dir.path.to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&jobs_dir.path).unwrap();
+
+        let baseline = run_bisync_job_by_name(&jobs_dir.path, None, "prova-troppi-cancellati").await.unwrap();
+        assert!(baseline.success, "il resync iniziale dovrebbe riuscire: {baseline:?}");
+        assert_eq!(std::fs::read_dir(&path2_dir.path).unwrap().count(), 10, "la baseline deve aver copiato tutti i file su path2");
+
+        // Cancellazione di massa su path1 (8 file su 10, 80% > soglia 50%).
+        for i in 0..8 {
+            std::fs::remove_file(path1_dir.path.join(format!("file{i}.txt"))).unwrap();
+        }
+
+        let blocked = run_bisync_job_by_name(&jobs_dir.path, None, "prova-troppi-cancellati").await.unwrap();
+        assert!(!blocked.success, "una cancellazione di massa deve fermare il run, non propagarlo: {blocked:?}");
+        assert!(blocked.needs_force, "questo fallimento specifico deve segnalare che serve --force: {blocked:?}");
+        assert!(blocked.message.to_lowercase().contains("too many deletes"), "messaggio inatteso: {}", blocked.message);
+        assert!(!blocked.log.is_empty(), "il log dettagliato non deve essere vuoto");
+        assert_eq!(
+            std::fs::read_dir(&path2_dir.path).unwrap().count(),
+            10,
+            "path2 non deve aver perso file finché il run è bloccato dalla protezione"
+        );
+
+        let forced = run_bisync_job_by_name_forced(&jobs_dir.path, None, "prova-troppi-cancellati").await.unwrap();
+        assert!(forced.success, "con --force il run deve completare: {forced:?}");
+        assert_eq!(
+            std::fs::read_dir(&path2_dir.path).unwrap().count(),
+            2,
+            "con --force le cancellazioni vanno propagate davvero su path2"
+        );
     }
 }

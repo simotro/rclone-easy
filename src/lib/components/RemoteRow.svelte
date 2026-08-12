@@ -525,6 +525,15 @@
   let bisyncRunResult = $state<BisyncRunEntry | null>(null);
   let bisyncWasActiveOnOpen = $state(false);
   let bisyncFormRemotePath = $state("");
+  // "Mostra dettagli" nel pannello di risultato di un "Esegui ora" appena
+  // fatto — un riquadro che si apre/chiude sul posto invece di un modal
+  // impilato sopra quello di configurazione bisync (più semplice da seguire
+  // per l'utente, niente due popup annidati per un'azione sola).
+  let bisyncDetailsExpanded = $state(false);
+  // Stesso principio nella cronologia, ma lì le voci sono tante: tiene la
+  // chiave (whenUnix) della singola voce aperta, non un booleano — al più
+  // una alla volta, cliccarne un'altra chiude la precedente.
+  let expandedHistoryEntryKey = $state<number | null>(null);
 
   function bisyncLocalPathOf(job: BisyncJob): string {
     return job.path1.startsWith(prefix) ? job.path2 : job.path1;
@@ -548,6 +557,7 @@
     bisyncWasActiveOnOpen = bisyncJob?.autoIntervalMinutes !== null && bisyncJob !== null;
     bisyncError = null;
     bisyncRunResult = null;
+    bisyncDetailsExpanded = false;
     bisyncModalOpen = true;
   }
 
@@ -593,6 +603,26 @@
     try {
       await persistBisync();
       bisyncRunResult = await invoke<BisyncRunEntry>("run_bisync_job", { name: remoteName });
+    } catch (error) {
+      bisyncError = String(error);
+    } finally {
+      bisyncBusy = false;
+      await onRefresh?.();
+    }
+  }
+
+  // Unico pulsante per eseguire con --force, usato sia dal pannello di
+  // risultato live sia dalla cronologia: il pulsante compare solo dentro il
+  // riquadro dei dettagli già espanso (log + avviso appena sopra, sempre
+  // visibili insieme), quindi non serve un secondo modal di conferma — la
+  // lettura del log e dell'avviso PRIMA di poter cliccare è già la
+  // "conferma", stesso principio di sicurezza di prima ma senza un altro
+  // popup impilato sopra quello attuale.
+  async function forceBisyncNow() {
+    bisyncBusy = true;
+    bisyncError = null;
+    try {
+      bisyncRunResult = await invoke<BisyncRunEntry>("run_bisync_job_forced", { name: remoteName });
     } catch (error) {
       bisyncError = String(error);
     } finally {
@@ -898,6 +928,23 @@
         </div>
       {:else}
         <p class="error">✗ {bisyncRunResult.message}</p>
+        {#if bisyncRunResult.log || bisyncRunResult.needsForce}
+          <button type="button" onclick={() => (bisyncDetailsExpanded = !bisyncDetailsExpanded)}>
+            {bisyncDetailsExpanded ? $t("remoteRow.hideDetailedLog") : $t("remoteRow.showDetailedLog")}
+          </button>
+        {/if}
+        {#if bisyncDetailsExpanded}
+          {#if bisyncRunResult.log}<pre class="log-view">{bisyncRunResult.log}</pre>{/if}
+          {#if bisyncRunResult.needsForce}
+            <div class="conflict-box">
+              <p>{$t("remoteRow.forceBisyncWarningIntro")}</p>
+              <p>{$t("remoteRow.forceBisyncWarningHint")}</p>
+            </div>
+            <button type="button" onclick={forceBisyncNow} disabled={bisyncBusy}>
+              {bisyncBusy ? $t("common.inProgress") : $t("remoteRow.runWithForce")}
+            </button>
+          {/if}
+        {/if}
       {/if}
     {/if}
     {#if bisyncError}
@@ -955,7 +1002,7 @@
       <p class="hint">{$t("remoteRow.noRunsYet")}</p>
     {:else}
       <ul class="history-list">
-        {#each bisyncJob.history as entry (entry.whenUnix)}
+        {#each bisyncJob.history as entry, index (entry.whenUnix)}
           <li>
             {#if !entry.success}
               <span class="error">✗ {$t("remoteRow.failed")}</span>
@@ -965,7 +1012,29 @@
               <span class="ok">✓ {$t("remoteRow.succeeded")}</span>
             {/if}
             <span class="hint">{formatWhen(entry.whenUnix)}</span>
-            {#if !entry.success}<p class="error">{entry.message}</p>{/if}
+            {#if !entry.success}
+              <p class="error">{entry.message}</p>
+              {#if entry.log || (entry.needsForce && index === 0)}
+                <button
+                  type="button"
+                  onclick={() => (expandedHistoryEntryKey = expandedHistoryEntryKey === entry.whenUnix ? null : entry.whenUnix)}
+                >
+                  {expandedHistoryEntryKey === entry.whenUnix ? $t("remoteRow.hideDetailedLog") : $t("remoteRow.showDetailedLog")}
+                </button>
+              {/if}
+              {#if expandedHistoryEntryKey === entry.whenUnix}
+                {#if entry.log}<pre class="log-view">{entry.log}</pre>{/if}
+                {#if entry.needsForce && index === 0}
+                  <div class="conflict-box">
+                    <p>{$t("remoteRow.forceBisyncWarningIntro")}</p>
+                    <p>{$t("remoteRow.forceBisyncWarningHint")}</p>
+                  </div>
+                  <button type="button" onclick={forceBisyncNow} disabled={bisyncBusy}>
+                    {bisyncBusy ? $t("common.inProgress") : $t("remoteRow.runWithForce")}
+                  </button>
+                {/if}
+              {/if}
+            {/if}
           </li>
         {/each}
       </ul>
@@ -1235,5 +1304,18 @@
 
 .history-list li:last-child {
   border-bottom: none;
+}
+
+.log-view {
+  margin: 0.4em 0 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: monospace;
+  font-size: 0.8em;
+  background-color: var(--surface-tint);
+  border-radius: 6px;
+  padding: 0.7em 0.9em;
 }
 </style>
