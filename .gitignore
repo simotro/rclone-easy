@@ -17,3 +17,7 @@ vite.config.ts.timestamp-*
 
 # Stato locale di Claude Code (lock di sessione, non destinato al repo pubblico)
 /.claude/
+
+# Symlink creati da `nix build`
+/result
+/result-*
