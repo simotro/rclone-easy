@@ -55,7 +55,13 @@ e poi `inputs.rclone-easy.packages.${system}.default` in `home.packages`.
 git clone https://github.com/simotro/rclone-easy.git
 cd rclone-easy
 npm install
-./scripts/fetch-rclone-sidecar.sh   # scarica il binario rclone incluso nell'app (solo Linux x86_64 per ora)
+
+# Solo per Linux
+    ./scripts/fetch-rclone-sidecar.sh
+
+# Solo per Windows
+    fetch-rclone-sidecar.ps1
+
 npm run tauri dev
 ```
 
