@@ -24,13 +24,16 @@ impl ServiceKind {
 }
 
 /// Nome del remote referenziato da una stringa `fs` (`remoto:percorso`),
-/// `None` se è un percorso locale — riconosciuto dal `/` iniziale (tutti i
-/// percorsi locali scelti dal selettore di cartelle sono assoluti, nessun
-/// nome di remote rclone può iniziare per `/`). Stessa funzione duplicata
-/// in `mounts.rs`/`jobs.rs`/`bisync.rs`: qui serve una copia propria per
-/// non introdurre una dipendenza incrociata tra quei tre moduli.
+/// `None` se è un percorso locale — riconosciuto tramite `Path::is_absolute`
+/// (tutti i percorsi locali scelti dal selettore di cartelle sono assoluti,
+/// nessun nome di remote rclone lo è: su Windows un `C:\...` è assoluto ma
+/// `starts_with('/')` non lo riconoscerebbe, scambiandolo per un remote
+/// chiamato "C" — bug reale osservato in tray.rs, corretto qui allo stesso
+/// modo). Stessa funzione duplicata in `mounts.rs`/`jobs.rs`/`bisync.rs`/
+/// `tray.rs`: qui serve una copia propria per non introdurre una dipendenza
+/// incrociata tra quei moduli.
 fn remote_name_of(fs: &str) -> Option<&str> {
-    if fs.starts_with('/') {
+    if Path::new(fs).is_absolute() {
         return None;
     }
     fs.split_once(':').map(|(name, _)| name)
