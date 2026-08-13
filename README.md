@@ -16,7 +16,7 @@ Costruita con [Tauri 2](https://tauri.app/) (Rust) + [SvelteKit](https://kit.sve
 
 - **Mount**: collega un remote cloud come se fosse una cartella locale.
 - **Backup**: sincronizzazione in una sola direzione (locale → cloud o viceversa), con protezione di default contro cancellazioni accidentali sulla destinazione.
-- **Sincronizzazione bidirezionale**: tiene allineate due cartelle (locale e remota) in entrambe le direzioni, con gestione esplicita dei conflitti.
+- **Sincronizzazione bidirezionale**: tiene allineate due cartelle (locale e remota) in entrambe le direzioni, con gestione esplicita dei conflitti e un blocco di sicurezza (con log dettagliato consultabile dall'app) se rileva una cancellazione di massa anomala.
 - **Automazione**: ogni backup/sincronizzazione può girare da solo a intervalli regolari, senza bisogno di cron o systemd timer.
 - **Icona nella tray**: stato a colpo d'occhio (in corso / ultimo errore), menu rapido per montare/smontare e avviare i job direttamente da lì.
 - **Backup/ripristino cifrato**: il file di backup esportato è protetto da una password scelta da te, quindi può essere spostato/salvato altrove senza esporre le credenziali dei tuoi remote. (La configurazione live sul disco locale segue invece il comportamento nativo di rclone — vedi l'avviso sulla sicurezza qui sotto.)
@@ -32,6 +32,22 @@ Rclone Easy usa la configurazione nativa di rclone (`rclone.conf`), salvata in `
 **[⬇ Scarica l'ultima versione](../../releases/latest)** — installer Windows (.exe) e pacchetti Linux (.deb, .rpm, AppImage). Lo storico completo delle versioni precedenti è nella [pagina delle release](../../releases).
 
 Nessuna firma del codice per ora: Windows mostrerà l'avviso SmartScreen ("Windows ha protetto il tuo PC") al primo avvio — clicca "Ulteriori informazioni" poi "Esegui comunque". macOS non è ancora supportato.
+
+### Nix / home-manager
+
+Il repository espone un [flake](flake.nix) con un pacchetto Nix (Linux, x86_64/aarch64), non ancora presente in nixpkgs. Build/avvio diretto:
+
+```bash
+nix run github:simotro/rclone-easy
+```
+
+Per installarlo in modo permanente con home-manager, aggiungilo come input del tuo flake:
+
+```nix
+inputs.rclone-easy.url = "github:simotro/rclone-easy";
+```
+
+e poi `inputs.rclone-easy.packages.${system}.default` in `home.packages`.
 
 ### Compilare da sorgente
 
