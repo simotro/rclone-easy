@@ -52,7 +52,11 @@
   flex-direction: column;
   border-radius: 10px;
   width: min(30em, 92vw);
-  max-height: 85vh;
+  /* Alzato da 85vh: con la finestra di default (vedi tauri.conf.json,
+     780px di altezza) lasciava troppo poco spazio verticale al contenuto
+     dei form più lunghi, costringendo a scorrere anche solo per vedere i
+     pulsanti di azione in fondo. */
+  max-height: 94vh;
   color: var(--text-color);
   background-color: var(--bg-page);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
@@ -62,7 +66,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 1em 1.2em;
+  padding: 0.8em 1.1em;
   border-bottom: 1px solid var(--border-color-subtle);
   flex-shrink: 0;
 }
@@ -83,8 +87,22 @@ h2 {
 }
 
 .content {
-  padding: 1.1em 1.2em;
+  padding: 0.9em 1.1em;
   overflow-y: auto;
   min-height: 0;
+}
+
+/* I paragrafi (hint/errori/avvisi) dentro un modal usano il margine di
+   default del browser (1em sopra e sotto) se non azzerato: dentro un
+   contenitore flex con `gap` (vedi `.modal-form` in RemoteRow.svelte) quel
+   margine non collassa come farebbe in un flusso normale, si somma al gap
+   riga per riga — risultato uno spazio verticale doppio del previsto tra
+   un'etichetta/hint e il campo sotto. Azzerato qui una volta per tutti i
+   consumatori di Modal, così il `gap` del contenitore resta l'unica fonte
+   di spaziatura, facile da tarare in un punto solo. `:global` perché il
+   contenuto è renderizzato dal chiamante (`{@render children()}`), fuori
+   dallo scoping automatico degli stili di questo componente. */
+.content :global(p) {
+  margin: 0;
 }
 </style>

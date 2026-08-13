@@ -296,10 +296,10 @@ impl RemoteActions {
 /// `None` se è un percorso locale — riconosciuto tramite `Path::is_absolute`,
 /// non dal solo `/` iniziale: su Windows un percorso come `C:\Users\...` è
 /// assoluto ma non inizia per `/`, e col vecchio controllo veniva scambiato
-/// per un remote chiamato "C" (bug reale segnalato da un utente: appariva
-/// una voce fantasma "C" nel menu della tray, mentre il remote vero restante
-/// dietro l'`.or_else` non veniva mai raggiunto). Stessa funzione duplicata
-/// in `mounts.rs`/`jobs.rs`/`bisync.rs`/`activity.rs`: qui serve una copia
+/// per un remote chiamato "C" (appariva una voce fantasma "C" nel menu
+/// della tray, mentre il remote vero restante dietro l'`.or_else` non
+/// veniva mai raggiunto). Stessa funzione duplicata in
+/// `mounts.rs`/`jobs.rs`/`bisync.rs`/`activity.rs`: qui serve una copia
 /// propria per non introdurre una dipendenza incrociata.
 fn remote_name_of(fs: &str) -> Option<&str> {
     if Path::new(fs).is_absolute() {

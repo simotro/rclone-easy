@@ -336,6 +336,8 @@ fn non_secret_fields_for(kind: &str) -> &'static [&'static str] {
         // ancora l'identità condivisa in ritiro nel 2026, senza esporre
         // il client_secret vero e proprio.
         "drive" => &["client_id"],
+        "webdav" => &["vendor", "url", "user"],
+        "sftp" => &["host", "user", "port"],
         _ => &[],
     }
 }
@@ -409,13 +411,61 @@ async fn update_remote_in(state: &RcdState, name: &str, parameters: &HashMap<Str
     Ok(())
 }
 
+/// rclone non espone un `config/rename` via RC (investigato in fase di
+/// modifica dei remote: non esiste, solo `config/create`/`config/update`/
+/// `config/delete` a nome fisso) — rinominare è quindi crea una voce con lo
+/// stesso tipo/parametri sotto il nuovo nome (`obscure:false`: i valori
+/// arrivano già offuscati dal dump, stesso principio dell'import) +
+/// aggiorna ogni mount/backup/bisync che referenzia il vecchio nome perché
+/// puntino al nuovo + SOLO alla fine cancella la vecchia voce. L'ordine è
+/// deliberato: se un passo qualunque fallisce prima dell'ultimo, il remote
+/// vecchio resta comunque presente e funzionante — nessuna voce finisce mai
+/// a referenziare un remote inesistente. Chiamata solo da `update_remote`,
+/// dopo che `update_remote_in` ha già verificato che il remote (sotto il
+/// vecchio nome) risponde con i parametri correnti.
+async fn rename_remote_in(state: &RcdState, config_dir: &std::path::Path, old_name: &str, new_name: &str) -> Result<(), String> {
+    let dump = rcd::call(state, "config/dump", serde_json::json!({})).await?;
+    let (kind, parameters) = crate::existing_config::extract_remote_parameters(&dump, old_name)?;
+
+    create_remote_in(state, new_name, &kind, &parameters, false).await?;
+
+    crate::mounts::rename_remote_references_in(config_dir, old_name, new_name)?;
+    crate::jobs::rename_remote_references_in(config_dir, old_name, new_name)?;
+    crate::bisync::rename_remote_references_in(config_dir, old_name, new_name)?;
+
+    // Best-effort: a questo punto tutti i riferimenti puntano già al nuovo
+    // nome, quindi un fallimento qui lascia solo una voce duplicata e
+    // inutilizzata (cosmetica, non rompe nulla) — stesso principio già
+    // seguito in `verify_and_cleanup`.
+    let _ = rcd::call(state, "config/delete", serde_json::json!({ "name": old_name })).await;
+    Ok(())
+}
+
+/// `old_name`/`name` seguono la stessa convenzione già usata da
+/// mount/backup/bisync (`update_mount`/`update_job`/`update_bisync_job`):
+/// `old_name` individua il remote da modificare, `name` è il nome dopo il
+/// salvataggio, diverso da `old_name` solo se l'utente lo ha rinominato.
+/// L'aggiornamento dei parametri avviene SEMPRE sotto `old_name` per primo
+/// — nessun rischio di rinominare prima di sapere se la connessione
+/// sopravvive ai nuovi parametri — e solo se quello riesce, e solo se il
+/// nome è davvero cambiato, si procede con `rename_remote_in`.
 #[tauri::command]
 pub async fn update_remote(
+    app: AppHandle,
     state: tauri::State<'_, RcdState>,
+    old_name: String,
     name: String,
     parameters: HashMap<String, String>,
 ) -> Result<(), String> {
-    update_remote_in(&state, &name, &parameters).await
+    update_remote_in(&state, &old_name, &parameters).await?;
+
+    if name != old_name {
+        let config_dir =
+            app.path().app_config_dir().map_err(|e| format!("impossibile determinare la cartella di configurazione: {e}"))?;
+        rename_remote_in(&state, &config_dir, &old_name, &name).await?;
+    }
+
+    Ok(())
 }
 
 fn references_remote(fs: &str, remote_name: &str) -> bool {
@@ -591,6 +641,48 @@ mod tests {
         let body = rcd::call(&state, "config/listremotes", serde_json::json!({})).await.unwrap();
         let names = extract_remote_names(&body).unwrap();
         assert!(!names.contains(&name.to_string()), "il remote non deve restare salvato dopo un fallimento");
+    }
+
+    /// I nuovi backend (WebDAV/Nextcloud/ownCloud/SFTP) passano dallo stesso
+    /// `create_remote_in` generico degli altri — verifica che il ciclo
+    /// crea-verifica-rollback funzioni per davvero anche per loro, non solo
+    /// che compilino: stesso schema del test "http" sopra, connessione
+    /// rifiutata deterministica e veloce.
+    #[tokio::test]
+    async fn create_remote_of_type_webdav_rolls_back_when_connection_check_fails() {
+        let _guard = SUITE_LOCK.lock().unwrap();
+        let dir = TempDir::new("remotes-webdav-fail");
+        let state = rcd::build_state(dir.config_path()).await;
+
+        let mut parameters = HashMap::new();
+        parameters.insert("url".to_string(), "http://127.0.0.1:1/".to_string());
+        parameters.insert("vendor".to_string(), "nextcloud".to_string());
+        let name = "rclone-easy-test-webdav-fail";
+
+        let result = create_remote_in(&state, name, "webdav", &parameters, true).await;
+        assert!(result.is_err(), "la creazione dovrebbe fallire per connessione rifiutata: {result:?}");
+
+        let body = rcd::call(&state, "config/listremotes", serde_json::json!({})).await.unwrap();
+        assert!(!extract_remote_names(&body).unwrap().contains(&name.to_string()));
+    }
+
+    #[tokio::test]
+    async fn create_remote_of_type_sftp_rolls_back_when_connection_check_fails() {
+        let _guard = SUITE_LOCK.lock().unwrap();
+        let dir = TempDir::new("remotes-sftp-fail");
+        let state = rcd::build_state(dir.config_path()).await;
+
+        let mut parameters = HashMap::new();
+        parameters.insert("host".to_string(), "127.0.0.1".to_string());
+        parameters.insert("port".to_string(), "1".to_string());
+        parameters.insert("user".to_string(), "prova".to_string());
+        let name = "rclone-easy-test-sftp-fail";
+
+        let result = create_remote_in(&state, name, "sftp", &parameters, true).await;
+        assert!(result.is_err(), "la creazione dovrebbe fallire per connessione rifiutata: {result:?}");
+
+        let body = rcd::call(&state, "config/listremotes", serde_json::json!({})).await.unwrap();
+        assert!(!extract_remote_names(&body).unwrap().contains(&name.to_string()));
     }
 
     #[tokio::test]
@@ -936,6 +1028,62 @@ mod tests {
         assert!(!result.parameters.contains_key("client_secret"), "il client_secret non deve mai arrivare al frontend");
     }
 
+    #[tokio::test]
+    async fn get_remote_for_edit_exposes_webdav_fields_but_not_the_password() {
+        let _guard = SUITE_LOCK.lock().unwrap();
+        let dir = TempDir::new("remotes-get-for-edit-webdav");
+        let state = rcd::build_state(dir.config_path()).await;
+
+        rcd::call(
+            &state,
+            "config/create",
+            serde_json::json!({
+                "name": "nextcloud-prova",
+                "type": "webdav",
+                "parameters": {
+                    "vendor": "nextcloud", "url": "https://cloud.esempio.test/remote.php/dav/files/utente/",
+                    "user": "utente", "pass": "segreto-privato"
+                },
+                "opt": {"nonInteractive": true, "obscure": true},
+            }),
+        )
+        .await
+        .unwrap();
+
+        let result = get_remote_for_edit_in(&state, "nextcloud-prova").await.unwrap();
+        assert_eq!(result.kind, "webdav");
+        assert_eq!(result.parameters.get("vendor"), Some(&"nextcloud".to_string()));
+        assert_eq!(result.parameters.get("url"), Some(&"https://cloud.esempio.test/remote.php/dav/files/utente/".to_string()));
+        assert_eq!(result.parameters.get("user"), Some(&"utente".to_string()));
+        assert!(!result.parameters.contains_key("pass"), "la password non deve mai arrivare al frontend");
+    }
+
+    #[tokio::test]
+    async fn get_remote_for_edit_exposes_sftp_fields_but_not_the_password() {
+        let _guard = SUITE_LOCK.lock().unwrap();
+        let dir = TempDir::new("remotes-get-for-edit-sftp");
+        let state = rcd::build_state(dir.config_path()).await;
+
+        rcd::call(
+            &state,
+            "config/create",
+            serde_json::json!({
+                "name": "sftp-prova",
+                "type": "sftp",
+                "parameters": { "host": "esempio.test", "user": "utente", "port": "2222", "pass": "segreto-privato" },
+                "opt": {"nonInteractive": true, "obscure": true},
+            }),
+        )
+        .await
+        .unwrap();
+
+        let result = get_remote_for_edit_in(&state, "sftp-prova").await.unwrap();
+        assert_eq!(result.kind, "sftp");
+        assert_eq!(result.parameters.get("host"), Some(&"esempio.test".to_string()));
+        assert_eq!(result.parameters.get("port"), Some(&"2222".to_string()));
+        assert!(!result.parameters.contains_key("pass"), "la password non deve mai arrivare al frontend");
+    }
+
     #[test]
     fn check_remote_not_in_use_allows_deletion_when_nothing_references_it() {
         let dir = TempDir::new("remotes-in-use-ok");
@@ -1011,6 +1159,61 @@ mod tests {
         assert!(crate::mounts::load_from_dir(&dir.path).unwrap().is_empty());
         assert!(crate::jobs::load_from_dir(&dir.path).unwrap().is_empty());
         assert!(crate::bisync::load_from_dir(&dir.path).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_remote_in_moves_the_remote_and_updates_every_reference() {
+        let _guard = SUITE_LOCK.lock().unwrap();
+        let dir = TempDir::new("remote-rename-full");
+        let state = rcd::build_state(dir.config_path()).await;
+        create_remote_in(&state, "vecchio", "local", &HashMap::new(), true).await.unwrap();
+        crate::mounts::create_mount_in(&dir.path, "un-mount", "vecchio:cartella", "/tmp/rename-mount", false).unwrap();
+        crate::jobs::create_job_in(&dir.path, "un-backup", "/tmp/rename-src", "vecchio:dest", None, false).unwrap();
+        crate::bisync::create_bisync_job_in(&dir.path, "un-bisync", "/tmp/rename-bisync", "vecchio:altro", None).unwrap();
+
+        rename_remote_in(&state, &dir.path, "vecchio", "nuovo").await.unwrap();
+
+        let body = rcd::call(&state, "config/listremotes", serde_json::json!({})).await.unwrap();
+        let names = extract_remote_names(&body).unwrap();
+        assert!(names.contains(&"nuovo".to_string()), "il nuovo nome deve esistere: {names:?}");
+        assert!(!names.contains(&"vecchio".to_string()), "il vecchio nome non deve più esistere: {names:?}");
+
+        assert_eq!(crate::mounts::load_from_dir(&dir.path).unwrap()[0].remote, "nuovo:cartella");
+        assert_eq!(crate::jobs::load_from_dir(&dir.path).unwrap()[0].destination, "nuovo:dest");
+        assert_eq!(crate::bisync::load_from_dir(&dir.path).unwrap()[0].path2, "nuovo:altro");
+    }
+
+    #[tokio::test]
+    async fn rename_remote_in_fails_and_changes_nothing_when_the_new_name_is_already_taken() {
+        let _guard = SUITE_LOCK.lock().unwrap();
+        let dir = TempDir::new("remote-rename-conflict");
+        let state = rcd::build_state(dir.config_path()).await;
+        create_remote_in(&state, "a", "local", &HashMap::new(), true).await.unwrap();
+        create_remote_in(&state, "b", "local", &HashMap::new(), true).await.unwrap();
+        crate::mounts::create_mount_in(&dir.path, "un-mount", "a:cartella", "/tmp/rename-conflict-mount", false).unwrap();
+
+        let result = rename_remote_in(&state, &dir.path, "a", "b").await;
+        assert!(result.is_err(), "rinominare su un nome già usato deve fallire: {result:?}");
+
+        let body = rcd::call(&state, "config/listremotes", serde_json::json!({})).await.unwrap();
+        let names = extract_remote_names(&body).unwrap();
+        assert!(names.contains(&"a".to_string()) && names.contains(&"b".to_string()), "entrambi i remote devono restare intatti: {names:?}");
+        assert_eq!(
+            crate::mounts::load_from_dir(&dir.path).unwrap()[0].remote,
+            "a:cartella",
+            "un rename fallito non deve toccare i riferimenti esistenti"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_remote_in_succeeds_for_a_remote_with_nothing_referencing_it() {
+        let _guard = SUITE_LOCK.lock().unwrap();
+        let dir = TempDir::new("remote-rename-free");
+        let state = rcd::build_state(dir.config_path()).await;
+        create_remote_in(&state, "solo", "local", &HashMap::new(), true).await.unwrap();
+
+        let result = rename_remote_in(&state, &dir.path, "solo", "solo-nuovo").await;
+        assert!(result.is_ok(), "rinominare un remote senza riferimenti dovrebbe riuscire: {result:?}");
     }
 
     #[tokio::test]

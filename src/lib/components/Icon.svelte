@@ -1,5 +1,5 @@
 <script lang="ts">
-  let { kind }: { kind: "mount" | "backup" | "bisync" | "edit" | "delete" | "eye" | "eye-off" | "quit" } = $props();
+  let { kind }: { kind: "mount" | "backup" | "bisync" | "edit" | "delete" | "eye" | "eye-off" | "quit" | "copy" } = $props();
 </script>
 
 {#if kind === "mount"}
@@ -45,6 +45,11 @@
     <path d="M3 3l18 18" />
     <path d="M10.6 5.2A10.6 10.6 0 0 1 12 5c6.4 0 10 7 10 7a15.8 15.8 0 0 1-4 4.6M6.6 6.6C4 8.3 2 12 2 12s3.6 7 10 7a9.7 9.7 0 0 0 4.4-1" />
     <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+  </svg>
+{:else if kind === "copy"}
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="8.5" y="8.5" width="13" height="13" rx="2.3" />
+    <path d="M5.5 15.5h-1a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
   </svg>
 {:else if kind === "quit"}
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">

@@ -79,8 +79,28 @@ fn save_to_dir(config_dir: &Path, mounts: &[MountConfig]) -> Result<(), String> 
         .map_err(|e| format!("impossibile creare '{}': {e}", config_dir.display()))?;
     let file = MountsFile { mounts: mounts.to_vec() };
     let content = toml::to_string_pretty(&file).map_err(|e| format!("impossibile serializzare i mount: {e}"))?;
-    let path = mounts_file_path(config_dir);
-    std::fs::write(&path, content).map_err(|e| format!("impossibile scrivere '{}': {e}", path.display()))
+    crate::fs_atomic::write_atomically(&mounts_file_path(config_dir), &content)
+}
+
+/// Riscrive il campo `remote` di ogni mount che referenzia `old_name` per
+/// puntare a `new_name`, lasciando invariato il resto del percorso dopo i
+/// due punti — usata solo da `remotes::rename_remote_in`: rclone non ha un
+/// `config/rename` via RC (investigato: non esiste), rinominare un remote
+/// è quindi crea con lo stesso nome sotto quello nuovo + aggiorna ogni
+/// riferimento + cancella il vecchio, vedi lì per l'ordine e il perché.
+pub(crate) fn rename_remote_references_in(config_dir: &Path, old_name: &str, new_name: &str) -> Result<(), String> {
+    let mut mounts = load_from_dir(config_dir)?;
+    let mut changed = false;
+    for m in mounts.iter_mut() {
+        if remote_name_of(&m.remote) == Some(old_name) {
+            m.remote = format!("{new_name}:{}", m.remote.split_once(':').map(|(_, rest)| rest).unwrap_or(""));
+            changed = true;
+        }
+    }
+    if changed {
+        save_to_dir(config_dir, &mounts)?;
+    }
+    Ok(())
 }
 
 /// Nome del remote referenziato da una stringa `fs` (`remoto:percorso`),

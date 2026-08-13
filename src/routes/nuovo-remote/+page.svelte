@@ -4,14 +4,24 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { goto } from "$app/navigation";
   import { t } from "$lib/i18n";
+  import ProviderIcon from "$lib/components/ProviderIcon.svelte";
 
-  type ProviderKind = "s3" | "b2" | "mega" | "drive" | "dropbox" | "onedrive";
+  type ProviderKind = "s3" | "b2" | "mega" | "drive" | "dropbox" | "onedrive" | "nextcloud" | "owncloud" | "webdav" | "sftp";
   type S3ProviderOption = { value: string; help: string };
   type S3RegionOption = { value: string; help: string; providers: string[] };
 
   const OAUTH_LABELS: Record<string, string> = { drive: "Google Drive", dropbox: "Dropbox", onedrive: "OneDrive" };
   function isOAuthKind(k: ProviderKind | null): boolean {
     return k === "drive" || k === "dropbox" || k === "onedrive";
+  }
+
+  // Nextcloud/ownCloud/WebDAV sono tutti lo stesso backend rclone
+  // ("webdav", distinto solo dal parametro "vendor") — tre card separate
+  // qui solo perché è così che un utente li riconosce e li cerca in un
+  // elenco, non perché servano tre tipi diversi lato rclone.
+  function rcloneKindFor(k: ProviderKind): string {
+    if (k === "nextcloud" || k === "owncloud" || k === "webdav") return "webdav";
+    return k;
   }
 
   let step = $state<1 | 2 | 3>(1);
@@ -36,6 +46,20 @@
   let megaUser = $state("");
   let megaPass = $state("");
   let megaTwoFa = $state("");
+
+  // Nextcloud / ownCloud / WebDAV generico — stessi campi, riusati per
+  // tutte e tre le card (vedi rcloneKindFor).
+  let webdavUrl = $state("");
+  let webdavUser = $state("");
+  let webdavPass = $state("");
+
+  // SFTP — solo autenticazione a password per ora (niente selettore di
+  // file per una chiave privata, coerente con lo scope "credenziali
+  // statiche" delle altre card non-OAuth).
+  let sftpHost = $state("");
+  let sftpUser = $state("");
+  let sftpPort = $state("");
+  let sftpPass = $state("");
 
   // Google Drive — client OAuth proprio dell'utente, non condiviso: Google
   // ritirerà l'identità condivisa usata finora da rclone nel corso del
@@ -99,6 +123,11 @@
     if (kind === "b2") return b2Account.trim() !== "" && b2Key.trim() !== "";
     if (kind === "mega") return megaUser.trim() !== "" && megaPass.trim() !== "";
     if (kind === "drive") return (driveClientId.trim() === "") === (driveClientSecret.trim() === "");
+    // Solo il campo che rclone stesso segna come obbligatorio per questi
+    // backend (url/host) — utente/password restano facoltativi, alcuni
+    // WebDAV pubblici o server SFTP con ssh-agent non li richiedono.
+    if (kind === "nextcloud" || kind === "owncloud" || kind === "webdav") return webdavUrl.trim() !== "";
+    if (kind === "sftp") return sftpHost.trim() !== "";
     if (isOAuthKind(kind)) return true;
     return false;
   });
@@ -121,6 +150,17 @@
       add("user", megaUser);
       add("pass", megaPass);
       add("2fa", megaTwoFa);
+    } else if (kind === "nextcloud" || kind === "owncloud" || kind === "webdav") {
+      add("url", webdavUrl);
+      add("user", webdavUser);
+      add("pass", webdavPass);
+      if (kind === "nextcloud") params.vendor = "nextcloud";
+      else if (kind === "owncloud") params.vendor = "owncloud";
+    } else if (kind === "sftp") {
+      add("host", sftpHost);
+      add("user", sftpUser);
+      add("port", sftpPort);
+      add("pass", sftpPass);
     }
     return params;
   }
@@ -130,7 +170,7 @@
     submitting = true;
     errorMessage = null;
     try {
-      await invoke("create_remote", { name: name.trim(), kind, parameters: buildParameters() });
+      await invoke("create_remote", { name: name.trim(), kind: rcloneKindFor(kind), parameters: buildParameters() });
       step = 3;
     } catch (error) {
       errorMessage = String(error);
@@ -199,6 +239,26 @@
   async function openGoogleCloudConsole() {
     await openUrl("https://console.cloud.google.com/");
   }
+
+  // Elenco piatto (non raggruppato per tipo di autenticazione) e ordinato
+  // alfabeticamente sul nome mostrato — un utente scorre cercando il nome
+  // del servizio, non sa/non deve sapere se dietro c'è OAuth o una
+  // password. Ricalcolato ad ogni cambio di lingua ($t già reattivo).
+  let providerList = $derived.by<{ kind: ProviderKind; label: string; desc: string }[]>(() => {
+    const items: { kind: ProviderKind; label: string; desc: string }[] = [
+      { kind: "s3", label: $t("newRemote.s3Card"), desc: $t("newRemote.s3CardDesc") },
+      { kind: "b2", label: "Backblaze B2", desc: $t("newRemote.b2CardDesc") },
+      { kind: "mega", label: "MEGA", desc: $t("newRemote.megaCardDesc") },
+      { kind: "drive", label: "Google Drive", desc: $t("newRemote.driveCardDesc") },
+      { kind: "dropbox", label: "Dropbox", desc: $t("newRemote.oauthCardDesc") },
+      { kind: "onedrive", label: "OneDrive", desc: $t("newRemote.oauthCardDesc") },
+      { kind: "nextcloud", label: "Nextcloud", desc: $t("newRemote.nextcloudCardDesc") },
+      { kind: "owncloud", label: "ownCloud", desc: $t("newRemote.owncloudCardDesc") },
+      { kind: "webdav", label: "WebDAV", desc: $t("newRemote.webdavCardDesc") },
+      { kind: "sftp", label: "SFTP", desc: $t("newRemote.sftpCardDesc") },
+    ];
+    return items.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
+  });
 </script>
 
 <main class="container">
@@ -207,35 +267,24 @@
   {#if step === 1}
     <a href="/" class="back-link">← {$t("newRemote.backToHome")}</a>
     <p class="subtitle">{$t("newRemote.subtitle")}</p>
-    <div class="cards">
-      <button class="card" onclick={() => goto("/importa-remote")}>
-        <strong>{$t("home.importExistingRemotes")}</strong>
-        <span>{$t("newRemote.importCardDesc")}</span>
-      </button>
-      <button class="card" onclick={() => selectKind("s3")}>
-        <strong>{$t("newRemote.s3Card")}</strong>
-        <span>{$t("newRemote.s3CardDesc")}</span>
-      </button>
-      <button class="card" onclick={() => selectKind("b2")}>
-        <strong>Backblaze B2</strong>
-        <span>{$t("newRemote.b2CardDesc")}</span>
-      </button>
-      <button class="card" onclick={() => selectKind("mega")}>
-        <strong>MEGA</strong>
-        <span>{$t("newRemote.megaCardDesc")}</span>
-      </button>
-      <button class="card" onclick={() => selectKind("drive")}>
-        <strong>Google Drive</strong>
-        <span>{$t("newRemote.driveCardDesc")}</span>
-      </button>
-      <button class="card" onclick={() => selectKind("dropbox")}>
-        <strong>Dropbox</strong>
-        <span>{$t("newRemote.oauthCardDesc")}</span>
-      </button>
-      <button class="card" onclick={() => selectKind("onedrive")}>
-        <strong>OneDrive</strong>
-        <span>{$t("newRemote.oauthCardDesc")}</span>
-      </button>
+    <button class="card import-card" onclick={() => goto("/importa-remote")}>
+      <strong>{$t("home.importExistingRemotes")}</strong>
+      <span class="card-desc">{$t("newRemote.importCardDesc")}</span>
+    </button>
+    <!-- Unica parte scorrevole della pagina: l'elenco può crescere (oggi 10
+         servizi, di più in futuro) senza costringere a scorrere l'intera
+         schermata solo per arrivare al pulsante "Importa" sopra o al link
+         "Torna alla home" — quelli restano sempre visibili. -->
+    <div class="provider-list">
+      {#each providerList as p (p.kind)}
+        <button class="card provider-card" onclick={() => selectKind(p.kind)}>
+          <ProviderIcon kind={p.kind} />
+          <span class="provider-card-text">
+            <strong>{p.label}</strong>
+            <span class="card-desc">{p.desc}</span>
+          </span>
+        </button>
+      {/each}
     </div>
   {:else if step === 2 && isOAuthKind(kind)}
     <form onsubmit={(e) => { e.preventDefault(); submitOAuth(); }}>
@@ -411,6 +460,50 @@
           {$t("newRemote.twoFaLabel")}
           <input type="text" bind:value={megaTwoFa} />
         </label>
+      {:else if kind === "nextcloud" || kind === "owncloud" || kind === "webdav"}
+        <label>
+          {$t("newRemote.urlLabel")}
+          <input
+            type="text"
+            bind:value={webdavUrl}
+            placeholder={kind === "nextcloud"
+              ? "https://cloud.esempio.it/remote.php/dav/files/utente/"
+              : kind === "owncloud"
+                ? "https://cloud.esempio.it/remote.php/webdav/"
+                : "https://esempio.it/webdav/"}
+          />
+        </label>
+        {#if kind === "nextcloud"}
+          <p class="hint">{$t("newRemote.nextcloudUrlHint")}</p>
+        {/if}
+        <label>
+          {$t("newRemote.usernameLabel")}
+          <input type="text" bind:value={webdavUser} />
+        </label>
+        <label>
+          {$t("unlock.passwordLabel")}
+          <input type="password" bind:value={webdavPass} />
+        </label>
+        {#if kind === "nextcloud" || kind === "owncloud"}
+          <p class="hint">{$t("newRemote.nextcloud2faHint")}</p>
+        {/if}
+      {:else if kind === "sftp"}
+        <label>
+          {$t("newRemote.hostLabel")}
+          <input type="text" bind:value={sftpHost} placeholder="es. example.com" />
+        </label>
+        <label>
+          {$t("newRemote.usernameLabel")}
+          <input type="text" bind:value={sftpUser} />
+        </label>
+        <label>
+          {$t("newRemote.portLabel")}
+          <input type="text" bind:value={sftpPort} placeholder="22" />
+        </label>
+        <label>
+          {$t("unlock.passwordLabel")}
+          <input type="password" bind:value={sftpPass} />
+        </label>
       {/if}
 
       {#if errorMessage}
@@ -447,16 +540,11 @@
   color: var(--accent);
 }
 
-.cards {
-  display: grid;
-  gap: 0.75em;
-  margin-top: 1.5em;
-}
-
 .card {
   display: flex;
   flex-direction: column;
   gap: 0.25em;
+  width: 100%;
   text-align: left;
   padding: 0.9em 1.1em;
   border-radius: 8px;
@@ -468,9 +556,40 @@
   color: inherit;
 }
 
-.card span {
+.card-desc {
   color: var(--text-muted);
   font-size: 0.9em;
+}
+
+.import-card {
+  margin-top: 1.5em;
+}
+
+/* Elenco alfabetico dei provider: unica zona scorrevole della pagina (vedi
+   il commento nel markup) — altezza massima tarata per lasciare comunque
+   intravedere che c'è altro sotto senza dover indovinare, il resto della
+   pagina (titolo, link, card "Importa") resta sempre fisso in vista. */
+.provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6em;
+  margin-top: 0.9em;
+  max-height: 55vh;
+  overflow-y: auto;
+  padding-right: 0.3em;
+}
+
+.provider-card {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.9em;
+}
+
+.provider-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2em;
+  min-width: 0;
 }
 
 .own-client-box {

@@ -6,6 +6,7 @@
   import Icon from "./Icon.svelte";
   import StatusDot from "./StatusDot.svelte";
   import RemoteFolderPicker from "./RemoteFolderPicker.svelte";
+  import LogView from "./LogView.svelte";
   import { now, formatCountdown, nextRunAtMs } from "$lib/now";
   import type { MountEntry, SyncJob, BisyncJob, BisyncRunEntry } from "$lib/types";
   import { t } from "$lib/i18n";
@@ -107,6 +108,12 @@
   // mutua esclusività garantisce che al massimo uno tra backup e bisync
   // possa avere l'automazione accesa per questo remote alla volta.
   let countdownText = $derived.by<string | null>(() => {
+    // Un dry-run può girare su un servizio anche non "attivo" per questo
+    // remote (mutua esclusività riguarda solo l'automazione) — controllato
+    // prima e a prescindere da `activeService`, altrimenti la riga di stato
+    // non lo mostrerebbe affatto quando il servizio provato non è quello
+    // attivo.
+    if (syncJob?.isDryRunning || bisyncJob?.isDryRunning) return $t("remoteRow.dryRunInProgress");
     if (activeService === "backup" && syncJob) {
       if (syncJob.isRunning) return $t("remoteRow.backupRunning");
       if (syncJob.history.length === 0) return $t("remoteRow.backupFirstSoon");
@@ -375,6 +382,7 @@
   let backupFormAutoInterval = $state(15);
   let backupFormPropagateDeletions = $state(false);
   let backupRunResult = $state<{ success: boolean; message: string } | null>(null);
+  let backupFormDryRun = $state(false);
   // Stato del job al momento dell'apertura del modal, non quello live: usato
   // solo per decidere se mostrare "Disabilita" — altrimenti apparirebbe
   // subito dopo aver appena abilitato un job nello stesso modal, proprio
@@ -412,6 +420,7 @@
     backupWasActiveOnOpen = syncJob?.autoIntervalMinutes !== null && syncJob !== null;
     backupError = null;
     backupRunResult = null;
+    backupFormDryRun = false;
     backupModalOpen = true;
   }
 
@@ -489,10 +498,22 @@
     backupRunResult = null;
     try {
       await persistBackup();
-      await invoke("run_job", { name: remoteName });
-      backupRunResult = { success: true, message: "" };
+      if (backupFormDryRun) {
+        // Il risultato non va in uno stato locale: il backend lo salva in
+        // jobs.toml (SyncJob.lastDryRun), `onRefresh()` più sotto lo fa
+        // arrivare qui tramite `syncJob` — persiste così anche chiudendo e
+        // riaprendo il modal, non solo per la sessione corrente.
+        await invoke("dry_run_job", { name: remoteName });
+      } else {
+        await invoke("run_job", { name: remoteName });
+        backupRunResult = { success: true, message: "" };
+      }
     } catch (error) {
-      backupRunResult = { success: false, message: String(error) };
+      if (backupFormDryRun) {
+        backupError = String(error);
+      } else {
+        backupRunResult = { success: false, message: String(error) };
+      }
     } finally {
       backupBusy = false;
       await onRefresh?.();
@@ -525,6 +546,7 @@
   let bisyncRunResult = $state<BisyncRunEntry | null>(null);
   let bisyncWasActiveOnOpen = $state(false);
   let bisyncFormRemotePath = $state("");
+  let bisyncFormDryRun = $state(false);
   // "Mostra dettagli" nel pannello di risultato di un "Esegui ora" appena
   // fatto — un riquadro che si apre/chiude sul posto invece di un modal
   // impilato sopra quello di configurazione bisync (più semplice da seguire
@@ -558,6 +580,7 @@
     bisyncError = null;
     bisyncRunResult = null;
     bisyncDetailsExpanded = false;
+    bisyncFormDryRun = false;
     bisyncModalOpen = true;
   }
 
@@ -602,7 +625,13 @@
     bisyncRunResult = null;
     try {
       await persistBisync();
-      bisyncRunResult = await invoke<BisyncRunEntry>("run_bisync_job", { name: remoteName });
+      if (bisyncFormDryRun) {
+        // Stesso principio di runBackupNow: il risultato persiste in
+        // bisync.toml, arriva qui tramite `bisyncJob` dopo `onRefresh()`.
+        await invoke("dry_run_bisync_job", { name: remoteName });
+      } else {
+        bisyncRunResult = await invoke<BisyncRunEntry>("run_bisync_job", { name: remoteName });
+      }
     } catch (error) {
       bisyncError = String(error);
     } finally {
@@ -851,6 +880,10 @@
         {$t("remoteRow.propagateDeletionsOffHint")}
       {/if}
     </p>
+    <label class="checkbox-row">
+      <input type="checkbox" bind:checked={backupFormDryRun} />
+      {$t("remoteRow.dryRunCheckbox")}
+    </label>
     {#if backupRunResult}
       {#if backupRunResult.success}
         <p class="ok">✓ {$t("remoteRow.executedNow")}</p>
@@ -858,12 +891,50 @@
         <p class="error">✗ {backupRunResult.message}</p>
       {/if}
     {/if}
+    {#if syncJob?.lastDryRun && !backupRunResult}
+      <!-- `!backupRunResult`: appena finito un run vero in questa sessione,
+           il vecchio dry-run persistito diventa storia superata — resta
+           comunque consultabile nella Cronologia, ma qui affianco al
+           risultato appena arrivato confonderebbe quale dei due è
+           "adesso". -->
+      {@const report = syncJob.lastDryRun}
+      {@const localIsSource = directionOf(syncJob) === "toRemote"}
+      <div class="conflict-box">
+        <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
+        <p>
+          {$t("remoteRow.dryRunLocalTotal", {
+            values: { count: localIsSource ? report.sourceTotalFiles : report.destinationTotalFiles },
+          })}
+        </p>
+        <p>
+          {$t("remoteRow.dryRunRemoteTotal", {
+            values: { count: localIsSource ? report.destinationTotalFiles : report.sourceTotalFiles },
+          })}
+        </p>
+        <p>{$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })}</p>
+        <p>
+          {#if report.wouldDelete > 0}
+            ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
+          {:else}
+            {$t("remoteRow.dryRunNoDeletes")}
+          {/if}
+        </p>
+      </div>
+    {/if}
     {#if backupError}
       <p class="error">✗ {backupError}</p>
     {/if}
     <div class="row-actions modal-actions">
       {#if syncJob}
-        <button type="button" onclick={runBackupNow} disabled={backupBusy}>{backupBusy ? $t("common.inProgress") : $t("remoteRow.runNow")}</button>
+        <button type="button" onclick={runBackupNow} disabled={backupBusy}>
+          {backupBusy
+            ? backupFormDryRun
+              ? $t("remoteRow.dryRunInProgress")
+              : $t("common.inProgress")
+            : backupFormDryRun
+              ? $t("remoteRow.dryRunButton")
+              : $t("remoteRow.runNow")}
+        </button>
       {/if}
       <button type="button" onclick={saveBackup} disabled={backupBusy || backupFormLocalPath.trim() === ""}>
         {backupBusy ? $t("remoteRow.saving") : $t("remoteRow.saveAndClose")}
@@ -918,6 +989,30 @@
     {#if bisyncJob?.needsResync}
       <p class="hint">{$t("remoteRow.needsResyncHint")}</p>
     {/if}
+    <label class="checkbox-row">
+      <input type="checkbox" bind:checked={bisyncFormDryRun} />
+      {$t("remoteRow.dryRunCheckbox")}
+    </label>
+    {#if bisyncJob?.lastDryRun && !bisyncRunResult}
+      <!-- Stesso principio del backup: dopo un run vero in questa sessione
+           il dry-run persistito è superato, resta in Cronologia ma non qui
+           accanto al risultato appena arrivato. -->
+      {@const report = bisyncJob.lastDryRun}
+      <div class="conflict-box">
+        <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
+        <p>{$t("remoteRow.dryRunLocalTotal", { values: { count: report.path1TotalFiles } })}</p>
+        <p>{$t("remoteRow.dryRunRemoteTotal", { values: { count: report.path2TotalFiles } })}</p>
+        <p>{$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })}</p>
+        <p>
+          {#if report.wouldDelete > 0}
+            ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
+          {:else}
+            {$t("remoteRow.dryRunNoDeletes")}
+          {/if}
+        </p>
+      </div>
+      <LogView text={report.log} />
+    {/if}
     {#if bisyncRunResult}
       {#if bisyncRunResult.success && bisyncRunResult.conflictPaths.length === 0}
         <p class="ok">✓ {$t("remoteRow.executedNow")}</p>
@@ -934,7 +1029,7 @@
           </button>
         {/if}
         {#if bisyncDetailsExpanded}
-          {#if bisyncRunResult.log}<pre class="log-view">{bisyncRunResult.log}</pre>{/if}
+          {#if bisyncRunResult.log}<LogView text={bisyncRunResult.log} />{/if}
           {#if bisyncRunResult.needsForce}
             <div class="conflict-box">
               <p>{$t("remoteRow.forceBisyncWarningIntro")}</p>
@@ -952,7 +1047,15 @@
     {/if}
     <div class="row-actions modal-actions">
       {#if bisyncJob}
-        <button type="button" onclick={runBisyncNow} disabled={bisyncBusy}>{bisyncBusy ? $t("common.inProgress") : $t("remoteRow.runNow")}</button>
+        <button type="button" onclick={runBisyncNow} disabled={bisyncBusy}>
+          {bisyncBusy
+            ? bisyncFormDryRun
+              ? $t("remoteRow.dryRunInProgress")
+              : $t("common.inProgress")
+            : bisyncFormDryRun
+              ? $t("remoteRow.dryRunButton")
+              : $t("remoteRow.runNow")}
+        </button>
       {/if}
       <button type="button" onclick={saveBisync} disabled={bisyncBusy || bisyncFormLocalPath.trim() === ""}>
         {bisyncBusy ? $t("remoteRow.saving") : $t("remoteRow.saveAndClose")}
@@ -997,6 +1100,29 @@
         {/each}
       </ul>
     {/if}
+    {#if syncJob.lastDryRun}
+      {@const report = syncJob.lastDryRun}
+      {@const localIsSource = directionOf(syncJob) === "toRemote"}
+      <div class="conflict-box">
+        <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
+        <p>
+          {$t("remoteRow.dryRunLocalTotal", {
+            values: { count: localIsSource ? report.sourceTotalFiles : report.destinationTotalFiles },
+          })}
+          · {$t("remoteRow.dryRunRemoteTotal", {
+            values: { count: localIsSource ? report.destinationTotalFiles : report.sourceTotalFiles },
+          })}
+        </p>
+        <p>
+          {$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })} ·
+          {#if report.wouldDelete > 0}
+            ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
+          {:else}
+            {$t("remoteRow.dryRunNoDeletes")}
+          {/if}
+        </p>
+      </div>
+    {/if}
   {:else if activeService === "bisync" && bisyncJob}
     {#if bisyncJob.history.length === 0}
       <p class="hint">{$t("remoteRow.noRunsYet")}</p>
@@ -1023,7 +1149,7 @@
                 </button>
               {/if}
               {#if expandedHistoryEntryKey === entry.whenUnix}
-                {#if entry.log}<pre class="log-view">{entry.log}</pre>{/if}
+                {#if entry.log}<LogView text={entry.log} />{/if}
                 {#if entry.needsForce && index === 0}
                   <div class="conflict-box">
                     <p>{$t("remoteRow.forceBisyncWarningIntro")}</p>
@@ -1038,6 +1164,25 @@
           </li>
         {/each}
       </ul>
+    {/if}
+    {#if bisyncJob.lastDryRun}
+      {@const report = bisyncJob.lastDryRun}
+      <div class="conflict-box">
+        <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
+        <p>
+          {$t("remoteRow.dryRunLocalTotal", { values: { count: report.path1TotalFiles } })} ·
+          {$t("remoteRow.dryRunRemoteTotal", { values: { count: report.path2TotalFiles } })}
+        </p>
+        <p>
+          {$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })} ·
+          {#if report.wouldDelete > 0}
+            ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
+          {:else}
+            {$t("remoteRow.dryRunNoDeletes")}
+          {/if}
+        </p>
+      </div>
+      <LogView text={report.log} />
     {/if}
   {/if}
 </Modal>
@@ -1231,7 +1376,11 @@
 .modal-form {
   display: flex;
   flex-direction: column;
-  gap: 0.7em;
+  /* Ridotto da 0.7em: con i margini dei paragrafi già azzerati a monte
+     (vedi Modal.svelte), questo gap è l'unica spaziatura verticale reale
+     tra un'etichetta/hint e il campo sotto — 0.7em risultava comunque
+     più aria del necessario per un form denso. */
+  gap: 0.5em;
 }
 
 .modal-actions {
@@ -1304,18 +1453,5 @@
 
 .history-list li:last-child {
   border-bottom: none;
-}
-
-.log-view {
-  margin: 0.4em 0 0;
-  max-height: 40vh;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: monospace;
-  font-size: 0.8em;
-  background-color: var(--surface-tint);
-  border-radius: 6px;
-  padding: 0.7em 0.9em;
 }
 </style>

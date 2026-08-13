@@ -27,6 +27,12 @@ pub struct BisyncJob {
     /// un singolo `lastRun`.
     #[serde(default)]
     pub history: Vec<BisyncRunResult>,
+    /// Ultimo dry-run eseguito (`None` se mai fatto) — persistito, stesso
+    /// principio di `jobs::SyncJob::last_dry_run`: separato da `history`
+    /// perché un dry-run non è un'esecuzione reale, non deve influenzare
+    /// `needs_resync` né contare come operazione riuscita.
+    #[serde(default)]
+    pub last_dry_run: Option<BisyncDryRunReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -65,7 +71,9 @@ pub struct BisyncJobEntry {
     pub needs_resync: bool,
     pub auto_interval_minutes: Option<u32>,
     pub history: Vec<BisyncRunResult>,
+    pub last_dry_run: Option<BisyncDryRunReport>,
     pub is_running: bool,
+    pub is_dry_running: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -94,8 +102,7 @@ fn save_to_dir(config_dir: &Path, jobs: &[BisyncJob]) -> Result<(), String> {
         .map_err(|e| format!("impossibile creare '{}': {e}", config_dir.display()))?;
     let file = BisyncFile { jobs: jobs.to_vec() };
     let content = toml::to_string_pretty(&file).map_err(|e| format!("impossibile serializzare i job bisync: {e}"))?;
-    let path = bisync_file_path(config_dir);
-    std::fs::write(&path, content).map_err(|e| format!("impossibile scrivere '{}': {e}", path.display()))
+    crate::fs_atomic::write_atomically(&bisync_file_path(config_dir), &content)
 }
 
 /// Nome del remote referenziato da una stringa `fs` (`remoto:percorso`),
@@ -114,6 +121,32 @@ fn remote_name_of(fs: &str) -> Option<&str> {
 
 fn job_remote_names(job: &BisyncJob) -> [Option<&str>; 2] {
     [remote_name_of(&job.path1), remote_name_of(&job.path2)]
+}
+
+/// Riscrive `path1`/`path2` di ogni job bisync che referenzia `old_name` per
+/// puntare a `new_name` — usata solo da `remotes::rename_remote_in`, vedi lì
+/// per il perché (nessun `config/rename` in rclone via RC).
+pub(crate) fn rename_remote_references_in(config_dir: &Path, old_name: &str, new_name: &str) -> Result<(), String> {
+    fn renamed(fs: &str, old_name: &str, new_name: &str) -> Option<String> {
+        (remote_name_of(fs) == Some(old_name)).then(|| format!("{new_name}:{}", fs.split_once(':').map(|(_, rest)| rest).unwrap_or("")))
+    }
+
+    let mut jobs = load_from_dir(config_dir)?;
+    let mut changed = false;
+    for j in jobs.iter_mut() {
+        if let Some(new_path1) = renamed(&j.path1, old_name, new_name) {
+            j.path1 = new_path1;
+            changed = true;
+        }
+        if let Some(new_path2) = renamed(&j.path2, old_name, new_name) {
+            j.path2 = new_path2;
+            changed = true;
+        }
+    }
+    if changed {
+        save_to_dir(config_dir, &jobs)?;
+    }
+    Ok(())
 }
 
 /// Rifiuta una seconda sincronizzazione bidirezionale per un remote già
@@ -159,6 +192,7 @@ pub(crate) fn create_bisync_job_in(
         needs_resync: true,
         auto_interval_minutes,
         history: Vec::new(),
+        last_dry_run: None,
     });
     save_to_dir(config_dir, &jobs)
 }
@@ -368,15 +402,25 @@ fn readable_log(stderr: &str) -> String {
 /// chiederla interattivamente su stdin, che qui è `Stdio::null()`: fallisce
 /// subito con un errore "Failed to read line: EOF" invece di un messaggio
 /// sensato, interrompendo silenziosamente la sincronizzazione bidirezionale.
-async fn execute_bisync(
+/// Costruisce gli argomenti e lancia `rclone bisync` come sottoprocesso
+/// diretto, restituendo stato di uscita + stderr grezzo — usata sia da
+/// `execute_bisync` (run vero, interpretato in `BisyncRunResult`) sia da
+/// `dry_run_bisync_sync` (`--dry-run`, interpretato in
+/// `BisyncDryRunReport`): stessa costruzione degli argomenti e stessa
+/// gestione della password di config, interpretazioni diverse a valle.
+/// `Err` solo se non si riesce proprio ad avviare il processo; un
+/// fallimento riportato da rclone stesso (exit code diverso da zero) è nel
+/// primo elemento della tupla, non qui — il chiamante decide cosa farne.
+async fn run_bisync_subprocess(
     config_path: &Path,
     workdir: &Path,
     path1: &str,
     path2: &str,
     resync: bool,
     force: bool,
+    dry_run: bool,
     config_password: Option<&str>,
-) -> Result<BisyncRunResult, String> {
+) -> Result<(std::process::ExitStatus, String), String> {
     std::fs::create_dir_all(workdir)
         .map_err(|e| format!("impossibile creare la cartella di lavoro '{}': {e}", workdir.display()))?;
 
@@ -400,6 +444,16 @@ async fn execute_bisync(
         // vuote tra i due lati — senza questo, `bisync` le ignora del
         // tutto, anche se esistono davvero su uno dei due lati.
         "--create-empty-src-dirs".to_string(),
+        // Uno "shortcut" di Google Drive che punta a un file ormai
+        // cancellato/inaccessibile fa fallire l'intera bisync con un errore
+        // critico ("failed to open source object: can't read dangling
+        // shortcut") appena prova a copiarlo per davvero — il dry-run
+        // invece lo segnala solo come notice, senza tentare la lettura,
+        // quindi non lo intercetta. Questo flag (verificato: no-op innocuo
+        // per backend non-Drive) fa saltare quello shortcut specifico come
+        // se non esistesse, invece di abortire tutto il giro per un singolo
+        // collegamento rotto che l'utente non controlla direttamente.
+        "--drive-skip-dangling-shortcuts".to_string(),
     ];
     if resync {
         args.push("--resync".to_string());
@@ -419,6 +473,9 @@ async fn execute_bisync(
         // aver visto il log dettagliato del run fallito.
         args.push("--force".to_string());
     }
+    if dry_run {
+        args.push("--dry-run".to_string());
+    }
 
     let mut command = tokio::process::Command::new(crate::rclone_bin::resolve_rclone_binary());
     command.args(&args).stdin(Stdio::null());
@@ -427,21 +484,113 @@ async fn execute_bisync(
         command.env("RCLONE_CONFIG_PASS", password);
     }
     let output = command.output().await.map_err(|e| format!("impossibile avviare 'rclone bisync': {e}"))?;
+    Ok((output.status, String::from_utf8_lossy(&output.stderr).into_owned()))
+}
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+async fn execute_bisync(
+    config_path: &Path,
+    workdir: &Path,
+    path1: &str,
+    path2: &str,
+    resync: bool,
+    force: bool,
+    config_password: Option<&str>,
+) -> Result<BisyncRunResult, String> {
+    let (status, stderr) = run_bisync_subprocess(config_path, workdir, path1, path2, resync, force, false, config_password).await?;
+
     let conflict_paths = extract_conflict_paths(&stderr);
     let log = readable_log(&stderr);
 
-    let (success, message, needs_force) = if output.status.success() {
+    let (success, message, needs_force) = if status.success() {
         (true, String::new(), false)
     } else {
-        let message = extract_error_message(&stderr)
-            .unwrap_or_else(|| format!("rclone bisync terminato con codice {:?}", output.status.code()));
+        let message =
+            extract_error_message(&stderr).unwrap_or_else(|| format!("rclone bisync terminato con codice {:?}", status.code()));
         let needs_force = error_suggests_force(&message);
         (false, message, needs_force)
     };
 
     Ok(BisyncRunResult { success, message, when_unix: now_unix(), conflict_paths, log, needs_force })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BisyncDryRunReport {
+    pub path1_total_files: i64,
+    pub path2_total_files: i64,
+    pub would_transfer: i64,
+    pub would_delete: i64,
+    /// Trascrizione leggibile del run di prova — stesso formato di
+    /// `BisyncRunResult::log`: i conteggi aggregati sopra dicono "quanti",
+    /// il log dice "dove" (bisync è bidirezionale, un singolo numero non
+    /// distinguerebbe i trasferimenti verso path1 da quelli verso path2).
+    pub log: String,
+    pub when_unix: u64,
+}
+
+fn extract_file_count(body: &serde_json::Value) -> Result<i64, String> {
+    body.get("count").and_then(|v| v.as_i64()).ok_or_else(|| format!("campo 'count' mancante nella risposta di rclone rcd: {body}"))
+}
+
+/// Conta i file di un lato con `operations/size` — via RC, indipendente dal
+/// sottoprocesso `rclone bisync` (che non ha un demone RC dietro). Usata
+/// solo dal dry-run.
+async fn count_files(state: &RcdState, fs: &str) -> Result<i64, String> {
+    let body = crate::rcd::call(state, "operations/size", serde_json::json!({ "fs": fs })).await?;
+    extract_file_count(&body)
+}
+
+/// Ultima riga di log JSON con un campo `stats` — rclone la scrive sempre a
+/// fine esecuzione, riuscita o no, anche con `--dry-run`: le statistiche
+/// riflettono comunque cosa SAREBBE stato trasferito/cancellato (verificato
+/// contro un'esecuzione reale: `--dry-run` "salta" l'azione ma la conta lo
+/// stesso in `stats.transfers`/`stats.deletes`). Presa da lì invece che dal
+/// testo delle righe precedenti ("Queue copy to Path2", ecc.): più robusta,
+/// non dipende da frasi che potrebbero cambiare tra versioni di rclone.
+fn extract_dry_run_stats(stderr: &str) -> (i64, i64) {
+    for line in stderr.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else { continue };
+        let Some(stats) = value.get("stats") else { continue };
+        let transfers = stats.get("transfers").and_then(|v| v.as_i64()).unwrap_or(0);
+        let deletes = stats.get("deletes").and_then(|v| v.as_i64()).unwrap_or(0);
+        return (transfers, deletes);
+    }
+    (0, 0)
+}
+
+/// Come `execute_bisync`, ma con `--dry-run`: non sposta né cancella nulla
+/// per davvero. Mai passa `force`: non ha senso bypassare la protezione
+/// "too many deletes" (`error_suggests_force`) per un'anteprima — se il run
+/// vero verrebbe bloccato, il dry-run fallisce con lo stesso identico
+/// errore, che è già l'informazione utile (l'utente lo scoprirebbe
+/// comunque cliccando "Esegui ora" per davvero).
+pub(crate) async fn dry_run_bisync_sync(
+    state: &RcdState,
+    config_path: &Path,
+    workdir: &Path,
+    path1: &str,
+    path2: &str,
+    resync: bool,
+    config_password: Option<&str>,
+) -> Result<BisyncDryRunReport, String> {
+    let path1_total_files = count_files(state, path1).await?;
+    let path2_total_files = count_files(state, path2).await?;
+
+    let (status, stderr) = run_bisync_subprocess(config_path, workdir, path1, path2, resync, false, true, config_password).await?;
+    if !status.success() {
+        let message =
+            extract_error_message(&stderr).unwrap_or_else(|| format!("rclone bisync terminato con codice {:?}", status.code()));
+        return Err(message);
+    }
+
+    let (would_transfer, would_delete) = extract_dry_run_stats(&stderr);
+    let log = readable_log(&stderr);
+
+    Ok(BisyncDryRunReport { path1_total_files, path2_total_files, would_transfer, would_delete, log, when_unix: now_unix() })
 }
 
 /// Nomi dei job bisync attualmente in esecuzione — stessa cautela di
@@ -464,6 +613,18 @@ pub(crate) fn any_job_running() -> bool {
 /// Usata da `list_bisync_jobs` per popolare `BisyncJobEntry::is_running`.
 fn is_job_running(name: &str) -> bool {
     running_jobs().lock().unwrap().contains(name)
+}
+
+/// Sottoinsieme di `running_jobs`, stesso principio di `jobs::dry_running_jobs`
+/// — solo per distinguere in UI un dry-run da un run vero
+/// (`BisyncJobEntry::is_dry_running`), non partecipa alla mutua esclusione.
+fn dry_running_jobs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static DRY_RUNNING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    DRY_RUNNING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn is_job_dry_running(name: &str) -> bool {
+    dry_running_jobs().lock().unwrap().contains(name)
 }
 
 /// `config_password`: vedi il commento su `execute_bisync` — `None` se la
@@ -548,12 +709,14 @@ pub fn list_bisync_jobs(app: AppHandle) -> Result<Vec<BisyncJobEntry>, String> {
         .into_iter()
         .map(|j| BisyncJobEntry {
             is_running: is_job_running(&j.name),
+            is_dry_running: is_job_dry_running(&j.name),
             name: j.name,
             path1: j.path1,
             path2: j.path2,
             needs_resync: j.needs_resync,
             auto_interval_minutes: j.auto_interval_minutes,
             history: j.history,
+            last_dry_run: j.last_dry_run,
         })
         .collect())
 }
@@ -669,6 +832,56 @@ pub async fn run_bisync_job_forced(app: AppHandle, state: tauri::State<'_, RcdSt
     let result = run_bisync_job_by_name_forced(&config_dir, password.as_deref(), &name).await?;
     notify_conflicts_if_any(&app, &name, &result);
     Ok(result)
+}
+
+/// Anteprima senza salvare niente in `bisync.toml`, ma passa comunque dalla
+/// guardia `running_jobs`: non tanto contro un doppio dry-run in sé
+/// (innocuo), quanto perché `running_jobs` è anche quello che `tray.rs`
+/// interroga per l'icona "in corso" — un dry-run su un remote reale può
+/// richiedere secondi/minuti quanto un run vero, senza inserirsi qui non
+/// avrebbe alcun riscontro visivo nella tray. Blocca anche un run vero
+/// concorrente dello stesso job (e viceversa), per non far girare le due
+/// cose insieme sullo stesso workdir.
+#[tauri::command]
+pub async fn dry_run_bisync_job(app: AppHandle, state: tauri::State<'_, RcdState>, name: String) -> Result<BisyncDryRunReport, String> {
+    let config_dir = app_config_dir(&app)?;
+    dry_run_bisync_job_by_name(&config_dir, &state, &name).await
+}
+
+/// Come `run_bisync_job_by_name`, ma per un'anteprima: stessa guardia
+/// `running_jobs`/`dry_running_jobs` e salva comunque il report in
+/// `bisync.toml` (`BisyncJob::last_dry_run`), non solo restituirlo al
+/// chiamante. Presa a `config_dir`/`state` invece che ad `AppHandle`:
+/// testabile direttamente, senza un contesto Tauri vero.
+pub(crate) async fn dry_run_bisync_job_by_name(config_dir: &Path, state: &RcdState, name: &str) -> Result<BisyncDryRunReport, String> {
+    if !running_jobs().lock().unwrap().insert(name.to_string()) {
+        return Err(format!("il job '{name}' è già in esecuzione"));
+    }
+    dry_running_jobs().lock().unwrap().insert(name.to_string());
+
+    let result = dry_run_bisync_job_by_name_inner(config_dir, state, name).await;
+
+    dry_running_jobs().lock().unwrap().remove(name);
+    running_jobs().lock().unwrap().remove(name);
+    result
+}
+
+async fn dry_run_bisync_job_by_name_inner(config_dir: &Path, state: &RcdState, name: &str) -> Result<BisyncDryRunReport, String> {
+    let jobs = load_from_dir(config_dir)?;
+    let job = jobs.iter().find(|j| j.name == name).ok_or_else(|| format!("nessun job bisync chiamato '{name}'"))?;
+    let password = crate::rcd::current_config_password(state).await;
+    let workdir = workdir_for(config_dir, name);
+    let report =
+        dry_run_bisync_sync(state, &config_dir.join("rclone.conf"), &workdir, &job.path1, &job.path2, job.needs_resync, password.as_deref())
+            .await?;
+
+    let mut jobs = load_from_dir(config_dir)?;
+    if let Some(stored) = jobs.iter_mut().find(|j| j.name == name) {
+        stored.last_dry_run = Some(report.clone());
+        save_to_dir(&config_dir, &jobs)?;
+    }
+
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -934,6 +1147,90 @@ mod tests {
         assert!(lines[0].contains("troncato"));
         assert!(lines[1].contains("riga 10"), "devono restare le ultime righe, non le prime: {}", lines[1]);
         assert!(lines.last().unwrap().contains(&format!("riga {}", MAX_LOG_LINES + 9)));
+    }
+
+    #[tokio::test]
+    async fn dry_run_bisync_sync_reports_counts_without_touching_anything() {
+        let rcd_dir = TempDir::new("bisync-dryrun-rcd");
+        let config_dir = TempDir::new("bisync-dryrun-config");
+        let path1_dir = TempDir::new("bisync-dryrun-path1");
+        let path2_dir = TempDir::new("bisync-dryrun-path2");
+        std::fs::create_dir_all(&config_dir.path).unwrap();
+        std::fs::create_dir_all(&path1_dir.path).unwrap();
+        std::fs::create_dir_all(&path2_dir.path).unwrap();
+        std::fs::write(path1_dir.path.join("baseline.txt"), "presente fin dall'inizio").unwrap();
+
+        let state = crate::rcd::build_state(rcd_dir.config_path()).await;
+        let rclone_conf = config_dir.path.join("rclone.conf");
+        let workdir = workdir_for(&config_dir.path, "prova");
+
+        // Baseline reale (non dry-run), come farebbe il primo "Esegui ora"
+        // dell'utente prima di provare l'anteprima.
+        let baseline = execute_bisync(
+            &rclone_conf,
+            &workdir,
+            &path1_dir.path.to_string_lossy(),
+            &path2_dir.path.to_string_lossy(),
+            true,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(baseline.success, "il resync iniziale dovrebbe riuscire: {baseline:?}");
+
+        std::fs::write(path1_dir.path.join("nuovo.txt"), "solo qui").unwrap();
+
+        let report = dry_run_bisync_sync(
+            &state,
+            &rclone_conf,
+            &workdir,
+            &path1_dir.path.to_string_lossy(),
+            &path2_dir.path.to_string_lossy(),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.path1_total_files, 2, "baseline.txt + nuovo.txt: {report:?}");
+        assert_eq!(report.path2_total_files, 1, "solo baseline.txt è già arrivato: {report:?}");
+        assert_eq!(report.would_transfer, 1, "solo nuovo.txt andrebbe trasferito: {report:?}");
+        assert_eq!(report.would_delete, 0, "nessuna cancellazione prevista: {report:?}");
+        assert!(!report.log.is_empty());
+
+        assert!(!path2_dir.path.join("nuovo.txt").exists(), "il dry-run non deve copiare per davvero");
+    }
+
+    #[tokio::test]
+    async fn dry_run_bisync_job_by_name_persists_the_report_and_leaves_needs_resync_untouched() {
+        let rcd_dir = TempDir::new("bisync-dryrun-persist-rcd");
+        let jobs_dir = TempDir::new("bisync-dryrun-persist-jobs");
+        let path1_dir = TempDir::new("bisync-dryrun-persist-path1");
+        let path2_dir = TempDir::new("bisync-dryrun-persist-path2");
+        std::fs::create_dir_all(&jobs_dir.path).unwrap();
+        std::fs::create_dir_all(&path1_dir.path).unwrap();
+        std::fs::create_dir_all(&path2_dir.path).unwrap();
+        std::fs::write(path1_dir.path.join("baseline.txt"), "presente fin dall'inizio").unwrap();
+
+        let state = crate::rcd::build_state(rcd_dir.config_path()).await;
+        create_bisync_job_in(
+            &jobs_dir.path,
+            "prova-dry-persist",
+            &path1_dir.path.to_string_lossy(),
+            &path2_dir.path.to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        assert!(load_from_dir(&jobs_dir.path).unwrap()[0].needs_resync, "un job appena creato non ha ancora una baseline");
+
+        let report = dry_run_bisync_job_by_name(&jobs_dir.path, &state, "prova-dry-persist").await.unwrap();
+
+        let jobs = load_from_dir(&jobs_dir.path).unwrap();
+        assert_eq!(jobs[0].last_dry_run, Some(report), "il report deve restare leggibile anche dopo, non solo nella risposta immediata");
+        assert!(jobs[0].history.is_empty(), "un dry-run non deve mai comparire nello storico dei run veri");
+        assert!(jobs[0].needs_resync, "un dry-run non deve mai stabilire una baseline vera");
+        assert!(!path2_dir.path.join("baseline.txt").exists(), "il dry-run non deve copiare per davvero");
     }
 
     /// Verifica che il primissimo resync preferisca la versione modificata

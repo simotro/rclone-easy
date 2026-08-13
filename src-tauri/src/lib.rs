@@ -1,5 +1,7 @@
 use tauri::Manager;
 
+mod fs_atomic;
+
 mod existing_config;
 use existing_config::{detect_existing_remotes, standard_rclone_config_path};
 
@@ -33,7 +35,7 @@ use tray::hide_window;
 mod background_portal;
 
 mod jobs;
-use jobs::{create_job, delete_job, list_jobs, run_job, update_job};
+use jobs::{create_job, delete_job, dry_run_job, list_jobs, run_job, update_job};
 
 mod mounts;
 use mounts::{
@@ -42,7 +44,10 @@ use mounts::{
 };
 
 mod bisync;
-use bisync::{create_bisync_job, delete_bisync_job, list_bisync_jobs, run_bisync_job, run_bisync_job_forced, update_bisync_job};
+use bisync::{
+    create_bisync_job, delete_bisync_job, dry_run_bisync_job, list_bisync_jobs, run_bisync_job, run_bisync_job_forced,
+    update_bisync_job,
+};
 
 mod scheduler;
 mod watcher;
@@ -238,6 +243,7 @@ pub fn run() {
             update_job,
             delete_job,
             run_job,
+            dry_run_job,
             list_mounts,
             create_mount,
             update_mount,
@@ -252,6 +258,7 @@ pub fn run() {
             delete_bisync_job,
             run_bisync_job,
             run_bisync_job_forced,
+            dry_run_bisync_job,
             export_backup,
             import_backup,
             restart_app,

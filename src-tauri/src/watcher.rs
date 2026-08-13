@@ -295,6 +295,7 @@ mod tests {
             auto_interval_minutes: auto,
             propagate_deletions: false,
             history: Vec::new(),
+            last_dry_run: None,
         }
     }
 
@@ -306,6 +307,7 @@ mod tests {
             needs_resync: false,
             auto_interval_minutes: auto,
             history: Vec::new(),
+            last_dry_run: None,
         }
     }
 

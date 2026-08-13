@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
+  import { untrack } from "svelte";
   import { t } from "$lib/i18n";
 
   type RemoteForEdit = { kind: string; parameters: Record<string, string> };
@@ -11,6 +12,12 @@
 
   const remoteName = $derived(decodeURIComponent($page.params.name ?? ""));
 
+  // Copia iniziale, non un valore reattivo legato a `remoteName`: è il
+  // campo che l'utente modifica per rinominare, non deve risincronizzarsi
+  // da solo se `remoteName` cambiasse (non dovrebbe succedere finché questa
+  // pagina resta aperta sullo stesso remote, ma `untrack` lo rende esplicito
+  // invece di affidarsi a un dettaglio implementativo).
+  let newName = $state(untrack(() => remoteName));
   let kind = $state("");
   let loadState = $state<LoadState>({ status: "loading" });
   let submitting = $state(false);
@@ -37,6 +44,20 @@
   // MEGA
   let megaUser = $state("");
   let megaPass = $state("");
+
+  // Nextcloud/ownCloud/WebDAV sono tutti "webdav" lato rclone (vedi
+  // remotes.rs::non_secret_fields_for) — un solo campo "vendor" li
+  // distingue, quindi qui basta un'unica sezione invece di tre.
+  let webdavVendor = $state("");
+  let webdavUrl = $state("");
+  let webdavUser = $state("");
+  let webdavPass = $state("");
+
+  // SFTP
+  let sftpHost = $state("");
+  let sftpUser = $state("");
+  let sftpPort = $state("");
+  let sftpPass = $state("");
 
   // Google Drive: nessun campo modificabile qui (vedi il banner sotto), solo
   // se ha già un client_id proprio o usa ancora l'identità condivisa che
@@ -65,6 +86,14 @@
           megaUser = result.parameters.user ?? "";
         } else if (kind === "drive") {
           driveHasOwnClientId = (result.parameters.client_id ?? "").trim() !== "";
+        } else if (kind === "webdav") {
+          webdavVendor = result.parameters.vendor ?? "";
+          webdavUrl = result.parameters.url ?? "";
+          webdavUser = result.parameters.user ?? "";
+        } else if (kind === "sftp") {
+          sftpHost = result.parameters.host ?? "";
+          sftpUser = result.parameters.user ?? "";
+          sftpPort = result.parameters.port ?? "";
         }
         loadState = { status: "ok" };
       })
@@ -100,15 +129,27 @@
     } else if (kind === "mega") {
       add("user", megaUser);
       add("pass", megaPass);
+    } else if (kind === "webdav") {
+      add("vendor", webdavVendor);
+      add("url", webdavUrl);
+      add("user", webdavUser);
+      add("pass", webdavPass);
+    } else if (kind === "sftp") {
+      add("host", sftpHost);
+      add("user", sftpUser);
+      add("port", sftpPort);
+      add("pass", sftpPass);
     }
     return params;
   }
 
   async function submit() {
+    const trimmedName = newName.trim();
+    if (trimmedName === "") return;
     submitting = true;
     errorMessage = null;
     try {
-      await invoke("update_remote", { name: remoteName, parameters: buildParameters() });
+      await invoke("update_remote", { oldName: remoteName, name: trimmedName, parameters: buildParameters() });
       goto("/");
     } catch (error) {
       errorMessage = String(error);
@@ -126,18 +167,23 @@
     <p>{$t("common.loading")}</p>
   {:else if loadState.status === "error"}
     <p class="error">✗ {loadState.message}</p>
-  {:else if kind === "drive" && !driveHasOwnClientId}
-    <p class="warning">
-      {$t("editRemote.driveSharedWarningBefore")} <strong>{$t("editRemote.driveSharedWarningStrong")}</strong>{$t("editRemote.driveSharedWarningAfter", { values: { remote: remoteName } })}
-    </p>
-  {:else if kind === "drive"}
-    <p class="ok">✓ {$t("editRemote.driveOwnClientOk")}</p>
-  {:else if kind === "dropbox" || kind === "onedrive"}
-    <p class="warning">
-      {$t("editRemote.oauthNotEditable")}
-    </p>
   {:else}
+    {#if kind === "drive" && !driveHasOwnClientId}
+      <p class="warning">
+        {$t("editRemote.driveSharedWarningBefore")} <strong>{$t("editRemote.driveSharedWarningStrong")}</strong>{$t("editRemote.driveSharedWarningAfter", { values: { remote: remoteName } })}
+      </p>
+    {:else if kind === "drive"}
+      <p class="ok">✓ {$t("editRemote.driveOwnClientOk")}</p>
+    {:else if kind === "dropbox" || kind === "onedrive"}
+      <p class="warning">
+        {$t("editRemote.oauthNotEditable")}
+      </p>
+    {/if}
     <form onsubmit={(e) => { e.preventDefault(); submit(); }}>
+      <label>
+        {$t("editRemote.nameLabel")}
+        <input type="text" bind:value={newName} required />
+      </label>
       {#if kind === "s3"}
         <label>
           Provider
@@ -190,6 +236,40 @@
         <label>
           {$t("unlock.passwordLabel")}
           <input type="password" bind:value={megaPass} placeholder={$t("editRemote.leaveEmptyToKeep")} />
+        </label>
+      {:else if kind === "webdav"}
+        <label>
+          Vendor
+          <input type="text" bind:value={webdavVendor} placeholder="nextcloud, owncloud, other…" />
+        </label>
+        <label>
+          {$t("newRemote.urlLabel")}
+          <input type="text" bind:value={webdavUrl} />
+        </label>
+        <label>
+          {$t("newRemote.usernameLabel")}
+          <input type="text" bind:value={webdavUser} />
+        </label>
+        <label>
+          {$t("unlock.passwordLabel")}
+          <input type="password" bind:value={webdavPass} placeholder={$t("editRemote.leaveEmptyToKeep")} />
+        </label>
+      {:else if kind === "sftp"}
+        <label>
+          {$t("newRemote.hostLabel")}
+          <input type="text" bind:value={sftpHost} />
+        </label>
+        <label>
+          {$t("newRemote.usernameLabel")}
+          <input type="text" bind:value={sftpUser} />
+        </label>
+        <label>
+          {$t("newRemote.portLabel")}
+          <input type="text" bind:value={sftpPort} placeholder="22" />
+        </label>
+        <label>
+          {$t("unlock.passwordLabel")}
+          <input type="password" bind:value={sftpPass} placeholder={$t("editRemote.leaveEmptyToKeep")} />
         </label>
       {/if}
 

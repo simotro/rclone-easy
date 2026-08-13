@@ -49,6 +49,15 @@ pub struct SyncJob {
     /// riconosciuto invece di fallire la lettura.
     #[serde(default)]
     pub history: Vec<LastRun>,
+    /// Ultimo dry-run eseguito (`None` se mai fatto) — persistito, non solo
+    /// tenuto in memoria: l'utente deve poterlo ritrovare anche chiudendo e
+    /// riaprendo il modal, o guardando semplicemente la Cronologia, senza
+    /// dover rilanciare la prova. Separato da `history` apposta: un dry-run
+    /// non è un'esecuzione reale (non ha copiato/cancellato nulla), non deve
+    /// contare come "ultima operazione riuscita" né influenzare alcuna
+    /// logica pensata per run veri.
+    #[serde(default)]
+    pub last_dry_run: Option<DryRunReport>,
 }
 
 /// `SyncJob` unito allo stato live "in esecuzione ora" — stesso principio
@@ -65,7 +74,12 @@ pub struct SyncJobEntry {
     pub auto_interval_minutes: Option<u32>,
     pub propagate_deletions: bool,
     pub history: Vec<LastRun>,
+    pub last_dry_run: Option<DryRunReport>,
     pub is_running: bool,
+    /// Sottoinsieme di `is_running`: `true` solo se il run in corso è un
+    /// dry-run, non uno vero — il frontend lo usa per mostrare "Dry-run in
+    /// corso" invece di "Backup in corso" nella riga del remote.
+    pub is_dry_running: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -94,8 +108,7 @@ fn save_to_dir(config_dir: &Path, jobs: &[SyncJob]) -> Result<(), String> {
         .map_err(|e| format!("impossibile creare '{}': {e}", config_dir.display()))?;
     let file = JobsFile { jobs: jobs.to_vec() };
     let content = toml::to_string_pretty(&file).map_err(|e| format!("impossibile serializzare i job: {e}"))?;
-    let path = jobs_file_path(config_dir);
-    std::fs::write(&path, content).map_err(|e| format!("impossibile scrivere '{}': {e}", path.display()))
+    crate::fs_atomic::write_atomically(&jobs_file_path(config_dir), &content)
 }
 
 /// Nome del remote referenziato da una stringa `fs` (`remoto:percorso`),
@@ -114,6 +127,32 @@ fn remote_name_of(fs: &str) -> Option<&str> {
 
 fn job_remote_names(job: &SyncJob) -> [Option<&str>; 2] {
     [remote_name_of(&job.source), remote_name_of(&job.destination)]
+}
+
+/// Riscrive `source`/`destination` di ogni job che referenzia `old_name` per
+/// puntare a `new_name` — usata solo da `remotes::rename_remote_in`, vedi lì
+/// per il perché (nessun `config/rename` in rclone via RC).
+pub(crate) fn rename_remote_references_in(config_dir: &Path, old_name: &str, new_name: &str) -> Result<(), String> {
+    fn renamed(fs: &str, old_name: &str, new_name: &str) -> Option<String> {
+        (remote_name_of(fs) == Some(old_name)).then(|| format!("{new_name}:{}", fs.split_once(':').map(|(_, rest)| rest).unwrap_or("")))
+    }
+
+    let mut jobs = load_from_dir(config_dir)?;
+    let mut changed = false;
+    for j in jobs.iter_mut() {
+        if let Some(new_source) = renamed(&j.source, old_name, new_name) {
+            j.source = new_source;
+            changed = true;
+        }
+        if let Some(new_destination) = renamed(&j.destination, old_name, new_name) {
+            j.destination = new_destination;
+            changed = true;
+        }
+    }
+    if changed {
+        save_to_dir(config_dir, &jobs)?;
+    }
+    Ok(())
 }
 
 /// Rifiuta un secondo backup per un remote già usato da un altro backup
@@ -158,6 +197,7 @@ pub(crate) fn create_job_in(
         auto_interval_minutes,
         propagate_deletions,
         history: Vec::new(),
+        last_dry_run: None,
     });
     save_to_dir(config_dir, &jobs)
 }
@@ -260,6 +300,141 @@ async fn execute_sync(state: &RcdState, source: &str, destination: &str, propaga
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DryRunReport {
+    pub source_total_files: i64,
+    pub destination_total_files: i64,
+    pub would_transfer: i64,
+    pub would_delete: i64,
+    pub when_unix: u64,
+}
+
+fn extract_file_count(body: &serde_json::Value) -> Result<i64, String> {
+    body.get("count").and_then(|v| v.as_i64()).ok_or_else(|| format!("campo 'count' mancante nella risposta di rclone rcd: {body}"))
+}
+
+/// Conta i file di un lato con `operations/size` — molto più leggero di
+/// `operations/list` su alberi grandi (rclone soppesa solo un totale invece
+/// di elencare ogni voce). Usata solo dal dry-run: un run vero non ha
+/// bisogno di questo numero, non vale la pena pagarne il costo lì.
+async fn count_files(info: &crate::rcd::ConnectionInfo, fs: &str) -> Result<i64, String> {
+    let body = info.call("operations/size", serde_json::json!({ "fs": fs })).await?;
+    extract_file_count(&body)
+}
+
+/// Come `execute_sync`, ma con `_config: {"DryRun": true}`: rclone confronta
+/// i due lati e logga cosa farebbe, senza spostare o cancellare nulla per
+/// davvero — le statistiche del job (`core/stats`, filtrate per il suo
+/// `group`) dicono quanti trasferimenti/cancellazioni ci sarebbero stati.
+/// Una funzione a sé invece di un parametro in più su `execute_sync`: un
+/// dry-run non passa mai da `run_job_by_name` (che salva l'esito in
+/// `jobs.toml` e partecipa alla guardia anti-sovrapposizione
+/// `running_jobs`) — è solo una lettura, non deve lasciare traccia nello
+/// storico del job né essere bloccata da/bloccare un run vero in corso.
+pub(crate) async fn dry_run_sync(
+    state: &RcdState,
+    source: &str,
+    destination: &str,
+    propagate_deletions: bool,
+) -> Result<DryRunReport, String> {
+    let info = rcd::connection_info(state).await?;
+
+    let source_total_files = count_files(&info, source).await?;
+    let destination_total_files = count_files(&info, destination).await?;
+
+    let endpoint = if propagate_deletions { "sync/sync" } else { "sync/copy" };
+    let created = info
+        .call(
+            endpoint,
+            serde_json::json!({
+                "srcFs": source,
+                "dstFs": destination,
+                "createEmptySrcDirs": true,
+                "_async": true,
+                "_config": { "DryRun": true },
+            }),
+        )
+        .await?;
+    let job_id = created
+        .get("jobid")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("campo 'jobid' mancante nella risposta di rclone rcd: {created}"))?;
+
+    loop {
+        let status = info.call("job/status", serde_json::json!({ "jobid": job_id })).await?;
+        let finished = status.get("finished").and_then(|v| v.as_bool()).unwrap_or(false);
+        if finished {
+            let success = status.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !success {
+                let error = status
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or("errore sconosciuto durante la prova");
+                return Err(error.to_string());
+            }
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let stats = info.call("core/stats", serde_json::json!({ "group": format!("job/{job_id}") })).await?;
+    let would_transfer = stats.get("transfers").and_then(|v| v.as_i64()).unwrap_or(0);
+    let would_delete = stats.get("deletes").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    Ok(DryRunReport { source_total_files, destination_total_files, would_transfer, would_delete, when_unix: now_unix() })
+}
+
+/// Stessa guardia `running_jobs` di un run vero (`run_job_by_name`): non
+/// tanto per evitare un doppio dry-run in sé (innocuo, di sola lettura),
+/// quanto perché `running_jobs` è anche quello che `tray.rs` interroga per
+/// decidere se mostrare l'icona "in corso" — senza inserirsi qui, un
+/// dry-run su un remote reale (che può richiedere secondi/minuti quanto un
+/// run vero) non avrebbe alcun riscontro visivo nella tray, lasciando
+/// l'utente a chiedersi se l'app si sia bloccata. Blocca anche un run vero
+/// concorrente dello stesso job (e viceversa): evita conteggi confusi se le
+/// due cose girassero insieme sullo stesso job.
+#[tauri::command]
+pub async fn dry_run_job(app: AppHandle, state: tauri::State<'_, RcdState>, name: String) -> Result<DryRunReport, String> {
+    let config_dir = app_config_dir(&app)?;
+    dry_run_job_by_name(&config_dir, &state, &name).await
+}
+
+/// Come `run_job_by_name`, ma per un'anteprima: stessa guardia
+/// `running_jobs`/`dry_running_jobs` e salva comunque il report in
+/// `jobs.toml` (`SyncJob::last_dry_run`), non solo restituirlo al
+/// chiamante — l'utente deve poterlo ritrovare riaprendo il modal o
+/// guardando la Cronologia, non solo nell'istante in cui l'ha lanciato.
+/// Presa a `config_dir`/`state` invece che ad `AppHandle`, come
+/// `run_job_by_name`: testabile direttamente, senza un contesto Tauri vero.
+pub(crate) async fn dry_run_job_by_name(config_dir: &Path, state: &RcdState, name: &str) -> Result<DryRunReport, String> {
+    if !running_jobs().lock().unwrap().insert(name.to_string()) {
+        return Err(format!("il job '{name}' è già in esecuzione"));
+    }
+    dry_running_jobs().lock().unwrap().insert(name.to_string());
+
+    let result = dry_run_job_by_name_inner(config_dir, state, name).await;
+
+    dry_running_jobs().lock().unwrap().remove(name);
+    running_jobs().lock().unwrap().remove(name);
+    result
+}
+
+async fn dry_run_job_by_name_inner(config_dir: &Path, state: &RcdState, name: &str) -> Result<DryRunReport, String> {
+    let jobs = load_from_dir(config_dir)?;
+    let job = jobs.iter().find(|j| j.name == name).ok_or_else(|| format!("nessun job chiamato '{name}'"))?;
+    let report = dry_run_sync(state, &job.source, &job.destination, job.propagate_deletions).await?;
+
+    let mut jobs = load_from_dir(config_dir)?;
+    if let Some(stored) = jobs.iter_mut().find(|j| j.name == name) {
+        stored.last_dry_run = Some(report.clone());
+        save_to_dir(config_dir, &jobs)?;
+    }
+
+    Ok(report)
+}
+
 /// Nomi dei job attualmente in esecuzione — evita che lo scheduler interno
 /// (`scheduler.rs`) rilanci un job il cui giro precedente non è ancora
 /// finito (una sync grossa può durare più dell'intervallo configurato), e
@@ -280,6 +455,19 @@ pub(crate) fn any_job_running() -> bool {
 /// Usata da `list_jobs` per popolare `SyncJobEntry::is_running`.
 fn is_job_running(name: &str) -> bool {
     running_jobs().lock().unwrap().contains(name)
+}
+
+/// Sottoinsieme di `running_jobs`: quali dei job "in esecuzione" lo sono per
+/// un dry-run, non un run vero — solo per distinguerlo in UI
+/// (`SyncJobEntry::is_dry_running`), non partecipa a nessuna logica di
+/// mutua esclusione (quella resta tutta su `running_jobs`).
+fn dry_running_jobs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static DRY_RUNNING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    DRY_RUNNING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn is_job_dry_running(name: &str) -> bool {
+    dry_running_jobs().lock().unwrap().contains(name)
 }
 
 /// Esegue il job per nome e salva l'esito (successo o messaggio d'errore)
@@ -334,12 +522,14 @@ pub fn list_jobs(app: AppHandle) -> Result<Vec<SyncJobEntry>, String> {
         .into_iter()
         .map(|j| SyncJobEntry {
             is_running: is_job_running(&j.name),
+            is_dry_running: is_job_dry_running(&j.name),
             name: j.name,
             source: j.source,
             destination: j.destination,
             auto_interval_minutes: j.auto_interval_minutes,
             propagate_deletions: j.propagate_deletions,
             history: j.history,
+            last_dry_run: j.last_dry_run,
         })
         .collect())
 }
@@ -711,6 +901,77 @@ mod tests {
             !dest_dir.path.join("file-da-rimuovere.txt").exists(),
             "con propagate_deletions il file non più nella sorgente deve essere rimosso dalla destinazione"
         );
+    }
+
+    #[tokio::test]
+    async fn dry_run_sync_reports_counts_without_copying_anything() {
+        let rcd_dir = TempDir::new("jobs-dryrun-rcd");
+        let source_dir = TempDir::new("jobs-dryrun-source");
+        let dest_dir = TempDir::new("jobs-dryrun-dest");
+        std::fs::create_dir_all(&source_dir.path).unwrap();
+        std::fs::create_dir_all(&dest_dir.path).unwrap();
+        std::fs::write(source_dir.path.join("da-copiare.txt"), "nuovo").unwrap();
+        std::fs::write(dest_dir.path.join("gia-presente.txt"), "esistente").unwrap();
+
+        let state = rcd::build_state(rcd_dir.config_path()).await;
+        let report =
+            dry_run_sync(&state, &source_dir.path.to_string_lossy(), &dest_dir.path.to_string_lossy(), false)
+                .await
+                .unwrap();
+
+        assert_eq!(report.source_total_files, 1);
+        assert_eq!(report.destination_total_files, 1);
+        assert_eq!(report.would_transfer, 1, "il file mancante in destinazione dovrebbe risultare da trasferire: {report:?}");
+        assert_eq!(report.would_delete, 0, "sync/copy non pianifica mai cancellazioni: {report:?}");
+
+        assert!(!dest_dir.path.join("da-copiare.txt").exists(), "il dry-run non deve copiare per davvero");
+        assert!(source_dir.path.join("da-copiare.txt").exists(), "il dry-run non deve toccare la sorgente");
+        assert!(dest_dir.path.join("gia-presente.txt").exists(), "il dry-run non deve cancellare per davvero");
+    }
+
+    #[tokio::test]
+    async fn dry_run_sync_with_propagate_deletions_reports_planned_deletions_without_deleting() {
+        let rcd_dir = TempDir::new("jobs-dryrun-delete-rcd");
+        let source_dir = TempDir::new("jobs-dryrun-delete-source");
+        let dest_dir = TempDir::new("jobs-dryrun-delete-dest");
+        std::fs::create_dir_all(&source_dir.path).unwrap();
+        std::fs::create_dir_all(&dest_dir.path).unwrap();
+        std::fs::write(dest_dir.path.join("non-piu-in-sorgente.txt"), "da rimuovere secondo il mirror").unwrap();
+
+        let state = rcd::build_state(rcd_dir.config_path()).await;
+        let report =
+            dry_run_sync(&state, &source_dir.path.to_string_lossy(), &dest_dir.path.to_string_lossy(), true)
+                .await
+                .unwrap();
+
+        assert_eq!(report.would_delete, 1, "con propagate_deletions il file solo in destinazione dovrebbe risultare da cancellare: {report:?}");
+        assert!(
+            dest_dir.path.join("non-piu-in-sorgente.txt").exists(),
+            "il dry-run non deve cancellare per davvero nemmeno con propagate_deletions"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_job_by_name_persists_the_report_and_leaves_no_trace_in_history() {
+        let rcd_dir = TempDir::new("jobs-dryrun-persist-rcd");
+        let jobs_dir = TempDir::new("jobs-dryrun-persist-jobs");
+        let source_dir = TempDir::new("jobs-dryrun-persist-source");
+        let dest_dir = TempDir::new("jobs-dryrun-persist-dest");
+        std::fs::create_dir_all(&source_dir.path).unwrap();
+        std::fs::create_dir_all(&dest_dir.path).unwrap();
+        std::fs::write(source_dir.path.join("nuovo.txt"), "x").unwrap();
+
+        let state = rcd::build_state(rcd_dir.config_path()).await;
+        create_job_in(&jobs_dir.path, "prova-dry-persist", &source_dir.path.to_string_lossy(), &dest_dir.path.to_string_lossy(), None, false)
+            .unwrap();
+
+        let report = dry_run_job_by_name(&jobs_dir.path, &state, "prova-dry-persist").await.unwrap();
+        assert_eq!(report.would_transfer, 1);
+
+        let jobs = load_from_dir(&jobs_dir.path).unwrap();
+        assert_eq!(jobs[0].last_dry_run, Some(report), "il report deve restare leggibile anche dopo, non solo nella risposta immediata");
+        assert!(jobs[0].history.is_empty(), "un dry-run non deve mai comparire nello storico dei run veri");
+        assert!(!is_job_running("prova-dry-persist"), "la guardia va rilasciata a fine dry-run");
     }
 
     #[tokio::test]

@@ -13,6 +13,14 @@ export type MountEntry = {
   history: MountEvent[];
 };
 
+export type DryRunReport = {
+  sourceTotalFiles: number;
+  destinationTotalFiles: number;
+  wouldTransfer: number;
+  wouldDelete: number;
+  whenUnix: number;
+};
+
 export type RunEntry = { success: boolean; message: string; whenUnix: number };
 export type SyncJob = {
   name: string;
@@ -21,7 +29,9 @@ export type SyncJob = {
   autoIntervalMinutes: number | null;
   propagateDeletions: boolean;
   history: RunEntry[];
+  lastDryRun: DryRunReport | null;
   isRunning: boolean;
+  isDryRunning: boolean;
 };
 
 export type BisyncRunEntry = {
@@ -32,6 +42,16 @@ export type BisyncRunEntry = {
   log: string;
   needsForce: boolean;
 };
+
+export type BisyncDryRunReport = {
+  path1TotalFiles: number;
+  path2TotalFiles: number;
+  wouldTransfer: number;
+  wouldDelete: number;
+  log: string;
+  whenUnix: number;
+};
+
 export type BisyncJob = {
   name: string;
   path1: string;
@@ -39,5 +59,7 @@ export type BisyncJob = {
   needsResync: boolean;
   autoIntervalMinutes: number | null;
   history: BisyncRunEntry[];
+  lastDryRun: BisyncDryRunReport | null;
   isRunning: boolean;
+  isDryRunning: boolean;
 };

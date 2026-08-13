@@ -70,8 +70,7 @@ pub(crate) fn restore_backup_in(config_dir: &Path, bundle_json: &str) -> Result<
     std::fs::create_dir_all(config_dir)
         .map_err(|e| format!("impossibile creare '{}': {e}", config_dir.display()))?;
 
-    std::fs::write(config_dir.join("rclone.conf"), bundle.rclone_conf.unwrap_or_default())
-        .map_err(|e| format!("impossibile scrivere '{}': {e}", config_dir.join("rclone.conf").display()))
+    crate::fs_atomic::write_atomically(&config_dir.join("rclone.conf"), &bundle.rclone_conf.unwrap_or_default())
 }
 
 fn app_config_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
