@@ -25,6 +25,9 @@ use oauth_remote::{answer_oauth_question, cancel_oauth, create_oauth_remote, Pen
 mod tray;
 use tray::hide_window;
 
+mod app_settings;
+use app_settings::{get_app_settings, set_start_minimized};
+
 // xdg-desktop-portal è un concetto specifico dei desktop Linux (D-Bus) —
 // non ha senso su Windows/macOS, dove tra l'altro non esiste un bus di
 // sessione a cui connettersi (fallirebbe silenziosamente ad ogni avvio,
@@ -171,6 +174,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // `LaunchAgent` è l'unica variante rilevante fuori da macOS (lì
+        // sarebbe scelta tra LaunchAgent/LaunchDaemon); su Linux/Windows il
+        // plugin usa comunque il meccanismo nativo della piattaforma (voce
+        // XDG autostart / registro Run), il parametro è semplicemente
+        // ignorato. Nessun argomento extra passato al riavvio automatico:
+        // l'app si comporta come un avvio normale, "ridotta a icona" è una
+        // preferenza propria (`app_settings.rs`) letta comunque a runtime.
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .setup(|app| {
             // Config propria dell'app, separata dal rclone.conf di sistema
             // (letto invece, in sola lettura, da existing_config.rs) — vedi
@@ -195,6 +206,14 @@ pub fn run() {
             spawn_signal_shutdown_handler(app.handle().clone());
             tray::build_tray(app.handle());
             hide_instead_of_close(app.handle());
+            // La finestra parte nascosta (`tauri.conf.json`, `visible:
+            // false`) per evitare un lampo "appare e poi sparisce subito"
+            // quando l'utente ha scelto di avviare ridotta a icona — la si
+            // mostra qui esplicitamente solo se quella preferenza non è
+            // attiva.
+            if !app_settings::load_from_dir(&config_dir).start_minimized {
+                tray::show_main_window(app.handle());
+            }
             #[cfg(target_os = "linux")]
             background_portal::request_background();
             // In background, non bloccante: montare subito i mount con
@@ -267,7 +286,9 @@ pub fn run() {
             config_password_status,
             set_config_password,
             remove_config_password,
-            hide_window
+            hide_window,
+            get_app_settings,
+            set_start_minimized
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

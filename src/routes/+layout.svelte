@@ -42,7 +42,9 @@
        vanno prima di `WindowControls` nel markup: `.title-bar` è
        allineata a destra (`justify-content: flex-end`), quindi l'ordine
        nel DOM è l'ordine visivo da sinistra a destra (lingua, poi tema,
-       poi informazioni sull'app, poi controlli finestra). -->
+       poi informazioni sull'app, poi controlli finestra; il pulsante
+       Impostazioni vive invece sulla home, accanto ad "Aggiungi remote" —
+       vedi +page.svelte). -->
   <div class="title-bar" data-tauri-drag-region>
     {#if unlockState === "unlocked"}
       <LanguageToggle />

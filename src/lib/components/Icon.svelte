@@ -1,5 +1,5 @@
 <script lang="ts">
-  let { kind }: { kind: "mount" | "backup" | "bisync" | "edit" | "delete" | "eye" | "eye-off" | "quit" | "copy" } = $props();
+  let { kind }: { kind: "mount" | "backup" | "bisync" | "edit" | "delete" | "eye" | "eye-off" | "quit" | "copy" | "settings" | "add" } = $props();
 </script>
 
 {#if kind === "mount"}
@@ -50,6 +50,18 @@
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
     <rect x="8.5" y="8.5" width="13" height="13" rx="2.3" />
     <path d="M5.5 15.5h-1a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+  </svg>
+{:else if kind === "settings"}
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="3.2" />
+    <path
+      d="M12 3.5v2.1M12 18.4v2.1M20.5 12h-2.1M5.6 12H3.5M17.7 6.3l-1.5 1.5M7.8 16.2l-1.5 1.5M17.7 17.7l-1.5-1.5M7.8 7.8 6.3 6.3"
+    />
+  </svg>
+{:else if kind === "add"}
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="12" y1="5" x2="12" y2="19" />
+    <line x1="5" y1="12" x2="19" y2="12" />
   </svg>
 {:else if kind === "quit"}
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">

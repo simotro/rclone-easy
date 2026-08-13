@@ -29,6 +29,15 @@
     "author": "Author",
     "repoLink": "GitHub repository"
   },
+  "settings": {
+    "title": "Settings",
+    "passwordDesc": "Protect your configuration with a password, or manage an existing one.",
+    "importExportDesc": "Import existing remotes, create or restore a backup of your remotes.",
+    "autostart": "Launch at system startup",
+    "autostartHint": "Automatically launch Rclone Easy when you turn on or restart the computer.",
+    "startMinimized": "Launch minimized to tray",
+    "startMinimizedHint": "On startup the window stays in the tray instead of opening right away; you can still bring it up at any time from the tray menu."
+  },
   "windowControls": {
     "hideTitle": "Hide the window — Rclone Easy keeps running in the background, look for its icon in the system tray",
     "hideAria": "Hide the window"

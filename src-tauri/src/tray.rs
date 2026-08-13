@@ -10,6 +10,7 @@ use tauri::{
 };
 
 const SHOW_HIDE_ID: &str = "show_hide";
+const SETTINGS_ID: &str = "settings";
 const QUIT_ID: &str = "quit";
 const MOUNT_PREFIX: &str = "mount:";
 const UNMOUNT_PREFIX: &str = "unmount:";
@@ -33,6 +34,10 @@ const FOCUS_REMOTE_EVENT: &str = "rclone-easy://tray-focus-remote";
 /// `FOCUS_REMOTE_EVENT`, che deve restare accesa finché la finestra non
 /// torna nascosta in tray — vedi `hide_main_window`.
 const WINDOW_HIDDEN_EVENT: &str = "rclone-easy://window-hidden";
+/// Evento ascoltato da `SettingsButton.svelte`: apre il modal Impostazioni —
+/// stesso schema di `FOCUS_REMOTE_EVENT` per la voce "Impostazioni" del menu
+/// della tray, vedi `open_settings`.
+const OPEN_SETTINGS_EVENT: &str = "rclone-easy://open-settings";
 
 /// Nome della finestra principale, quello di default assegnato da Tauri
 /// quando `tauri.conf.json` non specifica un `label` esplicito (confermato:
@@ -116,9 +121,10 @@ fn try_build_tray(app: &AppHandle) -> tauri::Result<()> {
     // chiamata RC per lo stato live dei mount, quindi va costruito in modo
     // asincrono — non blocca la comparsa della tray).
     let show_hide = MenuItem::with_id(app, SHOW_HIDE_ID, "Mostra/Nascondi finestra", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, SETTINGS_ID, "Impostazioni", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, QUIT_ID, "Esci", true, None::<&str>)?;
-    let placeholder_menu = Menu::with_items(app, &[&show_hide, &separator, &quit])?;
+    let placeholder_menu = Menu::with_items(app, &[&show_hide, &settings, &separator, &quit])?;
 
     let idle_icon = Image::new(IDLE_ICON_BYTES, TRAY_ICON_SIZE, TRAY_ICON_SIZE);
 
@@ -139,6 +145,7 @@ fn try_build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             match id {
                 SHOW_HIDE_ID => toggle_main_window(app),
+                SETTINGS_ID => open_settings(app),
                 QUIT_ID => perform_quit(app),
                 _ => dispatch_action(app, id),
             }
@@ -441,7 +448,8 @@ fn warning_label(remote_name: &str, actions: &RemoteActions) -> Option<String> {
 
 fn build_menu_from_remotes(app: &AppHandle, remotes: &[(String, RemoteActions)]) -> tauri::Result<Menu<Wry>> {
     let show_hide = MenuItem::with_id(app, SHOW_HIDE_ID, "Mostra/Nascondi finestra", true, None::<&str>)?;
-    let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = vec![Box::new(show_hide)];
+    let settings = MenuItem::with_id(app, SETTINGS_ID, "Impostazioni", true, None::<&str>)?;
+    let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = vec![Box::new(show_hide), Box::new(settings)];
 
     let warnings: Vec<(&str, String)> =
         remotes.iter().filter_map(|(remote_name, actions)| warning_label(remote_name, actions).map(|label| (remote_name.as_str(), label))).collect();
@@ -643,4 +651,12 @@ pub(crate) fn hide_main_window(app: &AppHandle) {
 fn focus_remote(app: &AppHandle, remote: &str, open_history: bool) {
     show_main_window(app);
     let _ = app.emit(FOCUS_REMOTE_EVENT, serde_json::json!({ "remote": remote, "openHistory": open_history }));
+}
+
+/// Porta la finestra in primo piano e chiede al frontend (`SettingsButton.svelte`,
+/// in ascolto su `OPEN_SETTINGS_EVENT`) di aprire il modal Impostazioni —
+/// voce "Impostazioni" del menu della tray.
+fn open_settings(app: &AppHandle) {
+    show_main_window(app);
+    let _ = app.emit(OPEN_SETTINGS_EVENT, ());
 }

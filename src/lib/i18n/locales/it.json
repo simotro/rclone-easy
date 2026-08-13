@@ -29,6 +29,15 @@
     "author": "Autore",
     "repoLink": "Repository su GitHub"
   },
+  "settings": {
+    "title": "Impostazioni",
+    "passwordDesc": "Proteggi la configurazione con una password, o gestiscine una già impostata.",
+    "importExportDesc": "Importa remote esistenti, crea o ripristina un backup dei tuoi remote.",
+    "autostart": "Avvia all'accensione del computer",
+    "autostartHint": "Avvia automaticamente Rclone Easy quando accendi o riavvii il computer.",
+    "startMinimized": "Avvia ridotta a icona",
+    "startMinimizedHint": "All'avvio la finestra resta nella tray invece di aprirsi subito; puoi comunque richiamarla in qualsiasi momento dal menu della tray."
+  },
   "windowControls": {
     "hideTitle": "Nascondi la finestra — Rclone Easy resta attivo in background, trovi l'icona nella tray di sistema",
     "hideAria": "Nascondi la finestra"
