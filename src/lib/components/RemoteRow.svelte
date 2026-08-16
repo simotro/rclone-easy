@@ -891,12 +891,15 @@
         <p class="error">✗ {backupRunResult.message}</p>
       {/if}
     {/if}
-    {#if syncJob?.lastDryRun && !backupRunResult}
-      <!-- `!backupRunResult`: appena finito un run vero in questa sessione,
-           il vecchio dry-run persistito diventa storia superata — resta
-           comunque consultabile nella Cronologia, ma qui affianco al
-           risultato appena arrivato confonderebbe quale dei due è
-           "adesso". -->
+    {#if syncJob?.lastDryRun && !backupRunResult && syncJob.lastDryRun.whenUnix > (syncJob.history[0]?.whenUnix ?? 0)}
+      <!-- `!backupRunResult`: nasconde subito il pannello appena finito un run
+           vero in questa sessione, senza aspettare il prossimo refresh
+           periodico. Il confronto sulle date serve per i run veri arrivati
+           da fuori questa sessione (scheduler automatico, altra sessione
+           dell'app) — senza, un dry-run persistito restava visibile
+           indefinitamente anche dopo run reali successivi, perché
+           `backupRunResult` non si popola mai per quelli. Resta comunque
+           consultabile nella Cronologia in ogni caso. -->
       {@const report = syncJob.lastDryRun}
       {@const localIsSource = directionOf(syncJob) === "toRemote"}
       <div class="conflict-box">
@@ -993,10 +996,12 @@
       <input type="checkbox" bind:checked={bisyncFormDryRun} />
       {$t("remoteRow.dryRunCheckbox")}
     </label>
-    {#if bisyncJob?.lastDryRun && !bisyncRunResult}
-      <!-- Stesso principio del backup: dopo un run vero in questa sessione
-           il dry-run persistito è superato, resta in Cronologia ma non qui
-           accanto al risultato appena arrivato. -->
+    {#if bisyncJob?.lastDryRun && !bisyncRunResult && bisyncJob.lastDryRun.whenUnix > (bisyncJob.history[0]?.whenUnix ?? 0)}
+      <!-- Stesso principio del backup (vedi lì per il perché del confronto
+           sulle date, non solo sullo stato effimero della sessione): dopo un
+           run vero — anche arrivato dallo scheduler automatico, non solo da
+           questa sessione — il dry-run persistito è superato, resta in
+           Cronologia ma non qui accanto al risultato più recente. -->
       {@const report = bisyncJob.lastDryRun}
       <div class="conflict-box">
         <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
