@@ -455,6 +455,16 @@ async fn run_bisync_subprocess(
         // se non esistesse, invece di abortire tutto il giro per un singolo
         // collegamento rotto che l'utente non controlla direttamente.
         "--drive-skip-dangling-shortcuts".to_string(),
+        // Un solo listing ricorsivo invece di una chiamata per
+        // sottocartella — su un caso reale (Google Drive, ~1600
+        // sottocartelle) porta un run "a vuoto" da oltre 2 minuti a ~10
+        // secondi, verificato empiricamente confrontando i log con e senza
+        // questo flag: il tempo andava quasi interamente in pause del
+        // pacer tra una chiamata di listing e la successiva, non in un
+        // vero rate-limit di Google (mai un errore, solo "Reducing
+        // sleep"). rclone lo ignora silenziosamente sui backend che non lo
+        // supportano (es. il lato locale), quindi è sicuro passarlo sempre.
+        "--fast-list".to_string(),
     ];
     if resync {
         args.push("--resync".to_string());

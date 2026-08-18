@@ -274,7 +274,23 @@ async fn execute_sync(state: &RcdState, source: &str, destination: &str, propaga
     // tutto, anche se esistono davvero in sorgente (comportamento di
     // default di rclone, non specifico di questa app).
     let created = info
-        .call(endpoint, serde_json::json!({ "srcFs": source, "dstFs": destination, "createEmptySrcDirs": true, "_async": true }))
+        .call(
+            endpoint,
+            serde_json::json!({
+                "srcFs": source,
+                "dstFs": destination,
+                "createEmptySrcDirs": true,
+                "_async": true,
+                // Equivalente RC di `--fast-list`: un solo listing ricorsivo
+                // invece di una chiamata per sottocartella — su Google Drive
+                // (~1600 sottocartelle in un caso reale) porta un run "a
+                // vuoto" da oltre 2 minuti a ~10 secondi, verificato
+                // empiricamente. rclone lo ignora silenziosamente sui
+                // backend che non lo supportano (es. il lato locale), quindi
+                // è sicuro passarlo sempre.
+                "_config": { "UseListR": true },
+            }),
+        )
         .await?;
     let job_id = created
         .get("jobid")
@@ -352,7 +368,9 @@ pub(crate) async fn dry_run_sync(
                 "dstFs": destination,
                 "createEmptySrcDirs": true,
                 "_async": true,
-                "_config": { "DryRun": true },
+                // Vedi il commento gemello in `execute_sync` sul perché
+                // `UseListR` — qui affiancato a `DryRun`, non in conflitto.
+                "_config": { "DryRun": true, "UseListR": true },
             }),
         )
         .await?;
