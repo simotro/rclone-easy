@@ -1,6 +1,6 @@
 {
   "name": "rclone-easy",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "",
   "type": "module",
   "scripts": {
@@ -16,7 +16,6 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-autostart": "^2",
     "@tauri-apps/plugin-dialog": "^2",
-    "@tauri-apps/plugin-opener": "^2",
     "svelte-i18n": "^4.0.1"
   },
   "devDependencies": {

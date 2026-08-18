@@ -423,6 +423,7 @@ async fn run_bisync_subprocess(
 ) -> Result<(std::process::ExitStatus, String), String> {
     std::fs::create_dir_all(workdir)
         .map_err(|e| format!("impossibile creare la cartella di lavoro '{}': {e}", workdir.display()))?;
+    clear_stale_lock(workdir);
 
     let mut args = vec![
         "bisync".to_string(),
@@ -478,14 +479,90 @@ async fn run_bisync_subprocess(
     }
 
     let mut command = tokio::process::Command::new(crate::rclone_bin::resolve_rclone_binary());
-    command.args(&args).stdin(Stdio::null());
+    // `Command::output()` (usato prima di questo refactor) configura da sé
+    // stdout/stderr come "piped" — passando a `spawn()` +
+    // `wait_with_output()` manuale (per poter leggere il PID prima
+    // dell'attesa, vedi sotto) va fatto esplicitamente, altrimenti
+    // `wait_with_output()` non ha nulla da cui leggere e l'output risulta
+    // sempre vuoto.
+    command.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     crate::rclone_bin::hide_console_window_tokio(&mut command);
     if let Some(password) = config_password {
         command.env("RCLONE_CONFIG_PASS", password);
     }
-    let output = command.output().await.map_err(|e| format!("impossibile avviare 'rclone bisync': {e}"))?;
+
+    let child = command.spawn().map_err(|e| format!("impossibile avviare 'rclone bisync': {e}"))?;
+    // Tracciato solo per poterlo terminare in modo pulito allo spegnimento
+    // dell'app (`terminate_running_bisyncs`) — non serve alla mutua
+    // esclusione, già garantita altrove da `running_jobs`.
+    let pid = child.id();
+    if let Some(pid) = pid {
+        running_pids().lock().unwrap().insert(pid);
+    }
+    let output = child.wait_with_output().await;
+    if let Some(pid) = pid {
+        running_pids().lock().unwrap().remove(&pid);
+    }
+    let output = output.map_err(|e| format!("impossibile attendere 'rclone bisync': {e}"))?;
     Ok((output.status, String::from_utf8_lossy(&output.stderr).into_owned()))
 }
+
+/// Rimuove il lock file lasciato in `workdir` da una precedente esecuzione
+/// di bisync il cui processo non esiste più — per qualunque motivo:
+/// mancanza di corrente, crash, terminazione forzata del sistema operativo,
+/// o anche solo perché questa istanza dell'app non ha fatto in tempo a
+/// terminarlo in modo pulito. Senza questo, bisync si rifiuta di procedere
+/// ("prior lock file found") indefinitamente finché qualcuno non elimina il
+/// lock a mano — capitato realmente, richiedeva intervento manuale ogni
+/// volta. Un lock il cui PID esiste ancora NON viene toccato: potrebbe
+/// essere un'esecuzione genuinamente sovrapposta (es. scheduler e "Esegui
+/// ora" quasi simultanei), che bisync stesso deve continuare a rifiutare.
+fn clear_stale_lock(workdir: &Path) {
+    let Ok(entries) = std::fs::read_dir(workdir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("lck") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let Some(pid) = extract_lock_pid(&content) else { continue };
+        if !crate::rclone_bin::process_is_alive(pid) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Estrae il campo `PID` (una stringa nel JSON del lock file di rclone, non
+/// un numero) — separata da `clear_stale_lock` per poterla testare con dati
+/// sintetici invece che con un vero file su disco.
+fn extract_lock_pid(lock_content: &str) -> Option<u32> {
+    let value: serde_json::Value = serde_json::from_str(lock_content).ok()?;
+    value.get("PID")?.as_str()?.parse().ok()
+}
+
+fn running_pids() -> &'static std::sync::Mutex<std::collections::HashSet<u32>> {
+    static PIDS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> = std::sync::OnceLock::new();
+    PIDS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Termina in modo pulito ogni `rclone bisync` attualmente in esecuzione,
+/// tracciato in `running_pids` — chiamata allo spegnimento intenzionale
+/// dell'app (`lib.rs::spawn_signal_shutdown_handler`, tray "Esci"), non
+/// aiuta contro un crash o una mancanza di corrente (per quello vedi
+/// `clear_stale_lock`, che si autoripara al giro successivo qualunque sia
+/// la causa). Ricevendo `SIGTERM` rclone stesso rilascia il proprio lock in
+/// modo pulito invece di lasciarlo orfano — solo Unix per ora: `kill` non è
+/// disponibile su Windows, e lì non esiste ancora un gestore di spegnimento
+/// equivalente (vedi `spawn_signal_shutdown_handler`).
+#[cfg(unix)]
+pub(crate) fn terminate_running_bisyncs() {
+    for pid in running_pids().lock().unwrap().iter() {
+        let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn terminate_running_bisyncs() {}
 
 async fn execute_bisync(
     config_path: &Path,
@@ -888,6 +965,43 @@ async fn dry_run_bisync_job_by_name_inner(config_dir: &Path, state: &RcdState, n
 mod tests {
     use super::*;
     use crate::rcd::tests::TempDir;
+
+    #[test]
+    fn extract_lock_pid_reads_the_pid_field_from_the_lock_json() {
+        let content = r#"{"Session":"x","PID":"12345","TimeRenewed":"x","TimeExpires":"x"}"#;
+        assert_eq!(extract_lock_pid(content), Some(12345));
+    }
+
+    #[test]
+    fn extract_lock_pid_is_none_for_malformed_or_incomplete_content() {
+        assert_eq!(extract_lock_pid("non e' json"), None);
+        assert_eq!(extract_lock_pid(r#"{"Session":"x"}"#), None);
+    }
+
+    #[test]
+    fn clear_stale_lock_removes_a_lock_whose_pid_no_longer_exists() {
+        let dir = TempDir::new("bisync-stale-lock");
+        std::fs::create_dir_all(&dir.path).unwrap();
+        let lock_path = dir.path.join("prova.lck");
+        // Ben oltre qualunque pid_max realistico su Linux o Windows.
+        std::fs::write(&lock_path, r#"{"PID":"999999999"}"#).unwrap();
+
+        clear_stale_lock(&dir.path);
+
+        assert!(!lock_path.exists(), "un lock orfano (processo morto) va rimosso automaticamente");
+    }
+
+    #[test]
+    fn clear_stale_lock_leaves_a_lock_whose_pid_is_still_alive() {
+        let dir = TempDir::new("bisync-live-lock");
+        std::fs::create_dir_all(&dir.path).unwrap();
+        let lock_path = dir.path.join("prova.lck");
+        std::fs::write(&lock_path, format!(r#"{{"PID":"{}"}}"#, std::process::id())).unwrap();
+
+        clear_stale_lock(&dir.path);
+
+        assert!(lock_path.exists(), "un lock il cui processo esiste ancora non va toccato");
+    }
 
     #[test]
     fn load_from_missing_file_returns_empty() {

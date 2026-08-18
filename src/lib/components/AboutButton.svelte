@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getVersion } from "@tauri-apps/api/app";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { invoke } from "@tauri-apps/api/core";
   import Modal from "./Modal.svelte";
   import { t } from "$lib/i18n";
 
@@ -16,7 +16,7 @@
   });
 
   async function openRepo() {
-    await openUrl(REPO_URL);
+    await invoke("open_url_in_browser", { url: REPO_URL });
   }
 </script>
 

@@ -28,6 +28,9 @@ use tray::hide_window;
 mod app_settings;
 use app_settings::{get_app_settings, set_start_minimized};
 
+mod open_external;
+use open_external::open_url_in_browser;
+
 // xdg-desktop-portal è un concetto specifico dei desktop Linux (D-Bus) —
 // non ha senso su Windows/macOS, dove tra l'altro non esiste un bus di
 // sessione a cui connettersi (fallirebbe silenziosamente ad ogni avvio,
@@ -136,6 +139,10 @@ fn spawn_signal_shutdown_handler(app: tauri::AppHandle) {
             _ = sigterm.recv() => {}
             _ = sigint.recv() => {}
         }
+        // Bisync gira come sottoprocesso diretto, non attraverso rclone rcd:
+        // spegnere solo il demone lo lascerebbe orfano in background, con il
+        // suo lock file mai rilasciato — vedi `bisync::terminate_running_bisyncs`.
+        bisync::terminate_running_bisyncs();
         let state = app.state::<RcdState>();
         rcd::shutdown(&state).await;
         std::process::exit(0);
@@ -288,7 +295,8 @@ pub fn run() {
             remove_config_password,
             hide_window,
             get_app_settings,
-            set_start_minimized
+            set_start_minimized,
+            open_url_in_browser
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

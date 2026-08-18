@@ -596,6 +596,10 @@ fn notify_done(app: &AppHandle, name: &str, prefix: &str) {
 fn perform_quit(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        // Vedi `spawn_signal_shutdown_handler` (lib.rs) per il perché: senza
+        // questo, un bisync in corso resterebbe orfano in background con il
+        // suo lock file mai rilasciato.
+        crate::bisync::terminate_running_bisyncs();
         let state = app.state::<RcdState>();
         crate::rcd::shutdown(&state).await;
         std::process::exit(0);

@@ -37,6 +37,34 @@ pub(crate) fn hide_console_window_tokio(command: &mut Command) -> &mut Command {
     command
 }
 
+/// `true` se un processo con questo PID esiste ancora — usata per
+/// distinguere un lock file di bisync genuinamente attivo da uno orfano
+/// lasciato da un'esecuzione precedente terminata in modo anomalo (crash,
+/// mancanza di corrente, terminazione forzata), vedi `bisync::clear_stale_lock`.
+/// Best-effort: piattaforme non gestite esplicitamente (solo Linux e
+/// Windows per ora) restituiscono sempre `true`, la scelta conservativa —
+/// scambiare un lock genuinamente attivo per uno orfano e cancellarlo
+/// sarebbe pericoloso, il contrario (non ripulire un lock davvero orfano)
+/// è solo un inconveniente temporaneo.
+#[cfg(target_os = "linux")]
+pub(crate) fn process_is_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn process_is_alive(pid: u32) -> bool {
+    let mut command = std::process::Command::new("tasklist");
+    command.args(["/FI", &format!("PID eq {pid}"), "/NH"]);
+    hide_console_window(&mut command);
+    let Ok(output) = command.output() else { return true };
+    String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub(crate) fn process_is_alive(_pid: u32) -> bool {
+    true
+}
+
 /// Nome del sidecar Tauri per rclone (`externalBin` in tauri.conf.json),
 /// convenzione `<nome>-<target-triple>[.exe su Windows]`.
 #[cfg(target_os = "windows")]
@@ -133,6 +161,21 @@ pub async fn check_rclone_installed() -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::rcd::tests::TempDir;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_is_alive_is_true_for_our_own_pid() {
+        assert!(process_is_alive(std::process::id()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_is_alive_is_false_for_a_pid_that_has_already_exited() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(!process_is_alive(pid));
+    }
 
     #[test]
     fn parse_version_extracts_version_from_first_line() {

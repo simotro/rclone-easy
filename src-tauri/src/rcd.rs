@@ -409,6 +409,18 @@ async fn start_rcd_in(config_path: &Path, password: Option<&str>) -> Result<RcdP
         command.env("RCLONE_CONFIG_PASS", password);
     }
 
+    // `rclone rcd` apre da sé il browser per l'autorizzazione OAuth via il
+    // suo `xdg-open` interno — ereditando l'ambiente inquinato da `AppRun`
+    // (bundling AppImage) soffre dello stesso fallimento silenzioso già
+    // risolto per il file manager, vedi `open_external.rs`.
+    #[cfg(all(target_os = "linux", not(test)))]
+    {
+        for var in crate::open_external::APPIMAGE_POLLUTED_ENV_VARS {
+            command.env_remove(var);
+        }
+        command.env("PATH", crate::open_external::CLEAN_SYSTEM_PATH);
+    }
+
     #[cfg(test)]
     {
         let fake_bin = fake_xdg_open_path_prefix();

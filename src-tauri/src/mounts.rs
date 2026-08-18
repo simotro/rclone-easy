@@ -520,47 +520,10 @@ pub async fn mount_now_and_open(app: AppHandle, state: tauri::State<'_, RcdState
     Ok(())
 }
 
-/// Apre `path` nel file manager di sistema. Variante Linux: chiama
-/// `xdg-open` direttamente invece di passare da `tauri_plugin_opener`, con
-/// l'ambiente del sottoprocesso ripulito da ciò che `AppRun` (generato da
-/// `linuxdeploy` per il bundling AppImage) inietta:
-/// - `LD_LIBRARY_PATH` e affini (`GIO_MODULE_DIR`, `QT_PLUGIN_PATH`, ecc.)
-///   puntano alle librerie bundlate nell'AppImage, non quelle di sistema;
-/// - `PATH` antepone `$APPDIR/usr/bin`, dove l'AppDir bundla una propria
-///   copia di `xdg-open` — identica byte per byte a quella di sistema, eppure
-///   invocata da lì non apre il file manager (spawn riuscito, `exit status:
-///   0`, nessuna finestra — causa non identificata con certezza, ma il
-///   sintomo sparisce forzando la risoluzione verso la copia di sistema).
-/// Senza questo fix il montaggio riesce ma la cartella non si apre mai, solo
-/// nell'AppImage pacchettizzata — funziona già con `npm run tauri dev`, che
-/// non ha questo inquinamento d'ambiente.
-#[cfg(target_os = "linux")]
+/// Apre `path` nel file manager di sistema — vedi `open_external.rs` per il
+/// perché serve un fix specifico all'AppImage su Linux.
 fn open_in_file_manager(path: &str) {
-    let mut command = std::process::Command::new("xdg-open");
-    command.arg(path);
-    for var in [
-        "LD_LIBRARY_PATH",
-        "XDG_DATA_DIRS",
-        "GSETTINGS_SCHEMA_DIR",
-        "GST_PLUGIN_SYSTEM_PATH",
-        "GST_PLUGIN_SYSTEM_PATH_1_0",
-        "QT_PLUGIN_PATH",
-        "PERLLIB",
-        "PYTHONPATH",
-        "GIO_MODULE_DIR",
-        "GIO_EXTRA_MODULES",
-    ] {
-        command.env_remove(var);
-    }
-    command.env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-    let _ = command.spawn();
-}
-
-/// Altre piattaforme: nessun runtime AppImage a inquinare l'ambiente,
-/// `tauri_plugin_opener` basta.
-#[cfg(not(target_os = "linux"))]
-fn open_in_file_manager(path: &str) {
-    let _ = tauri_plugin_opener::open_path(path, None::<&str>);
+    crate::open_external::open_path(path);
 }
 
 #[tauri::command]

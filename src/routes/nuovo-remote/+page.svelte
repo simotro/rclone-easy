@@ -1,7 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { openUrl } from "@tauri-apps/plugin-opener";
   import { goto } from "$app/navigation";
   import { t } from "$lib/i18n";
   import ProviderIcon from "$lib/components/ProviderIcon.svelte";
@@ -229,15 +228,15 @@
   }
 
   async function openOAuthUrlManually() {
-    if (oauthUrl) await openUrl(oauthUrl);
+    if (oauthUrl) await invoke("open_url_in_browser", { url: oauthUrl });
   }
 
   async function openGoogleDriveClientIdGuide() {
-    await openUrl("https://rclone.org/drive/#making-your-own-client-id");
+    await invoke("open_url_in_browser", { url: "https://rclone.org/drive/#making-your-own-client-id" });
   }
 
   async function openGoogleCloudConsole() {
-    await openUrl("https://console.cloud.google.com/");
+    await invoke("open_url_in_browser", { url: "https://console.cloud.google.com/" });
   }
 
   // Elenco piatto (non raggruppato per tipo di autenticazione) e ordinato
