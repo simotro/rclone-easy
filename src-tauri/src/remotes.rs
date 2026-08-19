@@ -111,6 +111,223 @@ pub async fn list_s3_regions(state: tauri::State<'_, RcdState>) -> Result<Vec<S3
     extract_s3_regions(&body)
 }
 
+#[derive(Debug, Serialize, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct S3EndpointOption {
+    pub value: String,
+    pub help: String,
+    /// Stesso significato di `S3RegionOption::providers`: es. AWS non ha
+    /// nessun esempio di endpoint (usa solo la regione), Alibaba ne ha
+    /// decine (uno per regione) — la UI mostra solo quelli pertinenti al
+    /// provider scelto, invece di un campo di testo libero senza aiuto.
+    pub providers: Vec<String>,
+}
+
+/// Stessa idea di `extract_s3_regions`, ma per l'opzione `endpoint`.
+fn extract_s3_endpoints(body: &serde_json::Value) -> Result<Vec<S3EndpointOption>, String> {
+    let providers = body
+        .get("providers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("campo 'providers' mancante nella risposta di rclone rcd: {body}"))?;
+
+    let s3 = providers
+        .iter()
+        .find(|p| p.get("Name").and_then(|n| n.as_str()) == Some("s3"))
+        .ok_or_else(|| "provider 's3' non trovato nella risposta di rclone rcd".to_string())?;
+
+    let endpoint_option = s3
+        .get("Options")
+        .and_then(|v| v.as_array())
+        .and_then(|opts| opts.iter().find(|o| o.get("Name").and_then(|n| n.as_str()) == Some("endpoint")));
+
+    let Some(endpoint_option) = endpoint_option else { return Ok(Vec::new()) };
+    let examples = endpoint_option.get("Examples").and_then(|v| v.as_array()).map(|v| v.as_slice()).unwrap_or(&[]);
+
+    Ok(examples
+        .iter()
+        .filter_map(|e| {
+            let value = e.get("Value")?.as_str()?.to_string();
+            // Alcuni esempi (es. "s3.{tenant_name}.cubbit.eu" di Cubbit,
+            // "s3.us-west-1.{account_name}.lyve.seagate.com" di LyveCloud)
+            // sono modelli da completare a mano con un dato che qui non
+            // raccogliamo affatto — proporli (ancora peggio, sceglierli da
+            // soli come default) produce sempre un endpoint non valido, mai
+            // utilizzabile così com'è. Esclusi alla radice: verificato un
+            // caso reale (Cubbit) dove la selezione automatica del primo
+            // esempio "sembrava" corretta ma cadeva su questo se l'ordine
+            // degli esempi cambiava, causando un errore di connessione
+            // poco chiaro ("Invalid region: region was not a valid DNS
+            // name").
+            if value.contains('{') {
+                return None;
+            }
+            let help = e.get("Help").and_then(|h| h.as_str()).unwrap_or("").to_string();
+            let providers = e
+                .get("Provider")
+                .and_then(|p| p.as_str())
+                .map(|p| p.split(',').map(str::to_string).collect())
+                .unwrap_or_default();
+            Some(S3EndpointOption { value, help, providers })
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn list_s3_endpoints(state: tauri::State<'_, RcdState>) -> Result<Vec<S3EndpointOption>, String> {
+    let body = rcd::call(&state, "config/providers", serde_json::json!({})).await?;
+    extract_s3_endpoints(&body)
+}
+
+#[derive(Debug, Serialize, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTypeOption {
+    pub name: String,
+    pub description: String,
+}
+
+/// Elenco leggero di tutti i backend che rclone conosce (nome tecnico +
+/// descrizione), per il primo passo della "Configurazione avanzata" — a
+/// differenza di `get_provider_options` sotto, qui non servono i campi di
+/// ciascun backend, la risposta completa di `config/providers` sarebbe
+/// inutilmente pesante (~750KB) da mandare al frontend solo per popolare un
+/// elenco di scelta. `tardigrade` è l'unico backend con `Hide: true`
+/// (verificato): un alias deprecato di `storj`, va escluso qui come lo
+/// escluderebbe `rclone config` stesso.
+fn extract_provider_types(body: &serde_json::Value) -> Result<Vec<ProviderTypeOption>, String> {
+    let providers = body
+        .get("providers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("campo 'providers' mancante nella risposta di rclone rcd: {body}"))?;
+
+    Ok(providers
+        .iter()
+        .filter(|p| !p.get("Hide").and_then(|v| v.as_bool()).unwrap_or(false))
+        .filter_map(|p| {
+            let name = p.get("Name")?.as_str()?.to_string();
+            let description = p.get("Description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Some(ProviderTypeOption { name, description })
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn list_provider_types(state: tauri::State<'_, RcdState>) -> Result<Vec<ProviderTypeOption>, String> {
+    let body = rcd::call(&state, "config/providers", serde_json::json!({})).await?;
+    extract_provider_types(&body)
+}
+
+#[derive(Debug, Serialize, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldExample {
+    pub value: String,
+    pub help: String,
+}
+
+/// Un campo del form generico di "Configurazione avanzata", ricavato 1:1 da
+/// un `Option` di `config/providers` — vedi `interactive_remote.rs` per come
+/// i valori raccolti qui vengono poi passati a `config/create`.
+#[derive(Debug, Serialize, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderFieldOption {
+    pub name: String,
+    pub help: String,
+    /// Uno tra i 14 valori che rclone usa oggi (`string`, `bool`, `int`,
+    /// `SizeSuffix`, `Duration`, ecc., verificato su tutti i 69 backend) — il
+    /// frontend lo usa solo per scegliere tra campo di testo e checkbox
+    /// (`bool`/`Tristate`), il resto rimane testo libero: rclone stesso fa
+    /// il parsing della stringa lato server, non serve replicarlo qui.
+    #[serde(rename = "type")]
+    pub field_type: String,
+    pub default_str: String,
+    pub required: bool,
+    /// Nascosto di default nella UI dietro "Mostra opzioni avanzate" — è lo
+    /// stesso criterio con cui `rclone config` decide quali domande fare
+    /// solo se si sceglie "Edit advanced config".
+    pub advanced: bool,
+    pub is_password: bool,
+    /// Ulteriore segnale di "va mascherato/trattato come segreto" oltre a
+    /// `is_password` — verificato: `secret_access_key` di s3 ha
+    /// `IsPassword: false` ma `Sensitive: true`.
+    pub sensitive: bool,
+    /// Se vero, `examples` sono le uniche scelte valide (mostrare un
+    /// selettore); se falso sono solo suggerimenti (campo di testo libero
+    /// con scorciatoie).
+    pub exclusive: bool,
+    pub examples: Vec<FieldExample>,
+}
+
+/// Campi di un singolo backend per il form dinamico del terzo passo — a
+/// differenza di `extract_provider_types`, qui interessano tutti i dettagli
+/// di ciascuna opzione. `Hide` a livello di opzione (a differenza di quello
+/// a livello di provider, un bool) è un bitmask intero di rclone
+/// (`OptionHideConfigurator` compreso) — qualunque valore diverso da zero
+/// significa "non mostrare in un configuratore come questo", verificato su
+/// `disable_site_permission` di onedrive.
+fn extract_provider_options(body: &serde_json::Value, kind: &str) -> Result<Vec<ProviderFieldOption>, String> {
+    let providers = body
+        .get("providers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("campo 'providers' mancante nella risposta di rclone rcd: {body}"))?;
+
+    let provider = providers
+        .iter()
+        .find(|p| p.get("Name").and_then(|n| n.as_str()) == Some(kind))
+        .ok_or_else(|| format!("tipo di backend '{kind}' non trovato"))?;
+
+    let options = provider
+        .get("Options")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("campo 'Options' mancante per il backend '{kind}'"))?;
+
+    Ok(options
+        .iter()
+        .filter(|o| o.get("Hide").and_then(|v| v.as_i64()).unwrap_or(0) == 0)
+        .filter_map(|o| {
+            let name = o.get("Name")?.as_str()?.to_string();
+            let help = o.get("Help").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let field_type = o.get("Type").and_then(|v| v.as_str()).unwrap_or("string").to_string();
+            let default_str = o.get("DefaultStr").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let required = o.get("Required").and_then(|v| v.as_bool()).unwrap_or(false);
+            let advanced = o.get("Advanced").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_password = o.get("IsPassword").and_then(|v| v.as_bool()).unwrap_or(false);
+            let sensitive = o.get("Sensitive").and_then(|v| v.as_bool()).unwrap_or(false);
+            let exclusive = o.get("Exclusive").and_then(|v| v.as_bool()).unwrap_or(false);
+            let examples = o
+                .get("Examples")
+                .and_then(|v| v.as_array())
+                .map(|examples| {
+                    examples
+                        .iter()
+                        .filter_map(|e| {
+                            let value = e.get("Value")?.as_str()?.to_string();
+                            let help = e.get("Help").and_then(|h| h.as_str()).unwrap_or(&value).to_string();
+                            Some(FieldExample { value, help })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(ProviderFieldOption {
+                name,
+                help,
+                field_type,
+                default_str,
+                required,
+                advanced,
+                is_password,
+                sensitive,
+                exclusive,
+                examples,
+            })
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn get_provider_options(state: tauri::State<'_, RcdState>, kind: String) -> Result<Vec<ProviderFieldOption>, String> {
+    let body = rcd::call(&state, "config/providers", serde_json::json!({})).await?;
+    extract_provider_options(&body, &kind)
+}
+
 /// Estrae la lista di nomi dalla risposta di `config/listremotes`
 /// (`{"remotes": ["nome1", "nome2"]}`) — usata anche da `tray.rs` per
 /// elencare i remote senza alcun mount/job/bisync configurato (voce
@@ -245,6 +462,7 @@ async fn create_remote_in(
     kind: &str,
     parameters: &HashMap<String, String>,
     obscure: bool,
+    verify_path: &str,
 ) -> Result<(), String> {
     ensure_name_available(state, name).await?;
 
@@ -260,25 +478,71 @@ async fn create_remote_in(
     )
     .await?;
 
-    verify_and_cleanup(state, name).await
+    verify_and_cleanup(state, name, kind, verify_path).await
 }
 
-/// Verifica che il remote risponda davvero (`operations/list` sulla root),
-/// senza alcuna azione correttiva in caso di fallimento — il chiamante
-/// decide cosa fare (cancellare per una creazione, ripristinare i vecchi
-/// parametri per una modifica).
-async fn verify_connection(state: &RcdState, name: &str) -> Result<(), String> {
-    rcd::call(
-        state,
+/// Verifica che il remote risponda davvero (`operations/list` su
+/// `verify_path`, vuoto per la radice), senza alcuna azione correttiva in
+/// caso di fallimento — il chiamante decide cosa fare (cancellare per una
+/// creazione, ripristinare i vecchi parametri per una modifica). Il
+/// percorso va dentro `fs` (non nel campo `remote` separato): l'unico modo
+/// verificato che funziona uniformemente per ogni tipo di backend, vedi
+/// `list_remote_dir_in` per lo stesso pattern.
+/// Tempo massimo concesso alla verifica di connessione prima di arrendersi.
+/// `operations/list` apre una connessione di rete vera (SSH per SFTP, TLS
+/// per WebDAV/S3...) che può restare in attesa indefinitamente contro un
+/// host irraggiungibile o che non risponde — senza questo limite l'attesa
+/// non finisce mai (bug reale, 19/8/2026: un host SFTP non raggiungibile
+/// lasciava l'app bloccata su "Verifica in corso", pulsanti "Indietro" e
+/// "Verifica e salva" entrambi disabilitati per sempre, nessun modo di
+/// uscirne se non riavviare l'app).
+const VERIFY_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+async fn verify_connection(state: &RcdState, name: &str, verify_path: &str) -> Result<(), String> {
+    // `connection_info` invece di `call`: quest'ultimo tiene il lock su
+    // `RcdState` per tutta la durata della richiesta, che qui può essere
+    // lunga — vedi il commento su `ConnectionInfo` in rcd.rs (stesso motivo
+    // per cui l'attesa OAuth non usa `call` direttamente). Senza, una
+    // singola verifica lenta congelerebbe ogni altro comando dell'app nel
+    // frattempo, non solo questo dialogo.
+    let info = rcd::connection_info(state).await?;
+    let request = info.call(
         "operations/list",
         serde_json::json!({
-            "fs": format!("{name}:"),
+            "fs": format!("{name}:{verify_path}"),
             "remote": "",
             "opt": { "recurse": false },
         }),
-    )
-    .await?;
-    Ok(())
+    );
+
+    match tokio::time::timeout(VERIFY_CONNECTION_TIMEOUT, request).await {
+        Ok(result) => {
+            result?;
+            Ok(())
+        }
+        Err(_) => Err(format!(
+            "il server non ha risposto entro {}s: controlla indirizzo, porta e connessione di rete",
+            VERIFY_CONNECTION_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// Messaggio più comprensibile del generico errore AWS quando la verifica
+/// (elenco di TUTTI i bucket dell'account, se non si è indicato un bucket
+/// specifico) fallisce con un accesso negato — capita spesso con chiavi S3
+/// limitate a un singolo bucket, un pattern comune presso molti provider
+/// (non solo Cubbit, dove è stato osservato la prima volta il 19/8/2026),
+/// non necessariamente un segno di credenziali sbagliate. Generico apposta:
+/// non individua un singolo provider, si applica a chiunque abbia una
+/// chiave con permessi ristretti.
+fn friendlier_s3_verify_error(kind: &str, verify_path: &str, error: &str) -> String {
+    if kind == "s3" && verify_path.is_empty() && (error.contains("AccessDenied") || error.contains("StatusCode: 403")) {
+        format!(
+            "{error}\n\nSe la tua chiave S3 ha accesso a un solo bucket invece che a tutto l'account, è normale che l'elenco di tutti i bucket fallisca così: indica il nome del bucket e riprova."
+        )
+    } else {
+        error.to_string()
+    }
 }
 
 /// Verifica che il remote appena creato risponda davvero e lo rimuove se la
@@ -286,12 +550,12 @@ async fn verify_connection(state: &RcdState, name: &str) -> Result<(), String> {
 /// risulta mai salvato se la connessione non funziona. Riusata sia da
 /// `create_remote_in` (inserimento manuale/import) sia dal flusso OAuth in
 /// `oauth_remote.rs`, dopo l'ultimo passo della sua catena di domande.
-pub(crate) async fn verify_and_cleanup(state: &RcdState, name: &str) -> Result<(), String> {
-    if let Err(connection_error) = verify_connection(state, name).await {
+pub(crate) async fn verify_and_cleanup(state: &RcdState, name: &str, kind: &str, verify_path: &str) -> Result<(), String> {
+    if let Err(connection_error) = verify_connection(state, name, verify_path).await {
         // Best-effort: se anche la cancellazione fallisce non c'è comunque
         // nulla di più sensato da fare qui che segnalare l'errore originale.
         let _ = rcd::call(state, "config/delete", serde_json::json!({ "name": name })).await;
-        return Err(connection_error);
+        return Err(friendlier_s3_verify_error(kind, verify_path, &connection_error));
     }
 
     Ok(())
@@ -303,8 +567,9 @@ pub async fn create_remote(
     name: String,
     kind: String,
     parameters: HashMap<String, String>,
+    verify_path: Option<String>,
 ) -> Result<(), String> {
-    create_remote_in(&state, &name, &kind, &parameters, true).await
+    create_remote_in(&state, &name, &kind, &parameters, true, verify_path.as_deref().unwrap_or("")).await
 }
 
 /// Importa un remote già presente nel `rclone.conf` di sistema nella config
@@ -315,7 +580,7 @@ pub async fn create_remote(
 pub async fn import_remote(state: tauri::State<'_, RcdState>, name: String, config_path: Option<String>) -> Result<(), String> {
     let config_path = config_path.as_deref().map(std::path::Path::new);
     let (kind, parameters) = crate::existing_config::dump_remote_parameters(&name, config_path).await?;
-    create_remote_in(&state, &name, &kind, &parameters, false).await
+    create_remote_in(&state, &name, &kind, &parameters, false, "").await
 }
 
 /// Campi non sensibili per tipo di backend, stesso sottoinsieme già gestito
@@ -379,9 +644,14 @@ pub async fn get_remote_for_edit(state: tauri::State<'_, RcdState>, name: String
 /// salvati — `noObscure:true` per non offuscarli una seconda volta): a
 /// differenza della creazione non si può "cancellare" un remote che altri
 /// mount/backup/bisync potrebbero già referenziare.
-async fn update_remote_in(state: &RcdState, name: &str, parameters: &HashMap<String, String>) -> Result<(), String> {
+async fn update_remote_in(
+    state: &RcdState,
+    name: &str,
+    parameters: &HashMap<String, String>,
+    verify_path: &str,
+) -> Result<(), String> {
     let dump = rcd::call(state, "config/dump", serde_json::json!({})).await?;
-    let (_, old_parameters) = crate::existing_config::extract_remote_parameters(&dump, name)?;
+    let (kind, old_parameters) = crate::existing_config::extract_remote_parameters(&dump, name)?;
 
     rcd::call(
         state,
@@ -394,7 +664,7 @@ async fn update_remote_in(state: &RcdState, name: &str, parameters: &HashMap<Str
     )
     .await?;
 
-    if let Err(connection_error) = verify_connection(state, name).await {
+    if let Err(connection_error) = verify_connection(state, name, verify_path).await {
         let _ = rcd::call(
             state,
             "config/update",
@@ -405,7 +675,7 @@ async fn update_remote_in(state: &RcdState, name: &str, parameters: &HashMap<Str
             }),
         )
         .await;
-        return Err(connection_error);
+        return Err(friendlier_s3_verify_error(&kind, verify_path, &connection_error));
     }
 
     Ok(())
@@ -427,7 +697,7 @@ async fn rename_remote_in(state: &RcdState, config_dir: &std::path::Path, old_na
     let dump = rcd::call(state, "config/dump", serde_json::json!({})).await?;
     let (kind, parameters) = crate::existing_config::extract_remote_parameters(&dump, old_name)?;
 
-    create_remote_in(state, new_name, &kind, &parameters, false).await?;
+    create_remote_in(state, new_name, &kind, &parameters, false, "").await?;
 
     crate::mounts::rename_remote_references_in(config_dir, old_name, new_name)?;
     crate::jobs::rename_remote_references_in(config_dir, old_name, new_name)?;
@@ -456,8 +726,9 @@ pub async fn update_remote(
     old_name: String,
     name: String,
     parameters: HashMap<String, String>,
+    verify_path: Option<String>,
 ) -> Result<(), String> {
-    update_remote_in(&state, &old_name, &parameters).await?;
+    update_remote_in(&state, &old_name, &parameters, verify_path.as_deref().unwrap_or("")).await?;
 
     if name != old_name {
         let config_dir =
@@ -613,7 +884,7 @@ mod tests {
         let dir = TempDir::new("remotes-local-ok");
         let state = rcd::build_state(dir.config_path()).await;
 
-        let result = create_remote_in(&state, "rclone-easy-test", "local", &HashMap::new(), true).await;
+        let result = create_remote_in(&state, "rclone-easy-test", "local", &HashMap::new(), true, "").await;
         assert!(result.is_ok(), "creazione remote locale dovrebbe riuscire: {result:?}");
 
         let body = rcd::call(&state, "config/listremotes", serde_json::json!({})).await.unwrap();
@@ -635,7 +906,7 @@ mod tests {
         parameters.insert("url".to_string(), "http://127.0.0.1:1/".to_string());
         let name = "rclone-easy-test-fail";
 
-        let result = create_remote_in(&state, name, "http", &parameters, true).await;
+        let result = create_remote_in(&state, name, "http", &parameters, true, "").await;
         assert!(result.is_err(), "la creazione dovrebbe fallire per connessione rifiutata: {result:?}");
 
         let body = rcd::call(&state, "config/listremotes", serde_json::json!({})).await.unwrap();
@@ -659,7 +930,7 @@ mod tests {
         parameters.insert("vendor".to_string(), "nextcloud".to_string());
         let name = "rclone-easy-test-webdav-fail";
 
-        let result = create_remote_in(&state, name, "webdav", &parameters, true).await;
+        let result = create_remote_in(&state, name, "webdav", &parameters, true, "").await;
         assert!(result.is_err(), "la creazione dovrebbe fallire per connessione rifiutata: {result:?}");
 
         let body = rcd::call(&state, "config/listremotes", serde_json::json!({})).await.unwrap();
@@ -678,7 +949,7 @@ mod tests {
         parameters.insert("user".to_string(), "prova".to_string());
         let name = "rclone-easy-test-sftp-fail";
 
-        let result = create_remote_in(&state, name, "sftp", &parameters, true).await;
+        let result = create_remote_in(&state, name, "sftp", &parameters, true, "").await;
         assert!(result.is_err(), "la creazione dovrebbe fallire per connessione rifiutata: {result:?}");
 
         let body = rcd::call(&state, "config/listremotes", serde_json::json!({})).await.unwrap();
@@ -691,11 +962,11 @@ mod tests {
         let dir = TempDir::new("remotes-no-overwrite");
         let state = rcd::build_state(dir.config_path()).await;
 
-        create_remote_in(&state, "rclone-easy-dup", "local", &HashMap::new(), true)
+        create_remote_in(&state, "rclone-easy-dup", "local", &HashMap::new(), true, "")
             .await
             .expect("prima creazione dovrebbe riuscire");
 
-        let result = create_remote_in(&state, "rclone-easy-dup", "local", &HashMap::new(), true).await;
+        let result = create_remote_in(&state, "rclone-easy-dup", "local", &HashMap::new(), true, "").await;
         assert!(result.is_err(), "una seconda creazione con lo stesso nome deve essere rifiutata");
     }
 
@@ -788,6 +1059,17 @@ mod tests {
                                 { "Value": "eu-west-1", "Help": "EU (Ireland)", "Provider": "AWS" },
                                 { "Value": "garage", "Help": "Any Garage region", "Provider": "Other" }
                             ]
+                        },
+                        {
+                            "Name": "endpoint",
+                            "Examples": [
+                                { "Value": "s3.cubbit.eu", "Help": "Cubbit DS3", "Provider": "Cubbit" },
+                                {
+                                    "Value": "s3.{tenant_name}.cubbit.eu",
+                                    "Help": "Multi-tenant endpoint. Do not select this directly",
+                                    "Provider": "Cubbit"
+                                }
+                            ]
                         }
                     ]
                 }
@@ -848,6 +1130,52 @@ mod tests {
         assert_eq!(extract_s3_regions(&body).unwrap(), Vec::new());
     }
 
+    #[test]
+    fn extract_s3_endpoints_reads_the_endpoint_examples_with_their_provider_filter() {
+        let endpoints = extract_s3_endpoints(&sample_providers_body()).unwrap();
+        assert_eq!(
+            endpoints,
+            vec![S3EndpointOption {
+                value: "s3.cubbit.eu".to_string(),
+                help: "Cubbit DS3".to_string(),
+                providers: vec!["Cubbit".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn extract_s3_endpoints_excludes_template_endpoints_that_need_manual_substitution() {
+        // "s3.{tenant_name}.cubbit.eu" del fixture non deve mai comparire:
+        // bug reale (19/8/2026), un utente Cubbit si è visto proporre
+        // questo endpoint come se fosse utilizzabile così com'è, causando
+        // un errore di connessione poco chiaro.
+        let endpoints = extract_s3_endpoints(&sample_providers_body()).unwrap();
+        assert!(!endpoints.iter().any(|e| e.value.contains('{')));
+    }
+
+    #[test]
+    fn friendlier_s3_verify_error_adds_context_for_access_denied_on_the_root_listing() {
+        let message = friendlier_s3_verify_error("s3", "", "api error AccessDenied: Forbidden");
+        assert!(message.contains("AccessDenied"), "deve comunque contenere l'errore originale");
+        assert!(message.contains("bucket"), "deve suggerire di indicare un bucket");
+    }
+
+    #[test]
+    fn friendlier_s3_verify_error_leaves_other_errors_and_kinds_untouched() {
+        assert_eq!(friendlier_s3_verify_error("s3", "", "directory not found"), "directory not found");
+        assert_eq!(friendlier_s3_verify_error("webdav", "", "api error AccessDenied: Forbidden"), "api error AccessDenied: Forbidden");
+        // Con un bucket già indicato l'errore non è più ambiguo (o è
+        // sbagliato il nome del bucket, o le credenziali) — nessun
+        // messaggio aggiuntivo da appendere.
+        assert_eq!(friendlier_s3_verify_error("s3", "mio-bucket", "api error AccessDenied: Forbidden"), "api error AccessDenied: Forbidden");
+    }
+
+    #[test]
+    fn extract_s3_endpoints_is_empty_when_the_option_is_missing_instead_of_failing() {
+        let body = serde_json::json!({"providers": [{"Name": "s3", "Options": [{"Name": "provider", "Examples": []}]}]});
+        assert_eq!(extract_s3_endpoints(&body).unwrap(), Vec::new());
+    }
+
     #[tokio::test]
     async fn list_s3_providers_returns_cubbit_from_the_real_daemon() {
         let _guard = SUITE_LOCK.lock().unwrap();
@@ -859,6 +1187,116 @@ mod tests {
 
         assert!(providers.iter().any(|p| p.value == "Cubbit"));
         assert!(providers.iter().any(|p| p.value == "Other"));
+    }
+
+    #[test]
+    fn extract_provider_types_reads_name_and_description_and_excludes_hidden_providers() {
+        let body = serde_json::json!({
+            "providers": [
+                { "Name": "mega", "Description": "Mega" },
+                { "Name": "tardigrade", "Description": "Storj Decentralized Cloud Storage", "Hide": true },
+                { "Name": "s3", "Description": "Amazon S3 Compliant Storage" },
+            ]
+        });
+        assert_eq!(
+            extract_provider_types(&body).unwrap(),
+            vec![
+                ProviderTypeOption { name: "mega".to_string(), description: "Mega".to_string() },
+                ProviderTypeOption { name: "s3".to_string(), description: "Amazon S3 Compliant Storage".to_string() },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_provider_types_includes_every_curated_kind_from_the_real_daemon() {
+        let _guard = SUITE_LOCK.lock().unwrap();
+        let dir = TempDir::new("provider-types");
+        let state = rcd::build_state(dir.config_path()).await;
+
+        let body = rcd::call(&state, "config/providers", serde_json::json!({})).await.unwrap();
+        let types = extract_provider_types(&body).unwrap();
+        let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+
+        for expected in ["drive", "onedrive", "dropbox", "mega", "s3", "sftp", "webdav"] {
+            assert!(names.contains(&expected), "atteso '{expected}' tra i tipi di provider: {names:?}");
+        }
+    }
+
+    #[test]
+    fn extract_provider_options_reads_field_metadata_and_excludes_hidden_options() {
+        let body = serde_json::json!({
+            "providers": [{
+                "Name": "sftp",
+                "Options": [
+                    { "Name": "host", "Help": "SSH host to connect to", "Type": "string", "Required": true, "DefaultStr": "" },
+                    { "Name": "disable_hashcheck", "Type": "bool", "Advanced": true, "DefaultStr": "false" },
+                    { "Name": "secret", "Type": "string", "IsPassword": true, "Sensitive": true },
+                    { "Name": "internal_only", "Type": "string", "Hide": 2 },
+                ]
+            }]
+        });
+        let fields = extract_provider_options(&body, "sftp").unwrap();
+        assert_eq!(
+            fields,
+            vec![
+                ProviderFieldOption {
+                    name: "host".to_string(),
+                    help: "SSH host to connect to".to_string(),
+                    field_type: "string".to_string(),
+                    default_str: "".to_string(),
+                    required: true,
+                    advanced: false,
+                    is_password: false,
+                    sensitive: false,
+                    exclusive: false,
+                    examples: Vec::new(),
+                },
+                ProviderFieldOption {
+                    name: "disable_hashcheck".to_string(),
+                    help: "".to_string(),
+                    field_type: "bool".to_string(),
+                    default_str: "false".to_string(),
+                    required: false,
+                    advanced: true,
+                    is_password: false,
+                    sensitive: false,
+                    exclusive: false,
+                    examples: Vec::new(),
+                },
+                ProviderFieldOption {
+                    name: "secret".to_string(),
+                    help: "".to_string(),
+                    field_type: "string".to_string(),
+                    default_str: "".to_string(),
+                    required: false,
+                    advanced: false,
+                    is_password: true,
+                    sensitive: true,
+                    exclusive: false,
+                    examples: Vec::new(),
+                },
+            ],
+            "'internal_only' ha Hide!=0, non deve comparire nel form"
+        );
+    }
+
+    #[test]
+    fn extract_provider_options_fails_for_an_unknown_kind() {
+        let body = serde_json::json!({"providers": [{"Name": "mega", "Options": []}]});
+        assert!(extract_provider_options(&body, "tipo-inventato").is_err());
+    }
+
+    #[tokio::test]
+    async fn get_provider_options_reads_the_host_field_for_sftp_from_the_real_daemon() {
+        let _guard = SUITE_LOCK.lock().unwrap();
+        let dir = TempDir::new("provider-options-sftp");
+        let state = rcd::build_state(dir.config_path()).await;
+
+        let body = rcd::call(&state, "config/providers", serde_json::json!({})).await.unwrap();
+        let fields = extract_provider_options(&body, "sftp").unwrap();
+
+        let host = fields.iter().find(|f| f.name == "host").expect("il campo 'host' deve esistere per sftp");
+        assert!(host.required, "'host' è obbligatorio per sftp");
     }
 
     #[test]
@@ -927,9 +1365,9 @@ mod tests {
         let dir = TempDir::new("remotes-update-ok");
         let state = rcd::build_state(dir.config_path()).await;
 
-        create_remote_in(&state, "prova", "local", &HashMap::new(), true).await.unwrap();
+        create_remote_in(&state, "prova", "local", &HashMap::new(), true, "").await.unwrap();
 
-        let result = update_remote_in(&state, "prova", &HashMap::new()).await;
+        let result = update_remote_in(&state, "prova", &HashMap::new(), "").await;
         assert!(result.is_ok(), "un update che non rompe la connessione dovrebbe riuscire: {result:?}");
 
         let body = rcd::call(&state, "config/listremotes", serde_json::json!({})).await.unwrap();
@@ -962,7 +1400,7 @@ mod tests {
 
         let mut new_params = HashMap::new();
         new_params.insert("url".to_string(), "http://127.0.0.1:1/nuovo".to_string());
-        let result = update_remote_in(&state, "prova", &new_params).await;
+        let result = update_remote_in(&state, "prova", &new_params, "").await;
         assert!(result.is_err(), "l'update dovrebbe fallire: nessuna connessione reale disponibile su quella porta");
 
         let dump = rcd::call(&state, "config/dump", serde_json::json!({})).await.unwrap();
@@ -1147,7 +1585,7 @@ mod tests {
         let _guard = SUITE_LOCK.lock().unwrap();
         let dir = TempDir::new("remote-cascade-delete");
         let state = rcd::build_state(dir.config_path()).await;
-        create_remote_in(&state, "prova", "local", &HashMap::new(), true).await.unwrap();
+        create_remote_in(&state, "prova", "local", &HashMap::new(), true, "").await.unwrap();
         crate::mounts::create_mount_in(&dir.path, "un-mount", "prova:", "/tmp/cascade-mount", false).unwrap();
         crate::jobs::create_job_in(&dir.path, "un-backup", "/tmp/cascade-src", "prova:dest", None, false).unwrap();
         crate::bisync::create_bisync_job_in(&dir.path, "un-bisync", "/tmp/cascade-bisync", "prova:altro", None).unwrap();
@@ -1166,7 +1604,7 @@ mod tests {
         let _guard = SUITE_LOCK.lock().unwrap();
         let dir = TempDir::new("remote-rename-full");
         let state = rcd::build_state(dir.config_path()).await;
-        create_remote_in(&state, "vecchio", "local", &HashMap::new(), true).await.unwrap();
+        create_remote_in(&state, "vecchio", "local", &HashMap::new(), true, "").await.unwrap();
         crate::mounts::create_mount_in(&dir.path, "un-mount", "vecchio:cartella", "/tmp/rename-mount", false).unwrap();
         crate::jobs::create_job_in(&dir.path, "un-backup", "/tmp/rename-src", "vecchio:dest", None, false).unwrap();
         crate::bisync::create_bisync_job_in(&dir.path, "un-bisync", "/tmp/rename-bisync", "vecchio:altro", None).unwrap();
@@ -1188,8 +1626,8 @@ mod tests {
         let _guard = SUITE_LOCK.lock().unwrap();
         let dir = TempDir::new("remote-rename-conflict");
         let state = rcd::build_state(dir.config_path()).await;
-        create_remote_in(&state, "a", "local", &HashMap::new(), true).await.unwrap();
-        create_remote_in(&state, "b", "local", &HashMap::new(), true).await.unwrap();
+        create_remote_in(&state, "a", "local", &HashMap::new(), true, "").await.unwrap();
+        create_remote_in(&state, "b", "local", &HashMap::new(), true, "").await.unwrap();
         crate::mounts::create_mount_in(&dir.path, "un-mount", "a:cartella", "/tmp/rename-conflict-mount", false).unwrap();
 
         let result = rename_remote_in(&state, &dir.path, "a", "b").await;
@@ -1210,7 +1648,7 @@ mod tests {
         let _guard = SUITE_LOCK.lock().unwrap();
         let dir = TempDir::new("remote-rename-free");
         let state = rcd::build_state(dir.config_path()).await;
-        create_remote_in(&state, "solo", "local", &HashMap::new(), true).await.unwrap();
+        create_remote_in(&state, "solo", "local", &HashMap::new(), true, "").await.unwrap();
 
         let result = rename_remote_in(&state, &dir.path, "solo", "solo-nuovo").await;
         assert!(result.is_ok(), "rinominare un remote senza riferimenti dovrebbe riuscire: {result:?}");
@@ -1221,7 +1659,7 @@ mod tests {
         let _guard = SUITE_LOCK.lock().unwrap();
         let dir = TempDir::new("remote-cascade-delete-free");
         let state = rcd::build_state(dir.config_path()).await;
-        create_remote_in(&state, "prova-libero", "local", &HashMap::new(), true).await.unwrap();
+        create_remote_in(&state, "prova-libero", "local", &HashMap::new(), true, "").await.unwrap();
 
         let result = delete_remote_cascade_in(&state, &dir.path, "prova-libero").await;
         assert!(result.is_ok(), "eliminare un remote senza nulla che lo referenzia dovrebbe riuscire: {result:?}");
@@ -1232,7 +1670,7 @@ mod tests {
         let _guard = SUITE_LOCK.lock().unwrap();
         let dir = TempDir::new("remote-dir-list");
         let state = rcd::build_state(dir.config_path()).await;
-        create_remote_in(&state, "rclone-easy-test-dir", "local", &HashMap::new(), true).await.unwrap();
+        create_remote_in(&state, "rclone-easy-test-dir", "local", &HashMap::new(), true, "").await.unwrap();
 
         let root = TempDir::new("remote-dir-list-root");
         std::fs::create_dir_all(root.path.join("Backups")).unwrap();
@@ -1251,7 +1689,7 @@ mod tests {
         let _guard = SUITE_LOCK.lock().unwrap();
         let dir = TempDir::new("remote-dir-list-nested");
         let state = rcd::build_state(dir.config_path()).await;
-        create_remote_in(&state, "rclone-easy-test-nested", "local", &HashMap::new(), true).await.unwrap();
+        create_remote_in(&state, "rclone-easy-test-nested", "local", &HashMap::new(), true, "").await.unwrap();
 
         let root = TempDir::new("remote-dir-list-nested-root");
         std::fs::create_dir_all(root.path.join("Backups/2024")).unwrap();

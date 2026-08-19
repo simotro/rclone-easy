@@ -33,7 +33,7 @@
   color: #ffffff;
   font-size: 0.72em;
   font-weight: 700;
-  letter-spacing: 0.02em;
+  line-height: 1;
   flex-shrink: 0;
 }
 </style>

@@ -5,6 +5,19 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
+/// Guida `config/create` fino al completamento per un backend qualsiasi, non
+/// solo quelli OAuth: verificato che rclone risponde con una domanda
+/// (`State`/`Option` non vuoti) solo per i pochi backend con un passaggio
+/// interattivo incorporato nel proprio codice (l'autorizzazione OAuth è il
+/// caso principale) — per tutti gli altri, `config/create` con
+/// `nonInteractive: true` accetta silenziosamente anche parametri mancanti o
+/// vuoti, comprese le opzioni segnate `Required` nel loro schema, senza mai
+/// fare domande. Per questo il form generico (`remotes.rs::get_provider_options`)
+/// raccoglie prima tutti i campi noti lato frontend e li manda in un colpo
+/// solo qui: se il backend non ha bisogno d'altro, `config/create` finisce
+/// subito; se invece ha un passaggio speciale (OAuth), il ciclo sotto lo
+/// gestisce esattamente come già faceva per drive/dropbox/onedrive.
+
 #[derive(Clone, Serialize)]
 struct OAuthUrlEvent {
     url: String,
@@ -48,22 +61,43 @@ fn scripted_answer(option_name: &str, has_own_client_id: bool) -> Option<&'stati
     }
 }
 
-/// `client_id`/`client_secret`: quelli creati dall'utente stesso su Google
-/// Cloud Console per il proprio remote Drive (vedi il modulo "Usa un client
-/// Google tuo" nel form di `nuovo-remote`), non un client condiviso
-/// dell'app — Google ritirerà l'accesso all'identità condivisa di rclone
-/// nel corso del 2026, quindi ogni utente deve poter portare il proprio.
-/// `None`/vuoto = usa ancora l'identità condivisa di rclone (funziona oggi,
-/// non per sempre).
-fn initial_parameters(client_id: Option<&str>, client_secret: Option<&str>) -> HashMap<String, String> {
-    let mut parameters = HashMap::new();
-    if let (Some(id), Some(secret)) = (client_id, client_secret) {
-        if !id.is_empty() && !secret.is_empty() {
-            parameters.insert("client_id".to_string(), id.to_string());
-            parameters.insert("client_secret".to_string(), secret.to_string());
-        }
+/// Risposte automatiche aggiuntive del percorso guidato (provider curati) —
+/// applicate solo lì, mai in "Configurazione avanzata": lì l'utente deve
+/// vedere ogni domanda reale di rclone, senza scorciatoie, per restare
+/// fedele alla promessa "come rclone config, passo per passo". Il confronto
+/// è sul testo della scelta (`Help`), non su un valore interno di rclone:
+/// non verificabile senza completare un vero OAuth (serve un login reale nel
+/// browser), il testo mostrato all'utente durante l'indagine era invece già
+/// noto con certezza.
+///
+/// `config_type` (non `choose_type`, che è invece il nome dello *state*
+/// interno di rclone per questo passo — campo diverso, verificato nel
+/// sorgente di `backend/onedrive/onedrive.go`:
+/// `fs.ConfigChooseExclusiveFixed("choose_type_done", "config_type", "Type
+/// of connection", ...)`) è il nome reale dell'`Option` restituita da
+/// rclone per la domanda "Type of connection".
+fn guided_answer(option_name: &str, kind: &str, examples: &[ExampleOption]) -> Option<String> {
+    if kind == "onedrive" && option_name == "config_type" {
+        return examples
+            .iter()
+            .find(|e| {
+                let help = e.help.to_lowercase();
+                help.contains("personal") && help.contains("business")
+            })
+            .map(|e| e.value.clone());
     }
-    parameters
+    None
+}
+
+/// `true` se il chiamante ha fornito un proprio `client_id`/`client_secret`
+/// (tipicamente creati dall'utente su Google Cloud Console per il proprio
+/// remote Drive, vedi il modulo "Usa un client Google tuo" nel form di
+/// `nuovo-remote` — Google ritirerà l'identità condivisa di rclone nel corso
+/// del 2026, quindi ogni utente deve poter portare il proprio) — governa solo
+/// la risposta scriptata a `config_shared_client_id` sotto, il resto dei
+/// parametri passa comunque per intero a `config/create`.
+fn has_own_client_id(parameters: &HashMap<String, String>) -> bool {
+    !parameters.get("client_id").is_none_or(String::is_empty) && !parameters.get("client_secret").is_none_or(String::is_empty)
 }
 
 /// Interroga `config/oauthstatus` finché non compare un `authUrl`, poi lo
@@ -151,10 +185,11 @@ async fn ask_user_for_answer<R: tauri::Runtime>(
     rx.await.map_err(|_| "autorizzazione annullata dall'utente".to_string())
 }
 
-/// Guida il flusso multi-passo di `config/create` per un backend OAuth
-/// (drive/dropbox/onedrive) fino al completamento, gestendo il passo di
-/// autorizzazione nel browser. Vedi il modulo `remotes.rs` per il gemello
-/// non-OAuth (`create_remote_in`).
+/// Guida il flusso multi-passo di `config/create` per un backend qualsiasi
+/// fino al completamento, gestendo anche l'eventuale passo di autorizzazione
+/// nel browser se il backend lo richiede. Vedi `remotes.rs::create_remote_in`
+/// per il gemello a un solo colpo, usato quando tutti i parametri sono già
+/// noti in anticipo e non serve passare dal ciclo di domande.
 ///
 /// `config/create` scrive già una entry (incompleta) al primo passo, ben
 /// prima che qualunque domanda sia stata risposta: annullando
@@ -171,14 +206,12 @@ async fn run_oauth_flow<R: tauri::Runtime>(
     name: &str,
     kind: &str,
     extra_answers: &HashMap<String, String>,
-    client_id: Option<&str>,
-    client_secret: Option<&str>,
+    parameters: &HashMap<String, String>,
+    guided: bool,
 ) -> Result<(), String> {
     remotes::ensure_name_available(state, name).await?;
 
-    let result =
-        run_oauth_flow_after_name_check(app, state, pending, name, kind, extra_answers, client_id, client_secret)
-            .await;
+    let result = run_oauth_flow_after_name_check(app, state, pending, name, kind, extra_answers, parameters, guided).await;
 
     if result.is_err() {
         let _ = rcd::call(state, "config/delete", serde_json::json!({ "name": name })).await;
@@ -194,11 +227,10 @@ async fn run_oauth_flow_after_name_check<R: tauri::Runtime>(
     name: &str,
     kind: &str,
     extra_answers: &HashMap<String, String>,
-    client_id: Option<&str>,
-    client_secret: Option<&str>,
+    parameters: &HashMap<String, String>,
+    guided: bool,
 ) -> Result<(), String> {
-    let parameters = initial_parameters(client_id, client_secret);
-    let has_own_client_id = !parameters.is_empty();
+    let has_own_client_id = has_own_client_id(parameters);
 
     let mut response = rcd::call(
         state,
@@ -215,6 +247,19 @@ async fn run_oauth_flow_after_name_check<R: tauri::Runtime>(
     loop {
         if let Some(error) = response.get("Error").and_then(|v| v.as_str()) {
             if !error.is_empty() {
+                // Solo nel percorso guidato: rclone stessa non offre un
+                // modo alternativo di procedere qui (l'errore chiude il
+                // flusso, non è un'altra domanda a cui rispondere
+                // diversamente) — vedi `onedrive_recovery` per il perché
+                // serve parlare direttamente con Microsoft Graph.
+                if guided && kind == "onedrive" && crate::onedrive_recovery::is_drive_listing_failure(error) {
+                    match crate::onedrive_recovery::try_recover_drive_id(state, name).await {
+                        Ok(()) => break,
+                        Err(recovery_error) => {
+                            return Err(format!("{error} (recupero automatico anch'esso non riuscito: {recovery_error})"));
+                        }
+                    }
+                }
                 return Err(error.to_string());
             }
         }
@@ -231,6 +276,12 @@ async fn run_oauth_flow_after_name_check<R: tauri::Runtime>(
             scripted.to_string()
         } else if let Some(provided) = extra_answers.get(option_name) {
             provided.clone()
+        } else if guided {
+            if let Some(guided) = guided_answer(option_name, kind, &examples_from_option(option)) {
+                guided
+            } else {
+                ask_user_for_answer(app, pending, option).await?
+            }
         } else {
             // Nessuna risposta precompilata né fornita in anticipo: si
             // chiede all'utente, niente default silenzioso (vedi
@@ -263,27 +314,28 @@ async fn run_oauth_flow_after_name_check<R: tauri::Runtime>(
         };
     }
 
-    remotes::verify_and_cleanup(state, name).await
+    remotes::verify_and_cleanup(state, name, kind, "").await
 }
 
-/// `client_id`/`client_secret`: presenti solo quando l'utente ha compilato
-/// il modulo "Usa un client Google tuo" nel form di `nuovo-remote` (oggi
-/// rilevante solo per `kind == "drive"` — Dropbox/OneDrive non sono
-/// coinvolti dal ritiro dell'identità condivisa di rclone su Google Drive
-/// nel 2026). Entrambi assenti o vuoti: si usa ancora l'identità condivisa.
+/// Crea un remote di qualunque tipo passando dal ciclo interattivo di
+/// `config/create` — `parameters` sono i campi già noti (raccolti dal form
+/// generico lato frontend, es. `client_id`/`client_secret` per un client
+/// Google proprio, o qualunque altro campo statico del backend scelto): se
+/// bastano, il remote si crea subito; se il backend ha un passaggio speciale
+/// in più (l'OAuth è il caso principale), il resto del ciclo lo gestisce
+/// come sempre.
 #[tauri::command]
-pub async fn create_oauth_remote(
+pub async fn create_remote_interactive(
     app: AppHandle,
     state: tauri::State<'_, RcdState>,
     pending: tauri::State<'_, PendingOAuthAnswer>,
     name: String,
     kind: String,
     extra_answers: HashMap<String, String>,
-    client_id: Option<String>,
-    client_secret: Option<String>,
+    parameters: HashMap<String, String>,
+    guided: bool,
 ) -> Result<(), String> {
-    run_oauth_flow(&app, &state, &pending, &name, &kind, &extra_answers, client_id.as_deref(), client_secret.as_deref())
-        .await
+    run_oauth_flow(&app, &state, &pending, &name, &kind, &extra_answers, &parameters, guided).await
 }
 
 /// Risposta dell'utente a una domanda del flusso OAuth messa in pausa da
@@ -347,22 +399,46 @@ mod tests {
 
     #[test]
     fn scripted_answer_is_none_for_unknown_questions() {
-        assert_eq!(scripted_answer("choose_type", false), None);
+        assert_eq!(scripted_answer("config_type", false), None);
         assert_eq!(scripted_answer("qualcosa_di_mai_visto", false), None);
     }
 
     #[test]
-    fn initial_parameters_are_empty_without_a_custom_client_id() {
-        assert!(initial_parameters(None, None).is_empty());
-        assert!(initial_parameters(Some(""), Some("")).is_empty());
-        assert!(initial_parameters(Some("id"), None).is_empty(), "serve sia client_id sia client_secret, non uno solo");
+    fn guided_answer_picks_the_personal_or_business_example_for_onedrive() {
+        let examples = vec![
+            ExampleOption { value: "onedrive".to_string(), help: "OneDrive Personal or Business".to_string() },
+            ExampleOption { value: "sharepoint".to_string(), help: "Root Sharepoint site".to_string() },
+        ];
+        assert_eq!(guided_answer("config_type", "onedrive", &examples), Some("onedrive".to_string()));
     }
 
     #[test]
-    fn initial_parameters_are_set_when_both_client_id_and_secret_are_given() {
-        let parameters = initial_parameters(Some("un-client-id"), Some("un-client-secret"));
-        assert_eq!(parameters.get("client_id"), Some(&"un-client-id".to_string()));
-        assert_eq!(parameters.get("client_secret"), Some(&"un-client-secret".to_string()));
+    fn guided_answer_is_none_outside_onedrives_choose_type_question() {
+        let examples = vec![ExampleOption { value: "onedrive".to_string(), help: "OneDrive Personal or Business".to_string() }];
+        assert_eq!(guided_answer("some_other_question", "onedrive", &examples), None);
+        assert_eq!(guided_answer("config_type", "dropbox", &examples), None);
+    }
+
+    #[test]
+    fn guided_answer_is_none_if_no_example_mentions_both_personal_and_business() {
+        let examples = vec![ExampleOption { value: "sharepoint".to_string(), help: "Root Sharepoint site".to_string() }];
+        assert_eq!(guided_answer("config_type", "onedrive", &examples), None);
+    }
+
+    #[test]
+    fn has_own_client_id_is_false_without_both_fields() {
+        assert!(!has_own_client_id(&HashMap::new()));
+        assert!(!has_own_client_id(&HashMap::from([("client_id".to_string(), "".to_string())])));
+        assert!(!has_own_client_id(&HashMap::from([("client_id".to_string(), "id".to_string())])), "serve anche client_secret, non uno solo");
+    }
+
+    #[test]
+    fn has_own_client_id_is_true_when_both_are_set() {
+        let parameters = HashMap::from([
+            ("client_id".to_string(), "un-client-id".to_string()),
+            ("client_secret".to_string(), "un-client-secret".to_string()),
+        ]);
+        assert!(has_own_client_id(&parameters));
     }
 
     #[test]
@@ -390,7 +466,7 @@ mod tests {
 
         let pending = PendingOAuthAnswer::default();
         let result =
-            run_oauth_flow(&app, &state, &pending, "oauth-test", "tipo-che-non-esiste", &HashMap::new(), None, None).await;
+            run_oauth_flow(&app, &state, &pending, "oauth-test", "tipo-che-non-esiste", &HashMap::new(), &HashMap::new(), false).await;
         assert!(result.is_err());
     }
 
@@ -411,7 +487,7 @@ mod tests {
         let flow_state = state.clone();
         let pending = PendingOAuthAnswer::default();
         let flow_task = tokio::spawn(async move {
-            run_oauth_flow(&app, &flow_state, &pending, "dbx-cancel-test", "dropbox", &HashMap::new(), None, None).await
+            run_oauth_flow(&app, &flow_state, &pending, "dbx-cancel-test", "dropbox", &HashMap::new(), &HashMap::new(), false).await
         });
 
         let mut auth_url_seen = false;

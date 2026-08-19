@@ -15,12 +15,15 @@ mod activity;
 
 mod remotes;
 use remotes::{
-    create_remote, delete_remote, delete_remote_cascade, get_remote_for_edit, import_remote, list_own_remotes, list_remote_dir,
-    list_s3_providers, list_s3_regions, own_config_path, remote_usage, update_remote,
+    create_remote, delete_remote, delete_remote_cascade, get_provider_options, get_remote_for_edit, import_remote,
+    list_own_remotes, list_provider_types, list_remote_dir, list_s3_endpoints, list_s3_providers, list_s3_regions,
+    own_config_path, remote_usage, update_remote,
 };
 
-mod oauth_remote;
-use oauth_remote::{answer_oauth_question, cancel_oauth, create_oauth_remote, PendingOAuthAnswer};
+mod interactive_remote;
+use interactive_remote::{answer_oauth_question, cancel_oauth, create_remote_interactive, PendingOAuthAnswer};
+
+mod onedrive_recovery;
 
 mod tray;
 use tray::hide_window;
@@ -259,9 +262,12 @@ pub fn run() {
             get_remote_for_edit,
             list_s3_providers,
             list_s3_regions,
+            list_s3_endpoints,
+            list_provider_types,
+            get_provider_options,
             own_config_path,
             import_remote,
-            create_oauth_remote,
+            create_remote_interactive,
             cancel_oauth,
             answer_oauth_question,
             list_jobs,
