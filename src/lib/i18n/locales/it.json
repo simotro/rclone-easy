@@ -42,6 +42,7 @@
     "available": "Aggiornamento disponibile",
     "title": "Aggiornamento disponibile",
     "newVersion": "È disponibile la versione {version}.",
+    "viewReleaseNotes": "Vedi le note della release su GitHub",
     "installNow": "Aggiorna ora",
     "installing": "Aggiornamento in corso…",
     "openDownloadPage": "Apri la pagina di download",

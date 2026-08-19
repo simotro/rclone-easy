@@ -42,6 +42,7 @@
     "available": "Update available",
     "title": "Update available",
     "newVersion": "Version {version} is available.",
+    "viewReleaseNotes": "View the release notes on GitHub",
     "installNow": "Update now",
     "installing": "Updating…",
     "openDownloadPage": "Open the download page",

@@ -41,6 +41,14 @@
   async function openDownloadPage() {
     await invoke("open_url_in_browser", { url: RELEASES_URL });
   }
+
+  // Le note vere e proprie vivono solo sulla pagina della release taggata
+  // (generate da GitHub, non replicate in latest.json) — un link reale
+  // invece del testo statico "Vedi le note della release su GitHub" che
+  // prima non portava da nessuna parte.
+  async function openReleaseNotes(version: string) {
+    await invoke("open_url_in_browser", { url: `https://github.com/simotro/rclone-easy/releases/tag/v${version}` });
+  }
 </script>
 
 {#if updateState().status === "available"}
@@ -53,9 +61,9 @@
     {#if s.status === "available"}
       <div class="update-content">
         <p>{$t("update.newVersion", { values: { version: s.update.version } })}</p>
-        {#if s.update.body}
-          <p class="notes">{s.update.body}</p>
-        {/if}
+        <button type="button" class="link-button" onclick={() => openReleaseNotes(s.update.version)}>
+          {$t("update.viewReleaseNotes")}
+        </button>
         {#if installError}
           <p class="error">✗ {installError}</p>
         {/if}
@@ -102,10 +110,15 @@
   gap: 0.7em;
 }
 
-.notes {
-  color: var(--text-muted);
+.link-button {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
   font-size: 0.9em;
-  white-space: pre-line;
 }
 
 .actions {
