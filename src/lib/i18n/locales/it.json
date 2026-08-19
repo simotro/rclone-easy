@@ -38,6 +38,19 @@
     "startMinimized": "Avvia ridotta a icona",
     "startMinimizedHint": "All'avvio la finestra resta nella tray invece di aprirsi subito; puoi comunque richiamarla in qualsiasi momento dal menu della tray."
   },
+  "update": {
+    "available": "Aggiornamento disponibile",
+    "title": "Aggiornamento disponibile",
+    "newVersion": "È disponibile la versione {version}.",
+    "installNow": "Aggiorna ora",
+    "installing": "Aggiornamento in corso…",
+    "openDownloadPage": "Apri la pagina di download",
+    "checking": "Controllo in corso…",
+    "upToDate": "Hai già l'ultima versione.",
+    "checkFailed": "Controllo non riuscito.",
+    "neverChecked": "Non ancora controllato.",
+    "checkNow": "Controlla ora"
+  },
   "windowControls": {
     "hideTitle": "Nascondi la finestra — Rclone Easy resta attivo in background, trovi l'icona nella tray di sistema",
     "hideAria": "Nascondi la finestra"

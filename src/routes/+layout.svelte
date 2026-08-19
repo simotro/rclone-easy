@@ -6,6 +6,7 @@
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import LanguageToggle from "$lib/components/LanguageToggle.svelte";
   import AboutButton from "$lib/components/AboutButton.svelte";
+  import UpdateButton from "$lib/components/UpdateButton.svelte";
   import WindowControls from "$lib/components/WindowControls.svelte";
   import UnlockScreen from "$lib/components/UnlockScreen.svelte";
 
@@ -49,6 +50,7 @@
     {#if unlockState === "unlocked"}
       <LanguageToggle />
       <ThemeToggle />
+      <UpdateButton />
       <AboutButton />
     {/if}
     <WindowControls />

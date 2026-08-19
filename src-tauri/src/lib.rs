@@ -34,6 +34,9 @@ use app_settings::{get_app_settings, set_start_minimized};
 mod open_external;
 use open_external::open_url_in_browser;
 
+mod installation;
+use installation::installation_kind;
+
 // xdg-desktop-portal è un concetto specifico dei desktop Linux (D-Bus) —
 // non ha senso su Windows/macOS, dove tra l'altro non esiste un bus di
 // sessione a cui connettersi (fallirebbe silenziosamente ad ogni avvio,
@@ -192,6 +195,7 @@ pub fn run() {
         // l'app si comporta come un avvio normale, "ridotta a icona" è una
         // preferenza propria (`app_settings.rs`) letta comunque a runtime.
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Config propria dell'app, separata dal rclone.conf di sistema
             // (letto invece, in sola lettura, da existing_config.rs) — vedi
@@ -302,7 +306,8 @@ pub fn run() {
             hide_window,
             get_app_settings,
             set_start_minimized,
-            open_url_in_browser
+            open_url_in_browser,
+            installation_kind
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -38,6 +38,19 @@
     "startMinimized": "Launch minimized to tray",
     "startMinimizedHint": "On startup the window stays in the tray instead of opening right away; you can still bring it up at any time from the tray menu."
   },
+  "update": {
+    "available": "Update available",
+    "title": "Update available",
+    "newVersion": "Version {version} is available.",
+    "installNow": "Update now",
+    "installing": "Updating…",
+    "openDownloadPage": "Open the download page",
+    "checking": "Checking…",
+    "upToDate": "You're already on the latest version.",
+    "checkFailed": "Check failed.",
+    "neverChecked": "Not checked yet.",
+    "checkNow": "Check now"
+  },
   "windowControls": {
     "hideTitle": "Hide the window — Rclone Easy keeps running in the background, look for its icon in the system tray",
     "hideAria": "Hide the window"

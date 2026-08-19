@@ -8,6 +8,7 @@
   import ImportRemotesPanel from "./ImportRemotesPanel.svelte";
   import PasswordField from "./PasswordField.svelte";
   import { t } from "$lib/i18n";
+  import { updateState, checkForUpdates } from "$lib/updates.svelte";
 
   let { onRemotesChanged }: { onRemotesChanged: () => void } = $props();
 
@@ -316,6 +317,29 @@
     </label>
     <p class="hint">{$t("settings.startMinimizedHint")}</p>
   </div>
+  <div class="settings-toggles">
+    <div class="update-check-row">
+      <span>
+        {#if updateState().status === "checking"}
+          {$t("update.checking")}
+        {:else if updateState().status === "up-to-date"}
+          {$t("update.upToDate")}
+        {:else if updateState().status === "available"}
+          {@const s = updateState()}
+          {#if s.status === "available"}
+            {$t("update.newVersion", { values: { version: s.update.version } })}
+          {/if}
+        {:else if updateState().status === "error"}
+          {$t("update.checkFailed")}
+        {:else}
+          {$t("update.neverChecked")}
+        {/if}
+      </span>
+      <button type="button" class="link-button" onclick={checkForUpdates} disabled={updateState().status === "checking"}>
+        {$t("update.checkNow")}
+      </button>
+    </div>
+  </div>
 </Modal>
 
 <Modal bind:open={passwordModalOpen} title={$t("home.passwordModalTitle")}>
@@ -448,6 +472,18 @@
   gap: 0.3em;
   padding-top: 0.8em;
   border-top: 1px solid var(--border-color-subtle);
+}
+
+.update-check-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6em;
+  font-size: 0.9em;
+}
+
+.update-check-row span {
+  color: var(--text-muted);
 }
 
 .import-export-menu {
