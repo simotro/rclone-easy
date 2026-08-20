@@ -50,7 +50,9 @@
     "upToDate": "You're already on the latest version.",
     "checkFailed": "Check failed.",
     "neverChecked": "Not checked yet.",
-    "checkNow": "Check now"
+    "checkNow": "Check now",
+    "skipVersion": "Skip this version",
+    "versionSkipped": "You skipped version {version}. It will only show up again after a manual check."
   },
   "windowControls": {
     "hideTitle": "Hide the window — Rclone Easy keeps running in the background, look for its icon in the system tray",

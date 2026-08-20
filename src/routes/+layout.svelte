@@ -73,7 +73,15 @@
 .app-shell {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  /* `height` (non `min-height`): con solo un minimo, una pagina più alta
+     della finestra faceva crescere l'intero shell oltre i 100vh, ed era il
+     documento a scorrere — trascinando con sé `.title-bar` (bug segnalato
+     da Simone il 19/8/2026: finestra non più raggiungibile per spostarla o
+     chiuderla una volta scorsa via). Bloccando l'altezza qui e lasciando
+     scorrere solo `.app-body` sotto, la barra resta sempre visibile e
+     cliccabile. */
+  height: 100vh;
+  overflow: hidden;
   /* Senza barra del titolo nativa (`decorations: false` — scelta
      definitiva: un bug di tao su KDE/Wayland rende il pulsante X non
      cliccabile con le decorazioni native attive, fix upstream non ancora
@@ -82,7 +90,7 @@
      sfondo del desktop dietro di essa. Un bordo sottile disegnato da noi
      risolve senza riaprire la questione delle decorazioni.
      `box-sizing: border-box` tiene il bordo dentro il budget di
-     `min-height: 100vh` invece di sommarcisi sopra — stessa cautela già
+     `height: 100vh` invece di sommarcisi sopra — stessa cautela già
      presa per il margine di default di `body` (vedi shared-styles.css),
      che causava una scrollbar ingiustificata per un motivo simile. */
   box-sizing: border-box;
@@ -104,5 +112,6 @@
 .app-body {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
 }
 </style>

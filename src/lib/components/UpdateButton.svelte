@@ -1,8 +1,9 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import Modal from "./Modal.svelte";
   import { t } from "$lib/i18n";
-  import { updateState, checkForUpdates } from "$lib/updates.svelte";
+  import { updateState, checkForUpdates, skipUpdate } from "$lib/updates.svelte";
 
   const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 21h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
@@ -18,6 +19,24 @@
   // impostazioni (SettingsButton), che riusa lo stesso stato condiviso.
   $effect(() => {
     checkForUpdates();
+  });
+
+  // Cliccando la voce "⬆ Aggiornamento disponibile" nel menu della tray, o
+  // "Mostra/Nascondi finestra" quando c'è un aggiornamento in sospeso, il
+  // backend porta la finestra in primo piano ed emette questo evento — vedi
+  // tray.rs::open_update/toggle_main_window. Stesso schema di
+  // SettingsButton.svelte per OPEN_SETTINGS_EVENT.
+  $effect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen("rclone-easy://open-update", () => (open = true)).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   });
 
   async function installNow() {
@@ -68,6 +87,7 @@
           <p class="error">✗ {installError}</p>
         {/if}
         <div class="actions">
+          <button type="button" class="link-button" onclick={skipUpdate} disabled={installing}>{$t("update.skipVersion")}</button>
           {#if s.installKind === "appimage" || s.installKind === "windows"}
             <button type="button" onclick={installNow} disabled={installing}>
               {installing ? $t("update.installing") : $t("update.installNow")}
@@ -123,6 +143,7 @@
 
 .actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
 }
 </style>

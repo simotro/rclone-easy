@@ -50,7 +50,9 @@
     "upToDate": "Hai già l'ultima versione.",
     "checkFailed": "Controllo non riuscito.",
     "neverChecked": "Non ancora controllato.",
-    "checkNow": "Controlla ora"
+    "checkNow": "Controlla ora",
+    "skipVersion": "Salta questa versione",
+    "versionSkipped": "Hai saltato la versione {version}. Torna a comparire solo con un controllo manuale."
   },
   "windowControls": {
     "hideTitle": "Nascondi la finestra — Rclone Easy resta attivo in background, trovi l'icona nella tray di sistema",

@@ -38,6 +38,14 @@ const WINDOW_HIDDEN_EVENT: &str = "rclone-easy://window-hidden";
 /// stesso schema di `FOCUS_REMOTE_EVENT` per la voce "Impostazioni" del menu
 /// della tray, vedi `open_settings`.
 const OPEN_SETTINGS_EVENT: &str = "rclone-easy://open-settings";
+/// Evento ascoltato da `UpdateButton.svelte`: apre direttamente il modal di
+/// aggiornamento — emesso sia dalla voce di menu dedicata sia da
+/// "Mostra/Nascondi finestra" quando c'è un aggiornamento in sospeso, vedi
+/// `UPDATE_ID`/`toggle_main_window`.
+const OPEN_UPDATE_EVENT: &str = "rclone-easy://open-update";
+/// Voce di menu per l'aggiornamento in sospeso — mostrata solo quando
+/// `update_state::UpdateState` ne segnala uno, vedi `build_menu_from_remotes`.
+const UPDATE_ID: &str = "update_available";
 
 /// Nome della finestra principale, quello di default assegnato da Tauri
 /// quando `tauri.conf.json` non specifica un `label` esplicito (confermato:
@@ -79,6 +87,16 @@ const SPIN_FRAME_BYTES: &[u8] = include_bytes!("../icons/tray/tray-spin.rgba");
 /// una rotazione: è uno stato persistente (può durare ore), non un'attesa
 /// attiva, quindi non deve sembrare "in corso qualcosa adesso".
 const ERROR_BREATHE_FRAME_BYTES: &[u8] = include_bytes!("../icons/tray/tray-error-breathe.rgba");
+/// Dissolvenza morbida teal→ambra→teal (mai fino al rosso, a differenza
+/// dell'animazione di errore sopra: un aggiornamento disponibile non è un
+/// problema, non deve sembrare allarmante) — mostrata in loop quando c'è un
+/// aggiornamento in sospeso non ancora saltato dall'utente (vedi
+/// `update_state::UpdateState`), finché non lo installa o lo salta. Stessa
+/// tecnica ("respiro" a easing di coseno) e stessi 24 fotogrammi generati
+/// una volta con Pillow da `icons/tray/tray-idle.png`, colore di partenza
+/// idle (42,148,174) e di picco ambra (245,158,11) — lo stesso ambra usato
+/// come primo fotogramma dell'animazione di errore sopra.
+const UPDATE_BREATHE_FRAME_BYTES: &[u8] = include_bytes!("../icons/tray/tray-update-breathe.rgba");
 /// Conteggio fotogrammi condiviso da entrambe le animazioni sopra (rotazione
 /// e respiro), stesso valore per costruzione.
 const ANIMATION_FRAME_COUNT: usize = 24;
@@ -146,6 +164,7 @@ fn try_build_tray(app: &AppHandle) -> tauri::Result<()> {
             match id {
                 SHOW_HIDE_ID => toggle_main_window(app),
                 SETTINGS_ID => open_settings(app),
+                UPDATE_ID => open_update(app),
                 QUIT_ID => perform_quit(app),
                 _ => dispatch_action(app, id),
             }
@@ -205,6 +224,7 @@ fn last_run_failed(app: &AppHandle) -> bool {
 enum ActivityState {
     Running,
     Error,
+    UpdateAvailable,
     Ok,
 }
 
@@ -212,18 +232,29 @@ const TOOLTIP_RUNNING: &str = "Rclone Easy - Sincronizzazione in corso";
 /// Testo del tooltip usato anche per capire, a colpo d'occhio nel codice,
 /// cosa comunica l'animazione ambra→rosso di `ERROR_BREATHE_FRAME_BYTES`.
 const TOOLTIP_ERROR: &str = "Rclone Easy - Uno o più lavori hanno avuto un problema";
+const TOOLTIP_UPDATE: &str = "Rclone Easy - È disponibile un aggiornamento";
 const TOOLTIP_OK: &str = "Rclone Easy - Ultimi lavori eseguiti con successo";
 
-/// Ogni ~120ms, mentre almeno un job è in esecuzione oppure mentre l'ultima
-/// esecuzione registrata di un job è fallita, mostra il fotogramma
-/// successivo della relativa animazione (rotazione per "in corso", respiro
-/// ambra→rosso per "problema"); appena torna tutto normale mostra l'icona
-/// statica idle, controllato ogni ~500ms. Il tooltip riflette lo stesso
-/// stato, aggiornato solo al cambio di stato (non ad ogni fotogramma) per
-/// non chiamare l'API della tray decine di volte al secondo inutilmente.
-/// Un polling semplice invece di un canale di notifica: evita di dover far
-/// conoscere un `AppHandle` a `jobs.rs`/`bisync.rs`, che oggi restano
-/// testabili senza una vera app Tauri.
+/// `true` se c'è un aggiornamento in sospeso non ancora saltato
+/// dall'utente — vedi `update_state::UpdateState`.
+fn pending_update(app: &AppHandle) -> Option<String> {
+    app.try_state::<crate::update_state::UpdateState>().and_then(|s| s.pending_version())
+}
+
+/// Ogni ~120ms, mentre almeno un job è in esecuzione, mentre l'ultima
+/// esecuzione registrata di un job è fallita, o mentre c'è un aggiornamento
+/// in sospeso, mostra il fotogramma successivo della relativa animazione
+/// (rotazione per "in corso", respiro ambra→rosso per "problema", respiro
+/// teal→ambra per "aggiornamento disponibile"); appena torna tutto normale
+/// mostra l'icona statica idle, controllato ogni ~500ms. Ordine di priorità
+/// quando più condizioni sono vere insieme: un job in corso o un errore
+/// contano più di un semplice avviso di aggiornamento, che può aspettare.
+/// Il tooltip riflette lo stesso stato, aggiornato solo al cambio di stato
+/// (non ad ogni fotogramma) per non chiamare l'API della tray decine di
+/// volte al secondo inutilmente. Un polling semplice invece di un canale di
+/// notifica: evita di dover far conoscere un `AppHandle` a
+/// `jobs.rs`/`bisync.rs`, che oggi restano testabili senza una vera app
+/// Tauri.
 async fn watch_activity(app: AppHandle) {
     let mut current_state: Option<ActivityState> = None;
     let mut frame = 0usize;
@@ -233,6 +264,8 @@ async fn watch_activity(app: AppHandle) {
             ActivityState::Running
         } else if last_run_failed(&app) {
             ActivityState::Error
+        } else if pending_update(&app).is_some() {
+            ActivityState::UpdateAvailable
         } else {
             ActivityState::Ok
         };
@@ -241,6 +274,7 @@ async fn watch_activity(app: AppHandle) {
             let tooltip = match state {
                 ActivityState::Running => TOOLTIP_RUNNING,
                 ActivityState::Error => TOOLTIP_ERROR,
+                ActivityState::UpdateAvailable => TOOLTIP_UPDATE,
                 ActivityState::Ok => TOOLTIP_OK,
             };
             set_tray_tooltip(&app, tooltip);
@@ -256,6 +290,11 @@ async fn watch_activity(app: AppHandle) {
             }
             ActivityState::Error => {
                 set_tray_icon(&app, animation_frame(ERROR_BREATHE_FRAME_BYTES, frame));
+                frame = (frame + 1) % ANIMATION_FRAME_COUNT;
+                tokio::time::sleep(ANIMATION_FRAME_INTERVAL).await;
+            }
+            ActivityState::UpdateAvailable => {
+                set_tray_icon(&app, animation_frame(UPDATE_BREATHE_FRAME_BYTES, frame));
                 frame = (frame + 1) % ANIMATION_FRAME_COUNT;
                 tokio::time::sleep(ANIMATION_FRAME_INTERVAL).await;
             }
@@ -451,6 +490,11 @@ fn build_menu_from_remotes(app: &AppHandle, remotes: &[(String, RemoteActions)])
     let settings = MenuItem::with_id(app, SETTINGS_ID, "Impostazioni", true, None::<&str>)?;
     let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = vec![Box::new(show_hide), Box::new(settings)];
 
+    if let Some(version) = pending_update(app) {
+        items.push(Box::new(PredefinedMenuItem::separator(app)?));
+        items.push(Box::new(MenuItem::with_id(app, UPDATE_ID, format!("⬆ Aggiornamento disponibile: {version}"), true, None::<&str>)?));
+    }
+
     let warnings: Vec<(&str, String)> =
         remotes.iter().filter_map(|(remote_name, actions)| warning_label(remote_name, actions).map(|label| (remote_name.as_str(), label))).collect();
     if !warnings.is_empty() {
@@ -620,12 +664,20 @@ pub fn hide_window(app: AppHandle) {
     hide_main_window(&app);
 }
 
+/// Mostra direttamente il modal di aggiornamento se c'è un aggiornamento in
+/// sospeso quando la finestra passa da nascosta a visibile — richiesta
+/// esplicita di Simone (19/8/2026): non farlo scoprire solo aprendo
+/// l'app "a caso", visto che l'icona ambra nella tray già lo segnala.
+/// Nessun effetto se la finestra era già visibile (viene solo nascosta).
 fn toggle_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else { return };
     if window.is_visible().unwrap_or(false) {
         hide_main_window(app);
     } else {
         show_main_window(app);
+        if pending_update(app).is_some() {
+            let _ = app.emit(OPEN_UPDATE_EVENT, ());
+        }
     }
 }
 
@@ -663,4 +715,12 @@ fn focus_remote(app: &AppHandle, remote: &str, open_history: bool) {
 fn open_settings(app: &AppHandle) {
     show_main_window(app);
     let _ = app.emit(OPEN_SETTINGS_EVENT, ());
+}
+
+/// Porta la finestra in primo piano e chiede al frontend (`UpdateButton.svelte`,
+/// in ascolto su `OPEN_UPDATE_EVENT`) di aprire direttamente il modal di
+/// aggiornamento — voce "⬆ Aggiornamento disponibile" del menu della tray.
+fn open_update(app: &AppHandle) {
+    show_main_window(app);
+    let _ = app.emit(OPEN_UPDATE_EVENT, ());
 }

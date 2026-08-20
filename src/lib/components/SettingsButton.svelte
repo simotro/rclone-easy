@@ -329,13 +329,23 @@
           {#if s.status === "available"}
             {$t("update.newVersion", { values: { version: s.update.version } })}
           {/if}
+        {:else if updateState().status === "skipped"}
+          {@const s = updateState()}
+          {#if s.status === "skipped"}
+            {$t("update.versionSkipped", { values: { version: s.update.version } })}
+          {/if}
         {:else if updateState().status === "error"}
           {$t("update.checkFailed")}
         {:else}
           {$t("update.neverChecked")}
         {/if}
       </span>
-      <button type="button" class="link-button" onclick={checkForUpdates} disabled={updateState().status === "checking"}>
+      <button
+        type="button"
+        class="link-button"
+        onclick={() => checkForUpdates({ manual: true })}
+        disabled={updateState().status === "checking"}
+      >
         {$t("update.checkNow")}
       </button>
     </div>

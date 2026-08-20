@@ -37,6 +37,9 @@ use open_external::open_url_in_browser;
 mod installation;
 use installation::installation_kind;
 
+mod update_state;
+use update_state::{report_update_available, UpdateState};
+
 // xdg-desktop-portal è un concetto specifico dei desktop Linux (D-Bus) —
 // non ha senso su Windows/macOS, dove tra l'altro non esiste un bus di
 // sessione a cui connettersi (fallirebbe silenziosamente ad ogni avvio,
@@ -216,6 +219,7 @@ pub fn run() {
             };
             app.manage(rcd_state);
             app.manage(PendingOAuthAnswer::default());
+            app.manage(UpdateState::default());
             #[cfg(unix)]
             spawn_signal_shutdown_handler(app.handle().clone());
             tray::build_tray(app.handle());
@@ -307,7 +311,8 @@ pub fn run() {
             get_app_settings,
             set_start_minimized,
             open_url_in_browser,
-            installation_kind
+            installation_kind,
+            report_update_available
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
