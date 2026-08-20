@@ -289,6 +289,14 @@ async fn execute_sync(state: &RcdState, source: &str, destination: &str, propaga
                 // backend che non lo supportano (es. il lato locale), quindi
                 // è sicuro passarlo sempre.
                 "_config": { "UseListR": true },
+                // Esclude la cartella dei lock condivisi (remote_lock.rs)
+                // dal confronto — soprattutto per sync/sync (cancellazioni
+                // propagate): senza questo, un lock legittimo scritto da
+                // un'altra macchina apparirebbe come "file in più" nella
+                // destinazione e verrebbe cancellato, vanificando la
+                // protezione. Verificato empiricamente che questo filtro
+                // esclude davvero il contenuto della cartella.
+                "_filter": { "ExcludeRule": [crate::remote_lock::LOCK_FOLDER_EXCLUDE] },
             }),
         )
         .await?;
@@ -512,7 +520,23 @@ pub(crate) async fn run_job_by_name(config_dir: &Path, state: &RcdState, name: &
         }
     };
 
+    // Lock condiviso sul/sui remote coinvolti (vedi remote_lock.rs: più
+    // macchine diverse possono avere Rclone Easy configurato sullo stesso
+    // remote condiviso) — un conflitto restituisce subito `Err` senza
+    // toccare `history`, stesso principio di "il job è già in esecuzione su
+    // questa macchina" sopra: un'esecuzione automatica (scheduler/watcher,
+    // che scartano l'errore con `let _ =`) si limita a saltare questo giro.
+    let remotes: Vec<&str> = [remote_name_of(&job.source), remote_name_of(&job.destination)].into_iter().flatten().collect();
+    let locks = match crate::remote_lock::acquire_all(state, &remotes).await {
+        Ok(locks) => locks,
+        Err(e) => {
+            running_jobs().lock().unwrap().remove(name);
+            return Err(e);
+        }
+    };
+
     let result = execute_sync(state, &job.source, &job.destination, job.propagate_deletions).await;
+    crate::remote_lock::release_all(state, locks).await;
 
     let last_run = match &result {
         Ok(()) => LastRun { success: true, message: String::new(), when_unix: now_unix() },

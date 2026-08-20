@@ -94,7 +94,7 @@ async fn run_due_jobs<R: tauri::Runtime>(app: &AppHandle<R>, config_dir: &Path) 
                 // silenzio esattamente come il click manuale "Sincronizza
                 // ora" — vedi il commento su `bisync::execute_bisync`.
                 let password = crate::rcd::current_config_password(&state).await;
-                let _ = crate::bisync::run_bisync_job_by_name(&config_dir, password.as_deref(), &name).await;
+                let _ = crate::bisync::run_bisync_job_by_name(&config_dir, &state, password.as_deref(), &name).await;
             });
         }
     }

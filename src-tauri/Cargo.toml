@@ -1,6 +1,6 @@
 [package]
 name = "rclone-easy"
-version = "0.11.0"
+version = "0.12.0"
 description = "Un'interfaccia grafica semplice per rclone"
 authors = ["simotro"]
 license = "MIT"
@@ -35,6 +35,8 @@ tauri-plugin-single-instance = "2.4.3"
 tauri-plugin-autostart = "2"
 tauri-plugin-updater = "2"
 notify = "8.2.0"
+tempfile = "3"
+gethostname = "0.5"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

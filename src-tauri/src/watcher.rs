@@ -221,7 +221,7 @@ fn trigger_due(app: &AppHandle, config_dir: &Path) {
                     // in silenzio come qualunque altra esecuzione automatica
                     // — vedi lo stesso commento in scheduler.rs.
                     let password = crate::rcd::current_config_password(&state).await;
-                    let _ = crate::bisync::run_bisync_job_by_name(&config_dir, password.as_deref(), &name).await;
+                    let _ = crate::bisync::run_bisync_job_by_name(&config_dir, &state, password.as_deref(), &name).await;
                 }
             }
         });

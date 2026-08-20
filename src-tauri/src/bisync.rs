@@ -465,6 +465,12 @@ async fn run_bisync_subprocess(
         // sleep"). rclone lo ignora silenziosamente sui backend che non lo
         // supportano (es. il lato locale), quindi è sicuro passarlo sempre.
         "--fast-list".to_string(),
+        // Esclude la cartella dei lock condivisi (vedi remote_lock.rs) dal
+        // confronto — altrimenti finirebbe trattata come contenuto vero da
+        // sincronizzare tra i due lati, innocuo se `path2` non la contiene
+        // affatto.
+        "--exclude".to_string(),
+        crate::remote_lock::LOCK_FOLDER_EXCLUDE.to_string(),
     ];
     if resync {
         args.push("--resync".to_string());
@@ -717,12 +723,16 @@ fn is_job_dry_running(name: &str) -> bool {
 /// `config_password`: vedi il commento su `execute_bisync` — `None` se la
 /// config non è protetta. Non passa mai `--force` — vedi
 /// `run_bisync_job_by_name_forced` per l'unico punto d'ingresso che può.
+/// `state` serve solo per il lock condiviso sul remote (`remote_lock.rs`),
+/// non per l'esecuzione vera di bisync (un sottoprocesso diretto, non passa
+/// da rcd).
 pub(crate) async fn run_bisync_job_by_name(
     config_dir: &Path,
+    state: &RcdState,
     config_password: Option<&str>,
     name: &str,
 ) -> Result<BisyncRunResult, String> {
-    run_bisync_job_by_name_with_force(config_dir, config_password, name, false).await
+    run_bisync_job_by_name_with_force(config_dir, state, config_password, name, false).await
 }
 
 /// Come `run_bisync_job_by_name`, ma con `--force` — usata solo dal comando
@@ -733,14 +743,16 @@ pub(crate) async fn run_bisync_job_by_name(
 /// originale). Deve restare sempre un'azione manuale ed esplicita.
 pub(crate) async fn run_bisync_job_by_name_forced(
     config_dir: &Path,
+    state: &RcdState,
     config_password: Option<&str>,
     name: &str,
 ) -> Result<BisyncRunResult, String> {
-    run_bisync_job_by_name_with_force(config_dir, config_password, name, true).await
+    run_bisync_job_by_name_with_force(config_dir, state, config_password, name, true).await
 }
 
 async fn run_bisync_job_by_name_with_force(
     config_dir: &Path,
+    state: &RcdState,
     config_password: Option<&str>,
     name: &str,
     force: bool,
@@ -749,9 +761,36 @@ async fn run_bisync_job_by_name_with_force(
         return Err(format!("il job '{name}' è già in esecuzione"));
     }
 
-    let result = run_bisync_job_by_name_inner(config_dir, config_password, name, force).await;
+    let result = run_bisync_job_by_name_with_remote_lock(config_dir, state, config_password, name, force).await;
 
     running_jobs().lock().unwrap().remove(name);
+    result
+}
+
+/// Acquisisce il lock condiviso sul/sui remote coinvolti (vedi
+/// `remote_lock.rs`: più macchine diverse possono avere Rclone Easy
+/// configurato sullo stesso remote condiviso, es. un Google Drive di lavoro
+/// tenuto disponibile offline su più PC) prima di eseguire per davvero — un
+/// conflitto restituisce subito `Err` senza toccare `history`, stesso
+/// principio già in vigore un rigo sopra per "il job è già in esecuzione su
+/// questa macchina": un'esecuzione automatica (scheduler/watcher, che
+/// scartano l'errore con `let _ =`) si limita a saltare questo giro e
+/// riprovare al prossimo, un click manuale mostra il messaggio all'utente.
+async fn run_bisync_job_by_name_with_remote_lock(
+    config_dir: &Path,
+    state: &RcdState,
+    config_password: Option<&str>,
+    name: &str,
+    force: bool,
+) -> Result<BisyncRunResult, String> {
+    let jobs = load_from_dir(config_dir)?;
+    let job = jobs.iter().find(|j| j.name == name).ok_or_else(|| format!("nessun job bisync chiamato '{name}'"))?;
+    let remotes: Vec<&str> = job_remote_names(job).into_iter().flatten().collect();
+
+    let locks = crate::remote_lock::acquire_all(state, &remotes).await?;
+    let result = run_bisync_job_by_name_inner(config_dir, config_password, name, force).await;
+    crate::remote_lock::release_all(state, locks).await;
+
     result
 }
 
@@ -901,7 +940,7 @@ fn notify_conflicts_if_any(app: &AppHandle, name: &str, result: &BisyncRunResult
 pub async fn run_bisync_job(app: AppHandle, state: tauri::State<'_, RcdState>, name: String) -> Result<BisyncRunResult, String> {
     let config_dir = app_config_dir(&app)?;
     let password = crate::rcd::current_config_password(&state).await;
-    let result = run_bisync_job_by_name(&config_dir, password.as_deref(), &name).await?;
+    let result = run_bisync_job_by_name(&config_dir, &state, password.as_deref(), &name).await?;
     notify_conflicts_if_any(&app, &name, &result);
     Ok(result)
 }
@@ -916,7 +955,7 @@ pub async fn run_bisync_job(app: AppHandle, state: tauri::State<'_, RcdState>, n
 pub async fn run_bisync_job_forced(app: AppHandle, state: tauri::State<'_, RcdState>, name: String) -> Result<BisyncRunResult, String> {
     let config_dir = app_config_dir(&app)?;
     let password = crate::rcd::current_config_password(&state).await;
-    let result = run_bisync_job_by_name_forced(&config_dir, password.as_deref(), &name).await?;
+    let result = run_bisync_job_by_name_forced(&config_dir, &state, password.as_deref(), &name).await?;
     notify_conflicts_if_any(&app, &name, &result);
     Ok(result)
 }
@@ -1386,7 +1425,8 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(&jobs_dir.path).unwrap();
 
-        let result = run_bisync_job_by_name(&jobs_dir.path, None, "prova").await.unwrap();
+        let state = crate::rcd::build_state(jobs_dir.config_path()).await;
+        let result = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova").await.unwrap();
         assert!(result.success, "il resync dovrebbe riuscire: {result:?}");
 
         let path1_content = std::fs::read_to_string(path1_dir.path.join("documento.txt")).unwrap();
@@ -1417,12 +1457,13 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(&jobs_dir.path).unwrap();
 
-        let baseline = run_bisync_job_by_name(&jobs_dir.path, None, "prova-cartelle-vuote").await.unwrap();
+        let state = crate::rcd::build_state(jobs_dir.config_path()).await;
+        let baseline = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova-cartelle-vuote").await.unwrap();
         assert!(baseline.success, "il resync iniziale dovrebbe riuscire: {baseline:?}");
 
         std::fs::create_dir_all(path1_dir.path.join("cartella-vuota")).unwrap();
 
-        let result = run_bisync_job_by_name(&jobs_dir.path, None, "prova-cartelle-vuote").await.unwrap();
+        let result = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova-cartelle-vuote").await.unwrap();
         assert!(result.success, "{result:?}");
         assert!(
             path2_dir.path.join("cartella-vuota").is_dir(),
@@ -1462,14 +1503,15 @@ mod tests {
         // esista, il file stesso non serve (rclone usa i default se manca).
         std::fs::create_dir_all(&jobs_dir.path).unwrap();
 
-        let baseline = run_bisync_job_by_name(&jobs_dir.path, None, "prova").await.unwrap();
+        let state = crate::rcd::build_state(jobs_dir.config_path()).await;
+        let baseline = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova").await.unwrap();
         assert!(baseline.success, "il resync iniziale dovrebbe riuscire: {baseline:?}");
         assert!(!load_from_dir(&jobs_dir.path).unwrap()[0].needs_resync, "dopo un run riuscito non serve più resync");
 
         std::fs::write(path1_dir.path.join("documento.txt"), "versione lato 1").unwrap();
         std::fs::write(path2_dir.path.join("documento.txt"), "versione lato 2, più lunga delle altre").unwrap();
 
-        let result = run_bisync_job_by_name(&jobs_dir.path, None, "prova").await.unwrap();
+        let result = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova").await.unwrap();
         assert!(result.success, "un conflitto risolto da rclone non è un errore per noi: {result:?}");
         assert_eq!(result.conflict_paths.len(), 2, "un conflitto genera due copie rinominate: {result:?}");
 
@@ -1492,7 +1534,8 @@ mod tests {
     #[tokio::test]
     async fn run_bisync_job_fails_cleanly_for_an_unknown_job() {
         let dir = TempDir::new("bisync-run-unknown");
-        let result = run_bisync_job_by_name(&dir.path, None, "non-esiste").await;
+        let state = crate::rcd::build_state(dir.config_path()).await;
+        let result = run_bisync_job_by_name(&dir.path, &state, None, "non-esiste").await;
         assert!(result.is_err());
     }
 
@@ -1518,9 +1561,10 @@ mod tests {
         )
         .unwrap();
 
+        let state = crate::rcd::build_state(jobs_dir.config_path()).await;
         let (first, second) = tokio::join!(
-            run_bisync_job_by_name(&jobs_dir.path, None, "job-concorrenza-unico"),
-            run_bisync_job_by_name(&jobs_dir.path, None, "job-concorrenza-unico"),
+            run_bisync_job_by_name(&jobs_dir.path, &state, None, "job-concorrenza-unico"),
+            run_bisync_job_by_name(&jobs_dir.path, &state, None, "job-concorrenza-unico"),
         );
 
         assert!(first.is_ok(), "la prima delle due chiamate dovrebbe riuscire: {first:?}");
@@ -1558,7 +1602,8 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(&jobs_dir.path).unwrap();
 
-        let baseline = run_bisync_job_by_name(&jobs_dir.path, None, "prova-troppi-cancellati").await.unwrap();
+        let state = crate::rcd::build_state(jobs_dir.config_path()).await;
+        let baseline = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova-troppi-cancellati").await.unwrap();
         assert!(baseline.success, "il resync iniziale dovrebbe riuscire: {baseline:?}");
         assert_eq!(std::fs::read_dir(&path2_dir.path).unwrap().count(), 10, "la baseline deve aver copiato tutti i file su path2");
 
@@ -1567,7 +1612,7 @@ mod tests {
             std::fs::remove_file(path1_dir.path.join(format!("file{i}.txt"))).unwrap();
         }
 
-        let blocked = run_bisync_job_by_name(&jobs_dir.path, None, "prova-troppi-cancellati").await.unwrap();
+        let blocked = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova-troppi-cancellati").await.unwrap();
         assert!(!blocked.success, "una cancellazione di massa deve fermare il run, non propagarlo: {blocked:?}");
         assert!(blocked.needs_force, "questo fallimento specifico deve segnalare che serve --force: {blocked:?}");
         assert!(blocked.message.to_lowercase().contains("too many deletes"), "messaggio inatteso: {}", blocked.message);
@@ -1578,7 +1623,7 @@ mod tests {
             "path2 non deve aver perso file finché il run è bloccato dalla protezione"
         );
 
-        let forced = run_bisync_job_by_name_forced(&jobs_dir.path, None, "prova-troppi-cancellati").await.unwrap();
+        let forced = run_bisync_job_by_name_forced(&jobs_dir.path, &state, None, "prova-troppi-cancellati").await.unwrap();
         assert!(forced.success, "con --force il run deve completare: {forced:?}");
         assert_eq!(
             std::fs::read_dir(&path2_dir.path).unwrap().count(),

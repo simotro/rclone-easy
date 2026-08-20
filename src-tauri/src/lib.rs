@@ -49,6 +49,8 @@ use update_state::{report_update_available, UpdateState};
 #[cfg(target_os = "linux")]
 mod background_portal;
 
+mod remote_lock;
+
 mod jobs;
 use jobs::{create_job, delete_job, dry_run_job, list_jobs, run_job, update_job};
 
