@@ -2,7 +2,12 @@
   import type { Snippet } from "svelte";
   import { t } from "$lib/i18n";
 
-  let { open = $bindable(false), title, children }: { open: boolean; title: string; children: Snippet } = $props();
+  let {
+    open = $bindable(false),
+    title,
+    children,
+    elevated = false,
+  }: { open: boolean; title: string; children: Snippet; elevated?: boolean } = $props();
 
   function onKeydown(event: KeyboardEvent) {
     if (open && event.key === "Escape") open = false;
@@ -23,7 +28,7 @@
   soffrire di quella classe di bug.
 -->
 {#if open}
-  <div class="backdrop">
+  <div class="backdrop" class:elevated>
     <div class="dialog" role="dialog" aria-modal="true">
       <div class="header">
         <h2>{title}</h2>
@@ -45,6 +50,18 @@
   align-items: center;
   justify-content: center;
   background-color: rgba(0, 0, 0, 0.45);
+}
+
+/* Per un modal che può restare aperto SOPRA un altro (es. un avviso di
+   conferma che nidifica dentro un modal di configurazione già aperto) —
+   senza questo, due `.backdrop` con lo stesso z-index si contendono lo
+   stacking in base al solo ordine nel DOM: fragile, si rompe silenziosamente
+   se qualcuno riordina i componenti in futuro. Trovato con un test Playwright
+   reale (21/8/2026): il modal di avviso "home directory" del bisync esisteva
+   nel DOM ma i click venivano intercettati dal modal di configurazione
+   sottostante, che nel markup comparivano dopo e quindi vinceva lo stacking. */
+.backdrop.elevated {
+  z-index: 1100;
 }
 
 .dialog {

@@ -90,6 +90,15 @@
     "importingButton": "Importing…",
     "importButton": "Import selected"
   },
+  "trash": {
+    "openButton": "Trash",
+    "title": "Trash",
+    "loading": "Loading…",
+    "empty": "The trash is empty: no recently deleted or overwritten files.",
+    "removedOn": "Removed on {when}",
+    "restore": "Restore",
+    "restoring": "Restoring…"
+  },
   "remoteRow": {
     "backupRunning": "Backup in progress…",
     "backupFirstSoon": "First backup starting shortly",
@@ -155,6 +164,9 @@
     "propagateDeletionsWarningOffTitle": "If you don't turn it on:",
     "propagateDeletionsWarningOffBody": "files arrive and get updated in the destination, but nothing is ever deleted automatically, even if it disappears from the source — the destination can only accumulate, never lose data through an automatic sync.",
     "understoodEnable": "Got it, enable it",
+    "dangerousPathRootError": "This is the filesystem root: choose a more specific subfolder.",
+    "dangerousPathHomeWarning": "You picked your entire home folder ({path}). That's a legitimate full backup pattern, but it covers all your personal files: a configuration mistake here (e.g. \"Propagate deletions\" turned on by accident) would have a much bigger impact than a specific subfolder.",
+    "dangerousPathHomeConfirm": "Got it, use this folder anyway",
     "bisyncTitle": "Two-way sync — {remote}",
     "bisyncFirstRunHint": "On the very first run, if a file with the same name but different content already exists on both sides, the more recently modified version is taken as the reference.",
     "needsResyncHint": "The next run will include a new resync (baseline).",
@@ -162,6 +174,11 @@
     "noVersionLost": "No version was lost: both were saved with a conflict suffix.",
     "showDetailedLog": "Show detailed log",
     "hideDetailedLog": "Hide detailed log",
+    "showTransfersCount": "Show {count} files involved",
+    "transferWhatTransferring": "copied",
+    "transferWhatDeleting": "deleted",
+    "transferWhatMoving": "moved",
+    "transferWhatRenaming": "renamed",
     "copyLog": "Copy",
     "logCopied": "Copied",
     "runWithForce": "Run anyway (--force)",

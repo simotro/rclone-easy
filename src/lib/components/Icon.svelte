@@ -1,5 +1,9 @@
 <script lang="ts">
-  let { kind }: { kind: "mount" | "backup" | "bisync" | "edit" | "delete" | "eye" | "eye-off" | "quit" | "copy" | "settings" | "add" } = $props();
+  let {
+    kind,
+  }: {
+    kind: "mount" | "backup" | "bisync" | "edit" | "delete" | "eye" | "eye-off" | "quit" | "copy" | "settings" | "add" | "trash" | "restore";
+  } = $props();
 </script>
 
 {#if kind === "mount"}
@@ -62,6 +66,17 @@
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
     <line x1="12" y1="5" x2="12" y2="19" />
     <line x1="5" y1="12" x2="19" y2="12" />
+  </svg>
+{:else if kind === "trash"}
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="3 6 5 6 21 6" />
+    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+    <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+  </svg>
+{:else if kind === "restore"}
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 12a9 9 0 1 0 3-6.7" />
+    <polyline points="3 4 3 9 8 9" />
   </svg>
 {:else if kind === "quit"}
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">

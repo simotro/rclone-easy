@@ -21,7 +21,8 @@ export type DryRunReport = {
   whenUnix: number;
 };
 
-export type RunEntry = { success: boolean; message: string; whenUnix: number };
+export type TransferEvent = { name: string; what: string; error: string };
+export type RunEntry = { success: boolean; message: string; whenUnix: number; transfers: TransferEvent[] };
 export type SyncJob = {
   name: string;
   source: string;
@@ -50,6 +51,13 @@ export type BisyncDryRunReport = {
   wouldDelete: number;
   log: string;
   whenUnix: number;
+};
+
+export type TrashEntry = {
+  trashPath: string;
+  originalPath: string;
+  whenUnix: number;
+  size: number;
 };
 
 export type BisyncJob = {

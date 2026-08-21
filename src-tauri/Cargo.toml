@@ -1,6 +1,6 @@
 [package]
 name = "rclone-easy"
-version = "0.12.0"
+version = "0.13.0"
 description = "Un'interfaccia grafica semplice per rclone"
 authors = ["simotro"]
 license = "MIT"

@@ -4,12 +4,36 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
+/// Un singolo file toccato da un run vero (non da un dry-run) — colma
+/// l'asimmetria rispetto a bisync, che ha sempre avuto un log dettagliato:
+/// prima di questo, `LastRun` diceva solo successo/fallimento aggregato,
+/// senza dire QUALI file fossero stati coinvolti. Letto da `core/transferred`
+/// (RC), non da un log testuale come bisync: qui il dato arriva già
+/// strutturato, niente parsing di righe di log da fare.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferEvent {
+    pub name: String,
+    /// Valore grezzo di rclone: "transferring", "deleting", "moving",
+    /// "renaming", "checking"… — tradotto in etichette leggibili solo nel
+    /// frontend (i18n), qui tenuto così com'è per non dover tenere un
+    /// elenco delle varianti possibili sincronizzato in due posti.
+    pub what: String,
+    /// Vuoto se il singolo trasferimento è riuscito.
+    pub error: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LastRun {
     pub success: bool,
     pub message: String,
     pub when_unix: u64,
+    /// Elenco per-file di quel run — vuoto per le voci scritte da versioni
+    /// precedenti dell'app (`#[serde(default)]`), non solo per un run senza
+    /// alcun trasferimento reale.
+    #[serde(default)]
+    pub transfers: Vec<TransferEvent>,
 }
 
 /// Job di sincronizzazione monodirezionale (`rclone sync`, via RC
@@ -177,6 +201,24 @@ fn ensure_remotes_not_already_backed_up(
     Ok(())
 }
 
+/// Rifiuta sempre, senza eccezioni, un backup con sorgente o destinazione
+/// pari alla radice del filesystem locale (`/`, `C:\`…) — a differenza della
+/// home directory intera (pattern di backup legittimo, gestito solo con un
+/// avviso di conferma lato frontend, non bloccato qui), non esiste un caso
+/// d'uso legittimo per sincronizzare l'intera radice con quest'app: decisione
+/// presa con Simone il 21/8/2026. Il frontend (`path_safety::check_dangerous_path`)
+/// intercetta già il caso all'atto della scelta della cartella per una UX
+/// migliore, ma il blocco vero è qui: l'unico punto che nessuna UI può
+/// aggirare.
+fn ensure_not_filesystem_root(source: &str, destination: &str) -> Result<(), String> {
+    for (label, fs) in [("la sorgente", source), ("la destinazione", destination)] {
+        if crate::path_safety::is_filesystem_root(fs) {
+            return Err(format!("{label} scelta ('{fs}') è la radice del filesystem: scegli una sottocartella più specifica"));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn create_job_in(
     config_dir: &Path,
     name: &str,
@@ -185,6 +227,7 @@ pub(crate) fn create_job_in(
     auto_interval_minutes: Option<u32>,
     propagate_deletions: bool,
 ) -> Result<(), String> {
+    ensure_not_filesystem_root(source, destination)?;
     let mut jobs = load_from_dir(config_dir)?;
     if jobs.iter().any(|j| j.name == name) {
         return Err(format!("esiste già un job chiamato '{name}': scegli un altro nome"));
@@ -214,6 +257,7 @@ fn update_job_in(
     auto_interval_minutes: Option<u32>,
     propagate_deletions: bool,
 ) -> Result<(), String> {
+    ensure_not_filesystem_root(source, destination)?;
     let mut jobs = load_from_dir(config_dir)?;
     if name != old_name && jobs.iter().any(|j| j.name == name) {
         return Err(format!("esiste già un job chiamato '{name}': scegli un altro nome"));
@@ -252,6 +296,77 @@ pub(crate) fn push_history<T>(history: &mut Vec<T>, entry: T) {
     history.truncate(HISTORY_LIMIT);
 }
 
+/// Quanti file della destinazione un run con cancellazioni abilitate può
+/// arrivare a cancellare prima che rclone stesso si fermi (`MaxDelete` via
+/// RC, equivalente di `--max-delete`) — metà del totale attuale, stessa
+/// soglia usata nativamente da bisync ("too many deletes (>50%...)"), per un
+/// comportamento coerente tra i due tipi di job. Verificato empiricamente
+/// (21/8/2026) che senza `MaxDelete` `sync/sync` cancella il 100% della
+/// destinazione senza alcun avviso, a differenza di bisync che si blocca da
+/// solo — questa era una lacuna reale, non ipotetica. `"directory not
+/// found"` è trattato come destinazione vuota (0 file, quindi nessuna
+/// cancellazione possibile comunque) invece di un errore: capita al primo
+/// run di un backup verso una destinazione che ancora non esiste, e non deve
+/// far fallire il job. Qualunque altro errore invece si propaga: se non
+/// possiamo contare la destinazione in modo affidabile non ha senso indovinare
+/// una soglia, e la sync stessa incontrerà a breve lo stesso problema.
+async fn max_delete_for(info: &crate::rcd::ConnectionInfo, destination: &str) -> Result<i64, String> {
+    match count_files(info, destination).await {
+        Ok(count) => Ok(((count as f64) * 0.5).ceil() as i64),
+        Err(e) if e.contains("directory not found") => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+/// Esito di un run vero (non di un dry-run): a differenza di un semplice
+/// `Result<(), String>`, un fallimento riportato da rclone stesso (job
+/// finito ma con errore) resta qui dentro con `success: false`, non in un
+/// `Err` — permette di allegare `transfers` anche a un run fallito (può
+/// essere fallito a metà, con alcuni file già toccati prima dell'errore).
+/// `Err` da `execute_sync` resta riservato solo a un'impossibilità di
+/// eseguire il tentativo stesso (rcd irraggiungibile, risposta malformata),
+/// stesso principio già usato da `bisync::execute_bisync`/`BisyncRunResult`.
+pub(crate) struct SyncOutcome {
+    pub success: bool,
+    pub message: String,
+    pub transfers: Vec<TransferEvent>,
+}
+
+fn extract_transferred(body: &serde_json::Value) -> Vec<TransferEvent> {
+    body.get("transferred")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let name = item.get("name")?.as_str()?.to_string();
+                    let what = item.get("what").and_then(|w| w.as_str()).unwrap_or("").to_string();
+                    let error = item.get("error").and_then(|e| e.as_str()).unwrap_or("").to_string();
+                    Some(TransferEvent { name, what, error })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Elenco per-file di un job finito, via `core/transferred` (RC) filtrato
+/// sul gruppo di quel job (`job/{id}`, stesso raggruppamento già usato per
+/// `core/stats` nel dry-run) — a differenza di `core/stats`, che dà solo
+/// conteggi aggregati, questo endpoint elenca ogni singolo trasferimento/
+/// cancellazione completato (fino agli ultimi 100, limite imposto da rclone
+/// stesso, non da questa app). Verificato empiricamente (21/8/2026) contro
+/// un demone rcd reale: filtrare per gruppo isola correttamente solo i file
+/// di quel job specifico. Best effort: un errore qui (RC irraggiungibile nel
+/// brevissimo intervallo tra la fine del job e questa chiamata) non deve far
+/// sembrare fallito un run altrimenti riuscito — restituisce semplicemente
+/// una lista vuota.
+async fn fetch_transfer_events(info: &crate::rcd::ConnectionInfo, job_id: i64) -> Vec<TransferEvent> {
+    match info.call("core/transferred", serde_json::json!({ "group": format!("job/{job_id}") })).await {
+        Ok(body) => extract_transferred(&body),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Esegue `sync/copy` o `sync/sync` in modalità asincrona (`_async: true`) e
 /// segue l'esito con `job/status` finché non è `finished` — una sync può
 /// durare a lungo (trasferimenti grossi), va lanciata così invece che in
@@ -265,10 +380,37 @@ pub(crate) fn push_history<T>(history: &mut Vec<T>, entry: T) {
 /// default sicuro — vedi il commento su `SyncJob::propagate_deletions` per
 /// il motivo (una sorgente vuota per errore/disco scollegato non deve
 /// poter svuotare la destinazione).
-async fn execute_sync(state: &RcdState, source: &str, destination: &str, propagate_deletions: bool) -> Result<(), String> {
+async fn execute_sync(state: &RcdState, source: &str, destination: &str, propagate_deletions: bool) -> Result<SyncOutcome, String> {
     let info = rcd::connection_info(state).await?;
 
     let endpoint = if propagate_deletions { "sync/sync" } else { "sync/copy" };
+    let mut config = serde_json::json!({
+        // Equivalente RC di `--fast-list`: un solo listing ricorsivo
+        // invece di una chiamata per sottocartella — su Google Drive
+        // (~1600 sottocartelle in un caso reale) porta un run "a
+        // vuoto" da oltre 2 minuti a ~10 secondi, verificato
+        // empiricamente. rclone lo ignora silenziosamente sui
+        // backend che non lo supportano (es. il lato locale), quindi
+        // è sicuro passarlo sempre.
+        "UseListR": true,
+    });
+    // Invece di cancellare/sovrascrivere per sempre, rclone sposta ciò che
+    // verrebbe perso in un "cestino" fratello della destinazione (trash.rs)
+    // — recuperabile dalla UI. Si applica sia a sync/copy (protegge dagli
+    // overwrite silenziosi) sia a sync/sync (protegge anche dalle
+    // cancellazioni). `None` solo nel caso limite di una destinazione già
+    // radice (vedi `trash::trash_fs_for`): il job procede comunque, solo
+    // senza questa protezione aggiuntiva. Verificato empiricamente
+    // (21/8/2026) contro un demone rcd reale.
+    if let Some(trash_fs) = crate::trash::trash_fs_for(destination) {
+        config["BackupDir"] = serde_json::json!(trash_fs);
+        config["Suffix"] = serde_json::json!(crate::trash::trash_suffix(now_unix()));
+        config["SuffixKeepExtension"] = serde_json::json!(true);
+    }
+    if propagate_deletions {
+        config["MaxDelete"] = serde_json::json!(max_delete_for(&info, destination).await?);
+    }
+
     // Le cartelle vuote della sorgente vengono comunque create nella
     // destinazione — senza questo, `sync/copy`/`sync/sync` le ignorano del
     // tutto, anche se esistono davvero in sorgente (comportamento di
@@ -281,21 +423,17 @@ async fn execute_sync(state: &RcdState, source: &str, destination: &str, propaga
                 "dstFs": destination,
                 "createEmptySrcDirs": true,
                 "_async": true,
-                // Equivalente RC di `--fast-list`: un solo listing ricorsivo
-                // invece di una chiamata per sottocartella — su Google Drive
-                // (~1600 sottocartelle in un caso reale) porta un run "a
-                // vuoto" da oltre 2 minuti a ~10 secondi, verificato
-                // empiricamente. rclone lo ignora silenziosamente sui
-                // backend che non lo supportano (es. il lato locale), quindi
-                // è sicuro passarlo sempre.
-                "_config": { "UseListR": true },
+                "_config": config,
                 // Esclude la cartella dei lock condivisi (remote_lock.rs)
                 // dal confronto — soprattutto per sync/sync (cancellazioni
                 // propagate): senza questo, un lock legittimo scritto da
                 // un'altra macchina apparirebbe come "file in più" nella
                 // destinazione e verrebbe cancellato, vanificando la
                 // protezione. Verificato empiricamente che questo filtro
-                // esclude davvero il contenuto della cartella.
+                // esclude davvero il contenuto della cartella. Il cestino
+                // (trash.rs) non ha bisogno di un'esclusione analoga: è una
+                // cartella fratella della destinazione, non annidata al suo
+                // interno, quindi non entra mai nel confronto.
                 "_filter": { "ExcludeRule": [crate::remote_lock::LOCK_FOLDER_EXCLUDE] },
             }),
         )
@@ -310,15 +448,18 @@ async fn execute_sync(state: &RcdState, source: &str, destination: &str, propaga
         let finished = status.get("finished").and_then(|v| v.as_bool()).unwrap_or(false);
         if finished {
             let success = status.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-            if success {
-                return Ok(());
-            }
-            let error = status
-                .get("error")
-                .and_then(|v| v.as_str())
-                .filter(|e| !e.is_empty())
-                .unwrap_or("errore sconosciuto durante la sincronizzazione");
-            return Err(error.to_string());
+            let message = if success {
+                String::new()
+            } else {
+                status
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or("errore sconosciuto durante la sincronizzazione")
+                    .to_string()
+            };
+            let transfers = fetch_transfer_events(&info, job_id).await;
+            return Ok(SyncOutcome { success, message, transfers });
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -536,11 +677,20 @@ pub(crate) async fn run_job_by_name(config_dir: &Path, state: &RcdState, name: &
     };
 
     let result = execute_sync(state, &job.source, &job.destination, job.propagate_deletions).await;
+    if matches!(&result, Ok(outcome) if outcome.success) {
+        // Best effort: pulisce le voci del cestino più vecchie della
+        // finestra di conservazione (trash.rs). Non blocca né fa fallire il
+        // job se qualcosa va storto — vedi il commento su
+        // `cleanup_old_entries_in`.
+        crate::trash::cleanup_old_entries_in(state, &job.destination).await;
+    }
     crate::remote_lock::release_all(state, locks).await;
 
     let last_run = match &result {
-        Ok(()) => LastRun { success: true, message: String::new(), when_unix: now_unix() },
-        Err(e) => LastRun { success: false, message: e.clone(), when_unix: now_unix() },
+        Ok(outcome) => {
+            LastRun { success: outcome.success, message: outcome.message.clone(), when_unix: now_unix(), transfers: outcome.transfers.clone() }
+        }
+        Err(e) => LastRun { success: false, message: e.clone(), when_unix: now_unix(), transfers: Vec::new() },
     };
     if let Some(stored) = jobs.iter_mut().find(|j| j.name == name) {
         push_history(&mut stored.history, last_run);
@@ -550,7 +700,15 @@ pub(crate) async fn run_job_by_name(config_dir: &Path, state: &RcdState, name: &
     running_jobs().lock().unwrap().remove(name);
 
     save_result?;
-    result
+    // Riconverte in `Result<(), String>`: `execute_sync` non usa più `Err`
+    // per un job che ha semplicemente fallito (vedi il commento su
+    // `SyncOutcome`), ma il contratto pubblico di questa funzione resta lo
+    // stesso di sempre.
+    match result {
+        Ok(outcome) if outcome.success => Ok(()),
+        Ok(outcome) => Err(outcome.message),
+        Err(e) => Err(e),
+    }
 }
 
 fn app_config_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -644,6 +802,27 @@ mod tests {
     use crate::rcd::tests::TempDir;
 
     #[test]
+    fn extract_transferred_reads_name_what_and_error_from_each_entry() {
+        let body = serde_json::json!({
+            "transferred": [
+                { "name": "foto.jpg", "what": "transferring", "error": "" },
+                { "name": "vecchio.txt", "what": "deleting", "error": "" },
+                { "name": "rotto.bin", "what": "transferring", "error": "connessione interrotta" }
+            ]
+        });
+        let events = extract_transferred(&body);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0], TransferEvent { name: "foto.jpg".to_string(), what: "transferring".to_string(), error: String::new() });
+        assert_eq!(events[1].what, "deleting");
+        assert_eq!(events[2].error, "connessione interrotta");
+    }
+
+    #[test]
+    fn extract_transferred_is_empty_when_the_field_is_missing() {
+        assert_eq!(extract_transferred(&serde_json::json!({})), Vec::new());
+    }
+
+    #[test]
     fn push_history_inserts_most_recent_first_and_truncates_at_the_limit() {
         let mut history: Vec<u32> = Vec::new();
         for i in 0..25 {
@@ -706,6 +885,23 @@ mod tests {
         let dir = TempDir::new("jobs-different-remotes");
         create_job_in(&dir.path, "uno", "/locale-a", "cubbit:x", None, false).unwrap();
         assert!(create_job_in(&dir.path, "due", "/locale-b", "wasabi:y", None, false).is_ok());
+    }
+
+    #[test]
+    fn create_job_rejects_the_filesystem_root_as_source_or_destination() {
+        let dir = TempDir::new("jobs-reject-root");
+        assert!(create_job_in(&dir.path, "prova-src", "/", "/qualcosa", None, false).is_err());
+        assert!(create_job_in(&dir.path, "prova-dst", "/qualcosa", "/", None, false).is_err());
+        assert_eq!(load_from_dir(&dir.path).unwrap(), Vec::new(), "nessuno dei due job deve essere stato salvato");
+    }
+
+    #[test]
+    fn update_job_rejects_moving_onto_the_filesystem_root() {
+        let dir = TempDir::new("jobs-update-reject-root");
+        create_job_in(&dir.path, "prova", "/a", "/b", None, false).unwrap();
+        let result = update_job_in(&dir.path, "prova", "prova", "/", "/b", None, false);
+        assert!(result.is_err());
+        assert_eq!(load_from_dir(&dir.path).unwrap()[0].source, "/a", "la voce originale non deve essere stata toccata");
     }
 
     #[test]
@@ -821,6 +1017,43 @@ mod tests {
         let last_run = jobs[0].history.first().expect("la cronologia dovrebbe contenere l'esecuzione appena fatta");
         assert!(last_run.success);
         assert_eq!(last_run.message, "");
+    }
+
+    /// Verifica la protezione aggiunta il 21/8/2026: la cronologia del
+    /// backup non deve più dire solo "successo/fallimento", ma anche QUALI
+    /// file sono stati coinvolti — colma l'asimmetria rispetto a bisync, che
+    /// aveva già un log dettagliato mentre il backup aveva solo un esito
+    /// aggregato.
+    #[tokio::test]
+    async fn run_job_records_which_files_were_transferred() {
+        let rcd_dir = TempDir::new("jobs-transfers-rcd");
+        let jobs_dir = TempDir::new("jobs-transfers-jobs");
+        let source_dir = TempDir::new("jobs-transfers-source");
+        let dest_dir = TempDir::new("jobs-transfers-dest");
+        std::fs::create_dir_all(&source_dir.path).unwrap();
+        std::fs::create_dir_all(&dest_dir.path).unwrap();
+        std::fs::write(source_dir.path.join("nuovo.txt"), "contenuto").unwrap();
+
+        let state = rcd::build_state(rcd_dir.config_path()).await;
+        create_job_in(
+            &jobs_dir.path,
+            "prova-transfers",
+            &source_dir.path.to_string_lossy(),
+            &dest_dir.path.to_string_lossy(),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let result = run_job_by_name(&jobs_dir.path, &state, "prova-transfers").await;
+        assert!(result.is_ok(), "la sync dovrebbe riuscire: {result:?}");
+
+        let jobs = load_from_dir(&jobs_dir.path).unwrap();
+        let last_run = jobs[0].history.first().unwrap();
+        assert_eq!(last_run.transfers.len(), 1, "dovrebbe esserci esattamente un file trasferito: {:?}", last_run.transfers);
+        assert_eq!(last_run.transfers[0].name, "nuovo.txt");
+        assert_eq!(last_run.transfers[0].what, "transferring");
+        assert_eq!(last_run.transfers[0].error, "");
     }
 
     #[tokio::test]
@@ -1046,6 +1279,82 @@ mod tests {
         assert!(jobs[0].history.iter().all(|h| h.success));
     }
 
+    /// Verifica la protezione aggiunta il 21/8/2026: con `propagate_deletions`
+    /// un file rimosso dalla destinazione non deve sparire per sempre, ma
+    /// finire in un cestino "fratello" della destinazione (trash.rs),
+    /// recuperabile. Trovato empiricamente che senza questa protezione
+    /// `sync/sync` cancellava per sempre senza alcun avviso.
+    #[tokio::test]
+    async fn run_job_with_propagate_deletions_moves_removed_files_to_a_trash_sibling_instead_of_deleting_them() {
+        let rcd_dir = TempDir::new("jobs-trash-rcd");
+        let jobs_dir = TempDir::new("jobs-trash-jobs");
+        let source_dir = TempDir::new("jobs-trash-source");
+        let dest_dir = TempDir::new("jobs-trash-dest");
+        std::fs::create_dir_all(&source_dir.path).unwrap();
+        std::fs::create_dir_all(&dest_dir.path).unwrap();
+        std::fs::write(dest_dir.path.join("da-rimuovere.txt"), "contenuto importante").unwrap();
+
+        let state = rcd::build_state(rcd_dir.config_path()).await;
+        create_job_in(
+            &jobs_dir.path,
+            "prova-trash",
+            &source_dir.path.to_string_lossy(),
+            &dest_dir.path.to_string_lossy(),
+            None,
+            true,
+        )
+        .unwrap();
+
+        let result = run_job_by_name(&jobs_dir.path, &state, "prova-trash").await;
+        assert!(result.is_ok(), "il mirror dovrebbe riuscire: {result:?}");
+        assert!(!dest_dir.path.join("da-rimuovere.txt").exists(), "il file deve sparire dalla destinazione");
+
+        let trash_dir = dest_dir
+            .path
+            .parent()
+            .unwrap()
+            .join(format!(".rclone-easy-trash-{}", dest_dir.path.file_name().unwrap().to_string_lossy()));
+        let entries: Vec<_> = std::fs::read_dir(&trash_dir)
+            .unwrap_or_else(|e| panic!("il cestino dovrebbe esistere in '{}': {e}", trash_dir.display()))
+            .collect();
+        assert_eq!(entries.len(), 1, "il file cancellato dovrebbe essere finito nel cestino invece di sparire per sempre");
+    }
+
+    /// Verifica la protezione aggiunta il 21/8/2026: senza `MaxDelete`,
+    /// verificato empiricamente che `sync/sync` cancella il 100% della
+    /// destinazione senza fermarsi. Con la sorgente vuota e 10 file in
+    /// destinazione, un mirror ne cancellerebbe tutti e 10 (100% > 50%) — il
+    /// run deve fermarsi prima, lasciandone qualcuno.
+    #[tokio::test]
+    async fn run_job_with_propagate_deletions_refuses_to_delete_more_than_half_the_destination() {
+        let rcd_dir = TempDir::new("jobs-maxdelete-rcd");
+        let jobs_dir = TempDir::new("jobs-maxdelete-jobs");
+        let source_dir = TempDir::new("jobs-maxdelete-source");
+        let dest_dir = TempDir::new("jobs-maxdelete-dest");
+        std::fs::create_dir_all(&source_dir.path).unwrap();
+        std::fs::create_dir_all(&dest_dir.path).unwrap();
+        for i in 0..10 {
+            std::fs::write(dest_dir.path.join(format!("file{i}.txt")), "x").unwrap();
+        }
+
+        let state = rcd::build_state(rcd_dir.config_path()).await;
+        create_job_in(
+            &jobs_dir.path,
+            "prova-maxdelete",
+            &source_dir.path.to_string_lossy(),
+            &dest_dir.path.to_string_lossy(),
+            None,
+            true,
+        )
+        .unwrap();
+
+        let result = run_job_by_name(&jobs_dir.path, &state, "prova-maxdelete").await;
+        assert!(result.is_err(), "il run dovrebbe fermarsi prima di cancellare più della soglia: {result:?}");
+
+        let remaining = std::fs::read_dir(&dest_dir.path).unwrap().count();
+        assert!(remaining > 0, "non tutti i file dovrebbero essere stati cancellati: ne restano {remaining}");
+    }
+
     /// Prova che `execute_sync` non tenga il lock su `RcdState` durante
     /// l'attesa del job — se lo tenesse, la chiamata concorrente a
     /// `rcd::call` qui sotto si bloccherebbe fino al termine della sync
@@ -1078,7 +1387,9 @@ mod tests {
 
         let outcome = tokio::time::timeout(Duration::from_secs(10), sync_task).await;
         assert!(outcome.is_ok(), "la sync dovrebbe comunque completarsi");
-        assert!(outcome.unwrap().unwrap().is_ok());
+        let sync_result = outcome.unwrap().unwrap();
+        assert!(sync_result.is_ok());
+        assert!(sync_result.unwrap().success);
     }
 
     /// `tokio::join!` polla i due futuri sullo stesso task, in ordine: il

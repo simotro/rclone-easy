@@ -7,8 +7,9 @@
   import StatusDot from "./StatusDot.svelte";
   import RemoteFolderPicker from "./RemoteFolderPicker.svelte";
   import LogView from "./LogView.svelte";
+  import TrashView from "./TrashView.svelte";
   import { now, formatCountdown, nextRunAtMs } from "$lib/now";
-  import type { MountEntry, SyncJob, BisyncJob, BisyncRunEntry } from "$lib/types";
+  import type { MountEntry, SyncJob, BisyncJob, BisyncRunEntry, TransferEvent } from "$lib/types";
   import { t } from "$lib/i18n";
 
   let {
@@ -102,6 +103,27 @@
     return new Date(whenUnix * 1000).toLocaleString();
   }
 
+  // Traduce l'elenco strutturato di TransferEvent (jobs.rs, da
+  // `core/transferred`) in testo leggibile per `LogView`, stesso componente
+  // già usato per il log grezzo di bisync — qui il dato arriva già
+  // strutturato (niente parsing di righe di log), quindi la formattazione è
+  // solo cosmetica. `what` non tradotto ricade sul valore grezzo di rclone,
+  // così un valore nuovo/inatteso resta comunque leggibile invece di sparire.
+  function formatTransfers(transfers: TransferEvent[]): string {
+    const labels: Record<string, string> = {
+      transferring: $t("remoteRow.transferWhatTransferring"),
+      deleting: $t("remoteRow.transferWhatDeleting"),
+      moving: $t("remoteRow.transferWhatMoving"),
+      renaming: $t("remoteRow.transferWhatRenaming"),
+    };
+    return transfers
+      .map((event) => {
+        const label = labels[event.what] ?? event.what;
+        return event.error ? `${label}: ${event.name} — ${event.error}` : `${label}: ${event.name}`;
+      })
+      .join("\n");
+  }
+
   // Conto alla rovescia verso la prossima esecuzione automatica — solo per
   // backup/bisync (il mount non ha un "prossimo giro", resta montato finché
   // non lo si smonta), e solo per il servizio effettivamente attivo: la
@@ -132,6 +154,8 @@
   let mountModalOpen = $state(false);
   let backupModalOpen = $state(false);
   let bisyncModalOpen = $state(false);
+  let backupTrashOpen = $state(false);
+  let bisyncTrashOpen = $state(false);
   let historyModalOpen = $state(false);
 
   let rootEl: HTMLLIElement | undefined = $state();
@@ -390,6 +414,14 @@
   let backupWasActiveOnOpen = $state(false);
   let propagateDeletionsWarningOpen = $state(false);
   let backupFormRemotePath = $state("");
+  // Percorso pericoloso (path_safety.rs): la radice del filesystem è
+  // rifiutata subito (errore inline, non selezionabile in nessun caso),
+  // la home directory intera è un pattern di backup legittimo ma insolito
+  // — passa da un avviso di conferma, stesso principio già usato per
+  // "Propaga cancellazioni" più sotto.
+  let backupPathRootError = $state<string | null>(null);
+  let backupHomeWarningOpen = $state(false);
+  let pendingBackupHomePath: string | null = $state(null);
 
   function directionOf(job: SyncJob): Direction {
     return job.source.startsWith(prefix) ? "fromRemote" : "toRemote";
@@ -421,12 +453,36 @@
     backupError = null;
     backupRunResult = null;
     backupFormDryRun = false;
+    backupPathRootError = null;
     backupModalOpen = true;
   }
 
   async function pickBackupFolder() {
     const selected = await openFolderDialog({ directory: true, multiple: false, title: $t("remoteRow.chooseFolderDialogTitle") });
-    if (typeof selected === "string") backupFormLocalPath = selected;
+    if (typeof selected !== "string") return;
+    backupPathRootError = null;
+    const risk = await invoke<string | null>("check_dangerous_path", { path: selected });
+    if (risk === "root") {
+      backupPathRootError = $t("remoteRow.dangerousPathRootError");
+      return;
+    }
+    if (risk === "home") {
+      pendingBackupHomePath = selected;
+      backupHomeWarningOpen = true;
+      return;
+    }
+    backupFormLocalPath = selected;
+  }
+
+  function confirmBackupHomePath() {
+    if (pendingBackupHomePath) backupFormLocalPath = pendingBackupHomePath;
+    pendingBackupHomePath = null;
+    backupHomeWarningOpen = false;
+  }
+
+  function cancelBackupHomePath() {
+    pendingBackupHomePath = null;
+    backupHomeWarningOpen = false;
   }
 
   // Il checkbox non spunta mai da solo: attivare "Propaga cancellazioni" è
@@ -556,6 +612,10 @@
   // chiave (whenUnix) della singola voce aperta, non un booleano — al più
   // una alla volta, cliccarne un'altra chiude la precedente.
   let expandedHistoryEntryKey = $state<number | null>(null);
+  // Stesso principio dell'analogo lato backup, vedi lì per il perché.
+  let bisyncPathRootError = $state<string | null>(null);
+  let bisyncHomeWarningOpen = $state(false);
+  let pendingBisyncHomePath: string | null = $state(null);
 
   function bisyncLocalPathOf(job: BisyncJob): string {
     return job.path1.startsWith(prefix) ? job.path2 : job.path1;
@@ -581,12 +641,36 @@
     bisyncRunResult = null;
     bisyncDetailsExpanded = false;
     bisyncFormDryRun = false;
+    bisyncPathRootError = null;
     bisyncModalOpen = true;
   }
 
   async function pickBisyncFolder() {
     const selected = await openFolderDialog({ directory: true, multiple: false, title: $t("remoteRow.chooseFolderDialogTitle") });
-    if (typeof selected === "string") bisyncFormLocalPath = selected;
+    if (typeof selected !== "string") return;
+    bisyncPathRootError = null;
+    const risk = await invoke<string | null>("check_dangerous_path", { path: selected });
+    if (risk === "root") {
+      bisyncPathRootError = $t("remoteRow.dangerousPathRootError");
+      return;
+    }
+    if (risk === "home") {
+      pendingBisyncHomePath = selected;
+      bisyncHomeWarningOpen = true;
+      return;
+    }
+    bisyncFormLocalPath = selected;
+  }
+
+  function confirmBisyncHomePath() {
+    if (pendingBisyncHomePath) bisyncFormLocalPath = pendingBisyncHomePath;
+    pendingBisyncHomePath = null;
+    bisyncHomeWarningOpen = false;
+  }
+
+  function cancelBisyncHomePath() {
+    pendingBisyncHomePath = null;
+    bisyncHomeWarningOpen = false;
   }
 
   // Stesso principio di persistBackup: salva sempre il form prima di
@@ -855,6 +939,9 @@
       <input type="text" bind:value={backupFormLocalPath} placeholder={$t("remoteRow.noFolderChosen")} readonly />
       <button type="button" onclick={pickBackupFolder}>{$t("common.chooseFolder")}</button>
     </div>
+    {#if backupPathRootError}
+      <p class="error">✗ {backupPathRootError}</p>
+    {/if}
     <p class="hint">{$t("folderPicker.title", { values: { remote: remoteName } })}</p>
     <div class="folder-picker">
       <input type="text" value={backupFormRemotePath === "" ? $t("remoteRow.rootPath") : `/${backupFormRemotePath}`} placeholder="" readonly />
@@ -945,8 +1032,20 @@
       {#if backupWasActiveOnOpen}
         <button type="button" onclick={disableBackupAndClose} disabled={backupBusy}>{$t("remoteRow.disable")}</button>
       {/if}
+      {#if syncJob}
+        <button type="button" onclick={() => (backupTrashOpen = true)}>
+          <Icon kind="trash" />
+          {$t("trash.openButton")}
+        </button>
+      {/if}
     </div>
   </div>
+</Modal>
+
+<Modal bind:open={backupTrashOpen} title={$t("trash.title")}>
+  {#if syncJob}
+    <TrashView sides={[syncJob.destination]} />
+  {/if}
 </Modal>
 
 <Modal bind:open={propagateDeletionsWarningOpen} title={$t("common.warning")}>
@@ -965,6 +1064,26 @@
   </div>
 </Modal>
 
+<Modal bind:open={backupHomeWarningOpen} title={$t("common.warning")} elevated>
+  <div class="modal-form">
+    <p>{$t("remoteRow.dangerousPathHomeWarning", { values: { path: pendingBackupHomePath ?? "" } })}</p>
+    <div class="row-actions modal-actions">
+      <button type="button" onclick={cancelBackupHomePath}>{$t("common.cancel")}</button>
+      <button type="button" onclick={confirmBackupHomePath}>{$t("remoteRow.dangerousPathHomeConfirm")}</button>
+    </div>
+  </div>
+</Modal>
+
+<Modal bind:open={bisyncHomeWarningOpen} title={$t("common.warning")} elevated>
+  <div class="modal-form">
+    <p>{$t("remoteRow.dangerousPathHomeWarning", { values: { path: pendingBisyncHomePath ?? "" } })}</p>
+    <div class="row-actions modal-actions">
+      <button type="button" onclick={cancelBisyncHomePath}>{$t("common.cancel")}</button>
+      <button type="button" onclick={confirmBisyncHomePath}>{$t("remoteRow.dangerousPathHomeConfirm")}</button>
+    </div>
+  </div>
+</Modal>
+
 <Modal bind:open={bisyncModalOpen} title={$t("remoteRow.bisyncTitle", { values: { remote: remoteName } })}>
   <div class="modal-form">
     <p class="hint">{$t("remoteRow.localFolder")}</p>
@@ -972,6 +1091,9 @@
       <input type="text" bind:value={bisyncFormLocalPath} placeholder={$t("remoteRow.noFolderChosen")} readonly />
       <button type="button" onclick={pickBisyncFolder}>{$t("common.chooseFolder")}</button>
     </div>
+    {#if bisyncPathRootError}
+      <p class="error">✗ {bisyncPathRootError}</p>
+    {/if}
     <p class="hint">{$t("folderPicker.title", { values: { remote: remoteName } })}</p>
     <div class="folder-picker">
       <input type="text" value={bisyncFormRemotePath === "" ? $t("remoteRow.rootPath") : `/${bisyncFormRemotePath}`} placeholder="" readonly />
@@ -1068,8 +1190,20 @@
       {#if bisyncWasActiveOnOpen}
         <button type="button" onclick={disableBisyncAndClose} disabled={bisyncBusy}>{$t("remoteRow.disable")}</button>
       {/if}
+      {#if bisyncJob}
+        <button type="button" onclick={() => (bisyncTrashOpen = true)}>
+          <Icon kind="trash" />
+          {$t("trash.openButton")}
+        </button>
+      {/if}
     </div>
   </div>
+</Modal>
+
+<Modal bind:open={bisyncTrashOpen} title={$t("trash.title")}>
+  {#if bisyncJob}
+    <TrashView sides={[bisyncJob.path1, bisyncJob.path2]} />
+  {/if}
 </Modal>
 
 <RemoteFolderPicker bind:open={remotePickerOpen} {remoteName} onSelect={(path) => remotePickerOnSelect?.(path)} />
@@ -1101,6 +1235,19 @@
             <span class={entry.success ? "ok" : "error"}>{entry.success ? `✓ ${$t("remoteRow.succeeded")}` : `✗ ${$t("remoteRow.failed")}`}</span>
             <span class="hint">{formatWhen(entry.whenUnix)}</span>
             {#if !entry.success}<p class="error">{entry.message}</p>{/if}
+            {#if entry.transfers.length > 0}
+              <button
+                type="button"
+                onclick={() => (expandedHistoryEntryKey = expandedHistoryEntryKey === entry.whenUnix ? null : entry.whenUnix)}
+              >
+                {expandedHistoryEntryKey === entry.whenUnix
+                  ? $t("remoteRow.hideDetailedLog")
+                  : $t("remoteRow.showTransfersCount", { values: { count: entry.transfers.length } })}
+              </button>
+              {#if expandedHistoryEntryKey === entry.whenUnix}
+                <LogView text={formatTransfers(entry.transfers)} />
+              {/if}
+            {/if}
           </li>
         {/each}
       </ul>

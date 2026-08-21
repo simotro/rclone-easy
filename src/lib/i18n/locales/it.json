@@ -90,6 +90,15 @@
     "importingButton": "Importazione in corso…",
     "importButton": "Importa selezionati"
   },
+  "trash": {
+    "openButton": "Cestino",
+    "title": "Cestino",
+    "loading": "Caricamento…",
+    "empty": "Il cestino è vuoto: nessun file cancellato o sovrascritto di recente.",
+    "removedOn": "Rimosso il {when}",
+    "restore": "Ripristina",
+    "restoring": "Ripristino…"
+  },
   "remoteRow": {
     "backupRunning": "Backup in corso…",
     "backupFirstSoon": "Primo backup a momenti",
@@ -155,6 +164,9 @@
     "propagateDeletionsWarningOffTitle": "Se non la attivi:",
     "propagateDeletionsWarningOffBody": "i file arrivano e vengono aggiornati nella destinazione, ma nulla viene mai cancellato automaticamente, anche se sparisce dalla sorgente — la destinazione può solo accumulare, mai perdere dati per una sincronizzazione automatica.",
     "understoodEnable": "Ho capito, attiva",
+    "dangerousPathRootError": "Questa è la radice del filesystem: scegli una sottocartella più specifica.",
+    "dangerousPathHomeWarning": "Hai scelto la tua intera cartella home ({path}). È un backup completo legittimo, ma coinvolge tutti i tuoi file personali: un errore di configurazione qui (es. \"Propaga cancellazioni\" attivo per sbaglio) avrebbe un impatto molto più ampio di una sottocartella specifica.",
+    "dangerousPathHomeConfirm": "Ho capito, usa comunque questa cartella",
     "bisyncTitle": "Sincronizzazione bidirezionale — {remote}",
     "bisyncFirstRunHint": "Alla primissima esecuzione, se esiste già un file con lo stesso nome ma contenuto diverso su entrambi i lati, viene presa come riferimento la versione modificata più di recente.",
     "needsResyncHint": "La prossima esecuzione includerà un nuovo resync (baseline).",
@@ -162,6 +174,11 @@
     "noVersionLost": "Nessuna versione è stata persa: entrambe salvate con un suffisso di conflitto.",
     "showDetailedLog": "Mostra log dettagliato",
     "hideDetailedLog": "Nascondi log dettagliato",
+    "showTransfersCount": "Mostra {count} file coinvolti",
+    "transferWhatTransferring": "copiato",
+    "transferWhatDeleting": "cancellato",
+    "transferWhatMoving": "spostato",
+    "transferWhatRenaming": "rinominato",
     "copyLog": "Copia",
     "logCopied": "Copiato",
     "runWithForce": "Esegui comunque (--force)",

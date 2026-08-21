@@ -380,20 +380,73 @@ fn record_mount_event(config_dir: &Path, name: &str, action: &str, result: &Resu
     let _ = save_to_dir(config_dir, &mounts);
 }
 
-/// Su Windows, montare senza WinFsp installato fallisce con un messaggio di
-/// rclone tecnico e in inglese (`cgofuse: cannot find winfsp`, con un link
-/// all'installer) — WinFsp non è bundlato né rilevato in anticipo dall'app
-/// (richiede un installer MSI a parte, fuori dal nostro controllo), quindi
-/// l'errore va e viene esattamente quando l'utente ci sbatte contro per la
-/// prima volta. Qui lo si riconosce e si sostituisce con un messaggio
-/// comprensibile nella stessa lingua del resto dell'app, con l'indicazione
-/// diretta di dove scaricarlo — altri errori di mount passano invariati.
-fn friendly_mount_error(raw: String) -> String {
-    if raw.to_lowercase().contains("cannot find winfsp") {
-        "Per montare un remote su Windows serve WinFsp, non incluso in Rclone Easy. Usa il pulsante \"Installa WinFsp\" qui sotto, poi riprova a montare.".to_string()
-    } else {
-        raw
+/// `true` se `bin` è un eseguibile presente in una delle cartelle del
+/// `PATH` corrente — controllato leggendo direttamente il filesystem, non
+/// invocando una shell (`which`/`command -v` passerebbero anche da un
+/// alias di shell, che non dice nulla sul fatto che il programma vero
+/// esista davvero: verificato su questo stesso sistema, dove `apt` è
+/// aliasato a `man pacman`).
+fn command_exists_in_path(bin: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
+}
+
+/// Comando suggerito per installare FUSE sulla distribuzione Linux rilevata
+/// — rilevata dal gestore pacchetti effettivamente presente
+/// (`command_exists_in_path`), non dal nome della distribuzione: più
+/// robusto delle tante varianti/derivate (es. CachyOS è basata su Arch e usa
+/// pacman, ma il suo `/etc/os-release` non contiene "arch"), e funziona
+/// anche su distro non esplicitamente elencate purché usino uno dei gestori
+/// noti. NixOS è un caso a parte, controllato per primo: lì non esiste un
+/// concetto di "installa questo pacchetto adesso" a runtime, la dipendenza
+/// va dichiarata nella configurazione di sistema.
+fn linux_fuse_install_hint() -> String {
+    if Path::new("/etc/NIXOS").exists() {
+        return "su NixOS aggiungi \"fuse3\" a environment.systemPackages nella configurazione di sistema (o prova subito con \"nix-shell -p fuse3\"), poi applica la configurazione".to_string();
     }
+    let managers: &[(&str, &str)] =
+        &[("apt", "sudo apt install fuse3"), ("dnf", "sudo dnf install fuse3"), ("pacman", "sudo pacman -S fuse3"), ("zypper", "sudo zypper install fuse3")];
+    for (bin, cmd) in managers {
+        if command_exists_in_path(bin) {
+            return cmd.to_string();
+        }
+    }
+    "installa \"fuse3\" con il gestore pacchetti della tua distribuzione".to_string()
+}
+
+/// Il mount fallisce con un messaggio di rclone tecnico e in inglese quando
+/// il livello FUSE del sistema operativo manca — mai bundlato né rilevato
+/// in anticipo dall'app (su Linux/macOS è un componente di sistema, non
+/// qualcosa che un pacchetto applicativo può installare, vedi la
+/// discussione con Simone del 21/8/2026), quindi l'errore va e viene
+/// esattamente quando l'utente ci sbatte contro la prima volta. Qui lo si
+/// riconosce e si sostituisce con un messaggio comprensibile nella stessa
+/// lingua del resto dell'app — altri errori di mount passano invariati.
+///
+/// Windows (`cannot find winfsp`) e Linux (`fusermount3`/`fusermount` non
+/// trovato) sono verificati empiricamente (21/8/2026: Windows dal codice
+/// preesistente, Linux simulando l'assenza di `fusermount3` dal `PATH`
+/// contro un demone rcd reale). Il ramo macOS invece è costruito per
+/// analogia con quello Windows (`cgofuse: cannot find winfsp` ->
+/// presumibilmente `cgofuse: cannot find osxfuse`/`macfuse`), MAI
+/// verificato contro un Mac vero: se il messaggio reale differisse, questo
+/// ramo semplicemente non scatterebbe e l'utente vedrebbe l'errore grezzo
+/// di rclone invece del messaggio guidato, non un comportamento peggiore di
+/// prima.
+fn friendly_mount_error(raw: String) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("cannot find winfsp") {
+        return "Per montare un remote su Windows serve WinFsp, non incluso in Rclone Easy. Usa il pulsante \"Installa WinFsp\" qui sotto, poi riprova a montare.".to_string();
+    }
+    if lower.contains("fusermount") && (lower.contains("not found") || lower.contains("no such file")) {
+        return format!(
+            "Per montare un remote serve FUSE, non incluso in Rclone Easy. Installalo con: {}. Poi riprova a montare.",
+            linux_fuse_install_hint()
+        );
+    }
+    if lower.contains("osxfuse") || lower.contains("macfuse") {
+        return "Per montare un remote su macOS serve macFUSE, non incluso in Rclone Easy. Scaricalo da https://macfuse.github.io, installalo e autorizza l'estensione in Impostazioni di Sistema → Privacy e Sicurezza (passaggio manuale, richiesto da macOS), poi riprova a montare.".to_string();
+    }
+    raw
 }
 
 /// Estrae l'URL di download dell'ultimo installer `.msi` di WinFsp dalla
@@ -690,6 +743,38 @@ mod tests {
     fn friendly_mount_error_leaves_other_errors_unchanged() {
         let raw = "qualche altro errore di rclone".to_string();
         assert_eq!(friendly_mount_error(raw.clone()), raw);
+    }
+
+    /// Stringa d'errore reale, non inventata: catturata (21/8/2026)
+    /// simulando l'assenza di `fusermount3` dal `PATH` contro un demone rcd
+    /// vero (`env PATH=... rclone rcd`, poi un `mount/mount` reale).
+    #[test]
+    fn friendly_mount_error_translates_the_missing_fuse_case_on_linux() {
+        let raw = "failed to mount FUSE fs: fusermount: exec: \"fusermount3\": executable file not found in $PATH".to_string();
+        let friendly = friendly_mount_error(raw);
+        assert!(friendly.contains("FUSE"), "il messaggio tradotto dovrebbe nominare FUSE: {friendly}");
+        assert!(!friendly.contains("fusermount3"), "il messaggio tecnico grezzo non dovrebbe trapelare: {friendly}");
+    }
+
+    #[test]
+    fn linux_fuse_install_hint_is_never_empty() {
+        // Non verifica QUALE gestore pacchetti venga scelto (dipende dalla
+        // macchina su cui gira il test), solo che ci sia sempre un
+        // suggerimento utile, mai una stringa vuota.
+        assert!(!linux_fuse_install_hint().is_empty());
+    }
+
+    #[test]
+    fn command_exists_in_path_finds_a_real_command() {
+        // "ls" è ragionevole assumere presente su qualunque macchina che fa
+        // girare questi test (Linux/macOS CI incluso).
+        #[cfg(unix)]
+        assert!(command_exists_in_path("ls"));
+    }
+
+    #[test]
+    fn command_exists_in_path_is_false_for_a_made_up_name() {
+        assert!(!command_exists_in_path("questo-comando-non-esiste-di-sicuro-rce-test"));
     }
 
     #[test]

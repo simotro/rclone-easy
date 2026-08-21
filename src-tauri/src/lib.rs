@@ -51,6 +51,12 @@ mod background_portal;
 
 mod remote_lock;
 
+mod trash;
+use trash::{list_trash, restore_trash_entry};
+
+mod path_safety;
+use path_safety::check_dangerous_path;
+
 mod jobs;
 use jobs::{create_job, delete_job, dry_run_job, list_jobs, run_job, update_job};
 
@@ -301,6 +307,9 @@ pub fn run() {
             run_bisync_job,
             run_bisync_job_forced,
             dry_run_bisync_job,
+            list_trash,
+            restore_trash_entry,
+            check_dangerous_path,
             export_backup,
             import_backup,
             restart_app,

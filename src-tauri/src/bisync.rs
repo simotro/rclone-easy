@@ -173,6 +173,20 @@ fn ensure_remotes_not_already_bisynced(
     Ok(())
 }
 
+/// Rifiuta sempre, senza eccezioni, una bisync con `path1`/`path2` pari alla
+/// radice del filesystem locale — stesso principio e stessa decisione di
+/// `jobs::ensure_not_filesystem_root` (21/8/2026), vedi lì per il perché
+/// (la home directory intera invece è un pattern legittimo, gestito solo
+/// con un avviso lato frontend, non bloccato).
+fn ensure_not_filesystem_root(path1: &str, path2: &str) -> Result<(), String> {
+    for (label, fs) in [("path1", path1), ("path2", path2)] {
+        if crate::path_safety::is_filesystem_root(fs) {
+            return Err(format!("il percorso scelto per {label} ('{fs}') è la radice del filesystem: scegli una sottocartella più specifica"));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn create_bisync_job_in(
     config_dir: &Path,
     name: &str,
@@ -180,6 +194,7 @@ pub(crate) fn create_bisync_job_in(
     path2: &str,
     auto_interval_minutes: Option<u32>,
 ) -> Result<(), String> {
+    ensure_not_filesystem_root(path1, path2)?;
     let mut jobs = load_from_dir(config_dir)?;
     if jobs.iter().any(|j| j.name == name) {
         return Err(format!("esiste già un job bisync chiamato '{name}': scegli un altro nome"));
@@ -209,6 +224,7 @@ fn update_bisync_job_in(
     path2: &str,
     auto_interval_minutes: Option<u32>,
 ) -> Result<(), String> {
+    ensure_not_filesystem_root(path1, path2)?;
     let mut jobs = load_from_dir(config_dir)?;
     if name != old_name && jobs.iter().any(|j| j.name == name) {
         return Err(format!("esiste già un job bisync chiamato '{name}': scegli un altro nome"));
@@ -472,6 +488,33 @@ async fn run_bisync_subprocess(
         "--exclude".to_string(),
         crate::remote_lock::LOCK_FOLDER_EXCLUDE.to_string(),
     ];
+    // Invece di cancellare/sovrascrivere per sempre, rclone sposta ciò che
+    // verrebbe perso in un "cestino" fratello di `path1`/`path2` (trash.rs)
+    // — recuperabile dalla UI. Bisync usa flag dedicati per lato
+    // (`--backup-dir1`/`--backup-dir2`, non il generico `--backup-dir`):
+    // verificato (21/8/2026) che ciascuno deve stare sullo stesso
+    // remote/filesystem del lato che protegge ("Must be a non-overlapping
+    // path on the same remote"), e che coesistono senza collisioni con
+    // `--conflict-suffix` già usato sopra per i conflitti veri (verificato
+    // con un run che innesca entrambi i meccanismi nello stesso giro).
+    // `None` solo nel caso limite di un lato già radice (vedi
+    // `trash::trash_fs_for`): quel lato prosegue senza questa protezione
+    // aggiuntiva, l'altro lato (se non è anch'esso un caso limite) resta
+    // comunque protetto.
+    let backup_dir1 = crate::trash::trash_fs_for(path1);
+    let backup_dir2 = crate::trash::trash_fs_for(path2);
+    if backup_dir1.is_some() || backup_dir2.is_some() {
+        args.push("--suffix".to_string());
+        args.push(crate::trash::trash_suffix(now_unix()));
+    }
+    if let Some(dir1) = backup_dir1 {
+        args.push("--backup-dir1".to_string());
+        args.push(dir1);
+    }
+    if let Some(dir2) = backup_dir2 {
+        args.push("--backup-dir2".to_string());
+        args.push(dir2);
+    }
     if resync {
         args.push("--resync".to_string());
         // Senza questo, "--resync" da solo equivale a "--resync-mode path1":
@@ -789,6 +832,13 @@ async fn run_bisync_job_by_name_with_remote_lock(
 
     let locks = crate::remote_lock::acquire_all(state, &remotes).await?;
     let result = run_bisync_job_by_name_inner(config_dir, config_password, name, force).await;
+    if matches!(&result, Ok(r) if r.success) {
+        // Best effort, un lato alla volta: vedi il commento su
+        // `trash::cleanup_old_entries_in`, stesso principio già applicato ai
+        // backup (jobs.rs).
+        crate::trash::cleanup_old_entries_in(state, &job.path1).await;
+        crate::trash::cleanup_old_entries_in(state, &job.path2).await;
+    }
     crate::remote_lock::release_all(state, locks).await;
 
     result
@@ -1070,6 +1120,14 @@ mod tests {
         assert_eq!(jobs[0].path2, "cubbit:foto");
         assert!(jobs[0].needs_resync, "un job appena creato non ha ancora una baseline");
         assert!(jobs[0].history.is_empty());
+    }
+
+    #[test]
+    fn create_bisync_job_rejects_the_filesystem_root_on_either_side() {
+        let dir = TempDir::new("bisync-reject-root");
+        assert!(create_bisync_job_in(&dir.path, "prova-1", "/", "cubbit:qualcosa", None).is_err());
+        assert!(create_bisync_job_in(&dir.path, "prova-2", "/qualcosa", "/", None).is_err());
+        assert_eq!(load_from_dir(&dir.path).unwrap(), Vec::new(), "nessuno dei due job deve essere stato salvato");
     }
 
     #[test]
@@ -1469,6 +1527,59 @@ mod tests {
             path2_dir.path.join("cartella-vuota").is_dir(),
             "una cartella vuota creata su un lato dovrebbe comparire anche sull'altro"
         );
+    }
+
+    /// Verifica la protezione aggiunta il 21/8/2026 (`--backup-dir1`/
+    /// `--backup-dir2`): una cancellazione propagata da un lato all'altro
+    /// non deve sparire per sempre, ma finire in un cestino "fratello" del
+    /// lato che la riceve (trash.rs), recuperabile — a differenza di un
+    /// conflitto vero (entrambi i lati modificati), qui solo `path1` cambia,
+    /// quindi bisync non lo segnala affatto come conflitto: senza questa
+    /// protezione la versione precedente sparirebbe senza lasciare traccia.
+    #[tokio::test]
+    async fn run_bisync_job_moves_a_propagated_deletion_to_a_trash_sibling_on_the_receiving_side() {
+        let jobs_dir = TempDir::new("bisync-trash-jobs");
+        let path1_dir = TempDir::new("bisync-trash-path1");
+        let path2_dir = TempDir::new("bisync-trash-path2");
+        std::fs::create_dir_all(&path1_dir.path).unwrap();
+        std::fs::create_dir_all(&path2_dir.path).unwrap();
+        // Tre file: cancellarne uno resta sotto la soglia nativa "too many
+        // deletes" (>50%) di bisync, altrimenti il run si fermerebbe da solo
+        // prima di arrivare a toccare il cestino, che è proprio quello che
+        // vogliamo osservare qui.
+        for i in 0..3 {
+            std::fs::write(path1_dir.path.join(format!("file{i}.txt")), "x").unwrap();
+        }
+
+        create_bisync_job_in(
+            &jobs_dir.path,
+            "prova-trash",
+            &path1_dir.path.to_string_lossy(),
+            &path2_dir.path.to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&jobs_dir.path).unwrap();
+
+        let state = crate::rcd::build_state(jobs_dir.config_path()).await;
+        let baseline = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova-trash").await.unwrap();
+        assert!(baseline.success, "il resync iniziale dovrebbe riuscire: {baseline:?}");
+
+        std::fs::remove_file(path1_dir.path.join("file0.txt")).unwrap();
+
+        let result = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova-trash").await.unwrap();
+        assert!(result.success, "{result:?}");
+        assert!(!path2_dir.path.join("file0.txt").exists(), "la cancellazione deve propagarsi a path2");
+
+        let trash_dir = path2_dir
+            .path
+            .parent()
+            .unwrap()
+            .join(format!(".rclone-easy-trash-{}", path2_dir.path.file_name().unwrap().to_string_lossy()));
+        let entries: Vec<_> = std::fs::read_dir(&trash_dir)
+            .unwrap_or_else(|e| panic!("il cestino dovrebbe esistere in '{}': {e}", trash_dir.display()))
+            .collect();
+        assert_eq!(entries.len(), 1, "il file cancellato dovrebbe essere finito nel cestino invece di sparire per sempre");
     }
 
     /// Prova un bisync reale end-to-end: baseline, poi un conflitto genuino
