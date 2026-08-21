@@ -1,15 +1,11 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import Modal from "./Modal.svelte";
   import Icon from "./Icon.svelte";
-  import StatusDot from "./StatusDot.svelte";
-  import RemoteFolderPicker from "./RemoteFolderPicker.svelte";
-  import LogView from "./LogView.svelte";
-  import TrashView from "./TrashView.svelte";
+  import RemotePanel from "./RemotePanel.svelte";
   import { now, formatCountdown, nextRunAtMs } from "$lib/now";
-  import type { MountEntry, SyncJob, BisyncJob, BisyncRunEntry, TransferEvent } from "$lib/types";
+  import type { MountEntry, SyncJob, BisyncJob } from "$lib/types";
   import { t } from "$lib/i18n";
 
   let {
@@ -38,90 +34,77 @@
   let syncJob = $derived(jobs.find((j) => j.source.startsWith(prefix) || j.destination.startsWith(prefix)) ?? null);
   let bisyncJob = $derived(bisyncJobs.find((j) => j.path1.startsWith(prefix) || j.path2.startsWith(prefix)) ?? null);
 
-  // La parte di un fs `remoto:sottocartella` dopo il nome del remote —
-  // "" per la radice. Usata per precompilare il selettore di cartella
-  // remota con quanto già scelto in precedenza quando si riapre un modal.
-  function remoteSubPathOf(fs: string): string {
-    return fs.startsWith(prefix) ? fs.slice(prefix.length) : "";
-  }
+  type ServiceKind = "mount" | "backup" | "bisync";
 
-  // Un solo RemoteFolderPicker condiviso da mount/backup/bisync invece di
-  // tre istanze: al più un modal di configurazione è aperto alla volta,
-  // quindi al più un "Sfoglia…" può essere in corso.
-  let remotePickerOpen = $state(false);
-  let remotePickerOnSelect: ((path: string) => void) | null = $state(null);
-
-  function openRemotePicker(onSelect: (path: string) => void) {
-    remotePickerOnSelect = onSelect;
-    remotePickerOpen = true;
-  }
-
-  type ActiveService = "mount" | "backup" | "bisync" | null;
-
-  let activeService = $derived.by<ActiveService>(() => {
+  let activeService = $derived.by<ServiceKind | null>(() => {
     if (mountEntry?.mounted) return "mount";
     if (syncJob?.autoIntervalMinutes !== null && syncJob !== null) return "backup";
     if (bisyncJob?.autoIntervalMinutes !== null && bisyncJob !== null) return "bisync";
     return null;
   });
 
-  type StatusColor = "green" | "yellow" | "red" | "grey";
-
-  let statusColor = $derived.by<StatusColor>(() => {
-    if (activeService === "mount") {
-      const latest = mountEntry?.history[0];
-      if (!latest) return "grey";
-      return latest.success ? "green" : "red";
-    }
-    if (activeService === "backup") {
-      const latest = syncJob?.history[0];
-      if (!latest) return "grey";
-      return latest.success ? "green" : "red";
-    }
-    if (activeService === "bisync") {
-      const latest = bisyncJob?.history[0];
-      if (!latest) return "grey";
-      if (!latest.success) return "red";
-      return latest.conflictPaths.length > 0 ? "yellow" : "green";
-    }
-    return "grey";
+  // Il servizio da mostrare sull'indicatore: quello attivo se c'è, altrimenti
+  // il primo che ha comunque una configurazione salvata (manuale, mai
+  // automatizzata), altrimenti nessuno — un solo indicatore invece delle 3
+  // icone mount/backup/bisync sempre visibili (audit UX 21/8/2026, punto B):
+  // sono comunque una scelta mutuamente esclusiva, non serve vederle tutte
+  // e tre insieme per capire qual è quella in gioco.
+  let displayService = $derived.by<ServiceKind | null>(() => {
+    if (activeService) return activeService;
+    if (mountEntry) return "mount";
+    if (syncJob) return "backup";
+    if (bisyncJob) return "bisync";
+    return null;
   });
 
-  let lastSuccessfulOp = $derived.by<number | null>(() => {
-    const candidates: number[] = [];
-    const mountSuccess = mountEntry?.history.find((h) => h.success);
-    if (mountSuccess) candidates.push(mountSuccess.whenUnix);
-    const syncSuccess = syncJob?.history.find((h) => h.success);
-    if (syncSuccess) candidates.push(syncSuccess.whenUnix);
-    const bisyncSuccess = bisyncJob?.history.find((h) => h.success);
-    if (bisyncSuccess) candidates.push(bisyncSuccess.whenUnix);
-    if (candidates.length === 0) return null;
-    return Math.max(...candidates);
+  const SERVICE_LABELS: Record<ServiceKind, string> = $derived({
+    mount: $t("remoteRow.serviceLabel.mount"),
+    backup: $t("remoteRow.serviceLabel.backup"),
+    bisync: $t("remoteRow.serviceLabel.bisync"),
+  });
+
+  // Stato onesto della riga: guarda l'ULTIMO TENTATIVO del servizio attivo,
+  // non solo l'ultimo successo — prima di questa modifica un remote con un
+  // errore reale in cronologia poteva mostrare "nessuna operazione
+  // eseguita", perché quel testo ignorava del tutto i tentativi falliti.
+  // "conflict" è un terzo esito solo per bisync (successo, ma con file da
+  // rivedere).
+  type AttemptOutcome = "ok" | "conflict" | "failed";
+  type LastAttempt = { whenUnix: number; outcome: AttemptOutcome; reason: string | null };
+
+  let lastAttempt = $derived.by<LastAttempt | null>(() => {
+    if (activeService === "mount" && mountEntry) {
+      const latest = mountEntry.history[0];
+      if (!latest) return null;
+      return { whenUnix: latest.whenUnix, outcome: latest.success ? "ok" : "failed", reason: latest.success ? null : latest.message };
+    }
+    if (activeService === "backup" && syncJob) {
+      const latest = syncJob.history[0];
+      if (!latest) return null;
+      return { whenUnix: latest.whenUnix, outcome: latest.success ? "ok" : "failed", reason: latest.success ? null : latest.message };
+    }
+    if (activeService === "bisync" && bisyncJob) {
+      const latest = bisyncJob.history[0];
+      if (!latest) return null;
+      if (!latest.success) return { whenUnix: latest.whenUnix, outcome: "failed", reason: latest.message };
+      if (latest.conflictPaths.length > 0) return { whenUnix: latest.whenUnix, outcome: "conflict", reason: null };
+      return { whenUnix: latest.whenUnix, outcome: "ok", reason: null };
+    }
+    return null;
   });
 
   function formatWhen(whenUnix: number): string {
     return new Date(whenUnix * 1000).toLocaleString();
   }
 
-  // Traduce l'elenco strutturato di TransferEvent (jobs.rs, da
-  // `core/transferred`) in testo leggibile per `LogView`, stesso componente
-  // già usato per il log grezzo di bisync — qui il dato arriva già
-  // strutturato (niente parsing di righe di log), quindi la formattazione è
-  // solo cosmetica. `what` non tradotto ricade sul valore grezzo di rclone,
-  // così un valore nuovo/inatteso resta comunque leggibile invece di sparire.
-  function formatTransfers(transfers: TransferEvent[]): string {
-    const labels: Record<string, string> = {
-      transferring: $t("remoteRow.transferWhatTransferring"),
-      deleting: $t("remoteRow.transferWhatDeleting"),
-      moving: $t("remoteRow.transferWhatMoving"),
-      renaming: $t("remoteRow.transferWhatRenaming"),
-    };
-    return transfers
-      .map((event) => {
-        const label = labels[event.what] ?? event.what;
-        return event.error ? `${label}: ${event.name} — ${event.error}` : `${label}: ${event.name}`;
-      })
-      .join("\n");
+  // Estratto breve del motivo di un fallimento per la riga collassata — mai
+  // il messaggio grezzo per intero lì (può essere lungo quanto un errore
+  // tecnico di rclone/Google, vedi l'audit UX): cambierebbe l'altezza della
+  // riga in modo imprevedibile. Il testo completo resta sempre raggiungibile
+  // nel pannello del remote.
+  function truncate(text: string, max = 70): string {
+    const clean = text.trim();
+    return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
   }
 
   // Conto alla rovescia verso la prossima esecuzione automatica — solo per
@@ -130,11 +113,6 @@
   // mutua esclusività garantisce che al massimo uno tra backup e bisync
   // possa avere l'automazione accesa per questo remote alla volta.
   let countdownText = $derived.by<string | null>(() => {
-    // Un dry-run può girare su un servizio anche non "attivo" per questo
-    // remote (mutua esclusività riguarda solo l'automazione) — controllato
-    // prima e a prescindere da `activeService`, altrimenti la riga di stato
-    // non lo mostrerebbe affatto quando il servizio provato non è quello
-    // attivo.
     if (syncJob?.isDryRunning || bisyncJob?.isDryRunning) return $t("remoteRow.dryRunInProgress");
     if (activeService === "backup" && syncJob) {
       if (syncJob.isRunning) return $t("remoteRow.backupRunning");
@@ -151,20 +129,15 @@
     return null;
   });
 
-  let mountModalOpen = $state(false);
-  let backupModalOpen = $state(false);
-  let bisyncModalOpen = $state(false);
-  let backupTrashOpen = $state(false);
-  let bisyncTrashOpen = $state(false);
-  let historyModalOpen = $state(false);
+  let panelOpen = $state(false);
 
   let rootEl: HTMLLIElement | undefined = $state();
   let highlighted = $state(false);
 
   // Cliccando una voce "Configura" o un avviso nel menu della tray, il
   // backend porta la finestra in primo piano ed emette questo evento —
-  // scorriamo fino a questa riga e la evidenziamo, aprendo anche la
-  // cronologia se veniva da un avviso (vedi tray.rs::focus_remote).
+  // scorriamo fino a questa riga e la evidenziamo, aprendo anche il
+  // pannello se veniva da un avviso (vedi tray.rs::focus_remote).
   // L'evidenziazione resta finché la finestra non torna nascosta in tray
   // (evento separato, vedi sotto) invece di sparire dopo un timeout
   // arbitrario — l'utente potrebbe metterci più di qualche secondo a
@@ -178,7 +151,7 @@
       if (event.payload.remote !== remoteName) return;
       rootEl?.scrollIntoView({ behavior: "smooth", block: "center" });
       highlighted = true;
-      if (event.payload.openHistory) historyModalOpen = true;
+      if (event.payload.openHistory) panelOpen = true;
     }).then((fn) => {
       if (cancelled) fn();
       else unlistenFocus = fn;
@@ -198,567 +171,8 @@
     };
   });
 
-  type ServiceKind = "mount" | "backup" | "bisync";
-  let SERVICE_LABELS = $derived<Record<ServiceKind, string>>({
-    mount: $t("remoteRow.service.mount"),
-    backup: $t("remoteRow.service.backup"),
-    bisync: $t("remoteRow.service.bisync"),
-  });
-
-  // Spegne il servizio indicato per davvero: per il mount smonta prima se
-  // necessario (un mount ancora montato non può considerarsi disattivato),
-  // per backup/bisync azzera l'intervallo automatico. Usata sia dallo
-  // switch tra servizi (conflictModal) sia dal pulsante "Disabilita" nei
-  // rispettivi modal.
-  async function disableMount() {
-    if (!mountEntry) return;
-    if (mountEntry.mounted) {
-      await invoke("unmount_now", { name: mountEntry.name });
-    }
-    if (mountEntry.autoMount) {
-      await invoke("update_mount", {
-        oldName: mountEntry.name,
-        name: mountEntry.name,
-        remote: mountEntry.remote,
-        mountPoint: mountEntry.mountPoint,
-        autoMount: false,
-      });
-    }
-    await onRefresh?.();
-  }
-
-  async function disableBackup() {
-    if (!syncJob) return;
-    await invoke("update_job", {
-      oldName: syncJob.name,
-      name: syncJob.name,
-      source: syncJob.source,
-      destination: syncJob.destination,
-      autoIntervalMinutes: null,
-      propagateDeletions: syncJob.propagateDeletions,
-    });
-    await onRefresh?.();
-  }
-
-  async function disableBisync() {
-    if (!bisyncJob) return;
-    await invoke("update_bisync_job", {
-      oldName: bisyncJob.name,
-      name: bisyncJob.name,
-      path1: bisyncJob.path1,
-      path2: bisyncJob.path2,
-      autoIntervalMinutes: null,
-    });
-    await onRefresh?.();
-  }
-
-  async function disableActiveService(kind: ServiceKind) {
-    if (kind === "mount") await disableMount();
-    else if (kind === "backup") await disableBackup();
-    else await disableBisync();
-  }
-
-  // Aperti direttamente da onServiceIconClick quando non c'è conflitto, o
-  // dal modal di conferma dopo aver spento il servizio attivo.
-  function openModalFor(kind: ServiceKind) {
-    if (kind === "mount") openMountModal();
-    else if (kind === "backup") openBackupModal();
-    else openBisyncModal();
-  }
-
-  let conflictModalOpen = $state(false);
-  let conflictTargetKind = $state<ServiceKind | null>(null);
-  let conflictBusy = $state(false);
-  let conflictError = $state<string | null>(null);
-
-  // Punto d'ingresso dei 3 pulsanti icona mount/backup/bisync: se un
-  // servizio diverso è già attivo per questo remote, avvisa PRIMA di far
-  // compilare qualunque campo — non al momento del salvataggio, quando
-  // l'utente avrebbe già perso tempo a configurare.
-  function onServiceIconClick(kind: ServiceKind) {
-    if (activeService !== null && activeService !== kind) {
-      conflictTargetKind = kind;
-      conflictError = null;
-      conflictModalOpen = true;
-    } else {
-      openModalFor(kind);
-    }
-  }
-
-  async function confirmConflictSwitch() {
-    if (!conflictTargetKind || activeService === null) return;
-    conflictBusy = true;
-    conflictError = null;
-    try {
-      await disableActiveService(activeService);
-      const kind = conflictTargetKind;
-      conflictModalOpen = false;
-      openModalFor(kind);
-    } catch (error) {
-      conflictError = String(error);
-    } finally {
-      conflictBusy = false;
-    }
-  }
-
-  // --- Mount ---
-  let mountBusy = $state(false);
-  let mountError = $state<string | null>(null);
-  let mountFormPoint = $state("");
-  let mountFormAuto = $state(false);
-  let mountFormRemotePath = $state("");
-
-  function openMountModal() {
-    mountFormPoint = mountEntry?.mountPoint ?? "";
-    mountFormAuto = mountEntry?.autoMount ?? false;
-    mountFormRemotePath = mountEntry ? remoteSubPathOf(mountEntry.remote) : "";
-    mountError = null;
-    winFspInstallStarted = false;
-    mountModalOpen = true;
-  }
-
-  async function pickMountFolder() {
-    const selected = await openFolderDialog({ directory: true, multiple: false, title: $t("remoteRow.chooseOrCreateFolderDialogTitle") });
-    if (typeof selected === "string") mountFormPoint = selected;
-  }
-
-  // Unico pulsante del modal: salva la configurazione (creandola se non
-  // esiste ancora), monta e apre la cartella nel file manager di sistema —
-  // a differenza di backup/bisync non ha senso separare "salva" da "esegui
-  // ora", perché per un mount l'unica azione sensata è "sii montato qui", e
-  // aprire subito la cartella è l'unica conferma visiva diretta che il
-  // montaggio è riuscito (`mount_now_and_open` in mounts.rs). Se il
-  // percorso è cambiato rispetto a un mount ancora risultato montato dal
-  // vivo (stato stantio nel form, difesa contro un disallineamento
-  // esterno: il pulsante stesso è visibile solo quando mountEntry non è
-  // montato), smonta prima dal vecchio percorso: `update_mount` rifiuta
-  // altrimenti. Chiude il modal solo in caso di successo.
-  async function confirmMount() {
-    if (mountFormPoint.trim() === "") return;
-    mountBusy = true;
-    mountError = null;
-    try {
-      const remote = `${prefix}${mountFormRemotePath}`;
-      const mountPoint = mountFormPoint.trim();
-      if (mountEntry?.mounted && mountEntry.mountPoint !== mountPoint) {
-        await invoke("unmount_now", { name: mountEntry.name });
-      }
-      if (mountEntry) {
-        await invoke("update_mount", { oldName: mountEntry.name, name: remoteName, remote, mountPoint, autoMount: mountFormAuto });
-      } else {
-        await invoke("create_mount", { name: remoteName, remote, mountPoint, autoMount: mountFormAuto });
-      }
-      await invoke("mount_now_and_open", { name: remoteName });
-      await onRefresh?.();
-      mountModalOpen = false;
-    } catch (error) {
-      mountError = String(error);
-    } finally {
-      mountBusy = false;
-    }
-  }
-
-  // Riconosce il messaggio tradotto da `friendly_mount_error` (mounts.rs) —
-  // la parola "WinFsp" è parte del contratto tra backend e frontend, non
-  // solo testo a caso: mostra il pulsante "Installa WinFsp" invece del solo
-  // messaggio d'errore quando il mount fallisce per questo motivo specifico.
-  let mountErrorNeedsWinFsp = $derived(mountError?.includes("WinFsp") ?? false);
-  let winFspInstallBusy = $state(false);
-  let winFspInstallStarted = $state(false);
-
-  async function installWinFsp() {
-    winFspInstallBusy = true;
-    try {
-      await invoke("download_and_launch_winfsp_installer");
-      winFspInstallStarted = true;
-    } catch (error) {
-      mountError = String(error);
-    } finally {
-      winFspInstallBusy = false;
-    }
-  }
-
-  // Smonta senza toccare la configurazione salvata (niente delete_mount):
-  // resta pronta per un prossimo "Monta e apri" sullo stesso percorso.
-  // Chiude il modal solo in caso di successo.
-  async function unmountOnly() {
-    if (!mountEntry) return;
-    mountBusy = true;
-    mountError = null;
-    try {
-      await invoke("unmount_now", { name: mountEntry.name });
-      await onRefresh?.();
-      mountModalOpen = false;
-    } catch (error) {
-      mountError = String(error);
-    } finally {
-      mountBusy = false;
-    }
-  }
-
-  // --- Backup ---
-  type Direction = "toRemote" | "fromRemote";
-  let backupBusy = $state(false);
-  let backupError = $state<string | null>(null);
-  let backupFormDirection = $state<Direction>("toRemote");
-  let backupFormLocalPath = $state("");
-  let backupFormAutoEnabled = $state(true);
-  let backupFormAutoInterval = $state(15);
-  let backupFormPropagateDeletions = $state(false);
-  let backupRunResult = $state<{ success: boolean; message: string } | null>(null);
-  let backupFormDryRun = $state(false);
-  // Stato del job al momento dell'apertura del modal, non quello live: usato
-  // solo per decidere se mostrare "Disabilita" — altrimenti apparirebbe
-  // subito dopo aver appena abilitato un job nello stesso modal, proprio
-  // nel momento in cui non deve esserci.
-  let backupWasActiveOnOpen = $state(false);
-  let propagateDeletionsWarningOpen = $state(false);
-  let backupFormRemotePath = $state("");
-  // Percorso pericoloso (path_safety.rs): la radice del filesystem è
-  // rifiutata subito (errore inline, non selezionabile in nessun caso),
-  // la home directory intera è un pattern di backup legittimo ma insolito
-  // — passa da un avviso di conferma, stesso principio già usato per
-  // "Propaga cancellazioni" più sotto.
-  let backupPathRootError = $state<string | null>(null);
-  let backupHomeWarningOpen = $state(false);
-  let pendingBackupHomePath: string | null = $state(null);
-
-  function directionOf(job: SyncJob): Direction {
-    return job.source.startsWith(prefix) ? "fromRemote" : "toRemote";
-  }
-  function localPathOf(job: SyncJob): string {
-    return directionOf(job) === "toRemote" ? job.source : job.destination;
-  }
-  function remoteFsOf(job: SyncJob): string {
-    return directionOf(job) === "toRemote" ? job.destination : job.source;
-  }
-
-  function openBackupModal() {
-    if (syncJob) {
-      backupFormDirection = directionOf(syncJob);
-      backupFormLocalPath = localPathOf(syncJob);
-      backupFormAutoEnabled = syncJob.autoIntervalMinutes !== null;
-      backupFormAutoInterval = syncJob.autoIntervalMinutes ?? 15;
-      backupFormPropagateDeletions = syncJob.propagateDeletions;
-      backupFormRemotePath = remoteSubPathOf(remoteFsOf(syncJob));
-    } else {
-      backupFormDirection = "toRemote";
-      backupFormLocalPath = "";
-      backupFormAutoEnabled = true;
-      backupFormAutoInterval = 15;
-      backupFormPropagateDeletions = false;
-      backupFormRemotePath = "";
-    }
-    backupWasActiveOnOpen = syncJob?.autoIntervalMinutes !== null && syncJob !== null;
-    backupError = null;
-    backupRunResult = null;
-    backupFormDryRun = false;
-    backupPathRootError = null;
-    backupModalOpen = true;
-  }
-
-  async function pickBackupFolder() {
-    const selected = await openFolderDialog({ directory: true, multiple: false, title: $t("remoteRow.chooseFolderDialogTitle") });
-    if (typeof selected !== "string") return;
-    backupPathRootError = null;
-    const risk = await invoke<string | null>("check_dangerous_path", { path: selected });
-    if (risk === "root") {
-      backupPathRootError = $t("remoteRow.dangerousPathRootError");
-      return;
-    }
-    if (risk === "home") {
-      pendingBackupHomePath = selected;
-      backupHomeWarningOpen = true;
-      return;
-    }
-    backupFormLocalPath = selected;
-  }
-
-  function confirmBackupHomePath() {
-    if (pendingBackupHomePath) backupFormLocalPath = pendingBackupHomePath;
-    pendingBackupHomePath = null;
-    backupHomeWarningOpen = false;
-  }
-
-  function cancelBackupHomePath() {
-    pendingBackupHomePath = null;
-    backupHomeWarningOpen = false;
-  }
-
-  // Il checkbox non spunta mai da solo: attivare "Propaga cancellazioni" è
-  // un cambio di comportamento rischioso (può cancellare file nella
-  // destinazione), quindi passa sempre da un avviso esplicito prima. Per
-  // disattivarlo invece nessun avviso: tornare al comportamento sicuro non
-  // ha bisogno di conferma. Lascia che il checkbox si spunti/tolga da solo
-  // (bind:checked) e corregge DOPO in onchange, invece di intercettare il
-  // click con preventDefault: più robusto, non dipende da come questo
-  // specifico webview gestisce l'annullamento dell'azione di default di un
-  // checkbox.
-  function onPropagateDeletionsChange() {
-    if (backupFormPropagateDeletions) {
-      backupFormPropagateDeletions = false;
-      propagateDeletionsWarningOpen = true;
-    }
-  }
-
-  function confirmPropagateDeletions() {
-    backupFormPropagateDeletions = true;
-    propagateDeletionsWarningOpen = false;
-  }
-
-  // Salva sempre il form prima di eseguire qualunque azione: usata sia da
-  // saveBackup sia da runBackupNow, così "Esegui ora" non gira mai
-  // sull'ultima versione salvata ignorando una modifica non ancora
-  // confermata nel form (es. una nuova cartella locale appena scelta) —
-  // stesso principio già seguito dal mount, che ha un solo pulsante
-  // "salva e monta" invece di due azioni separate.
-  async function persistBackup() {
-    const remoteFs = `${prefix}${backupFormRemotePath}`;
-    const source = backupFormDirection === "toRemote" ? backupFormLocalPath.trim() : remoteFs;
-    const destination = backupFormDirection === "toRemote" ? remoteFs : backupFormLocalPath.trim();
-    const autoIntervalMinutes = backupFormAutoEnabled ? backupFormAutoInterval : null;
-    const propagateDeletions = backupFormPropagateDeletions;
-    if (syncJob) {
-      await invoke("update_job", {
-        oldName: syncJob.name,
-        name: remoteName,
-        source,
-        destination,
-        autoIntervalMinutes,
-        propagateDeletions,
-      });
-    } else {
-      await invoke("create_job", { name: remoteName, source, destination, autoIntervalMinutes, propagateDeletions });
-    }
-  }
-
-  async function saveBackup() {
-    if (backupFormLocalPath.trim() === "") return;
-    backupBusy = true;
-    backupError = null;
-    try {
-      await persistBackup();
-      await onRefresh?.();
-      backupModalOpen = false;
-    } catch (error) {
-      backupError = String(error);
-    } finally {
-      backupBusy = false;
-    }
-  }
-
-  async function runBackupNow() {
-    if (backupFormLocalPath.trim() === "") return;
-    backupBusy = true;
-    backupError = null;
-    backupRunResult = null;
-    try {
-      await persistBackup();
-      if (backupFormDryRun) {
-        // Il risultato non va in uno stato locale: il backend lo salva in
-        // jobs.toml (SyncJob.lastDryRun), `onRefresh()` più sotto lo fa
-        // arrivare qui tramite `syncJob` — persiste così anche chiudendo e
-        // riaprendo il modal, non solo per la sessione corrente.
-        await invoke("dry_run_job", { name: remoteName });
-      } else {
-        await invoke("run_job", { name: remoteName });
-        backupRunResult = { success: true, message: "" };
-      }
-    } catch (error) {
-      if (backupFormDryRun) {
-        backupError = String(error);
-      } else {
-        backupRunResult = { success: false, message: String(error) };
-      }
-    } finally {
-      backupBusy = false;
-      await onRefresh?.();
-    }
-  }
-
-  // Disabilita un backup attivo e chiude subito il modal — non lascia la
-  // possibilità di cliccare "Salva e chiudi" subito dopo per errore, che
-  // con il form ancora sull'intervallo precedente riabiliterebbe
-  // l'automazione appena spenta invece di lasciarla disattivata.
-  async function disableBackupAndClose() {
-    backupBusy = true;
-    backupError = null;
-    try {
-      await disableBackup();
-      backupModalOpen = false;
-    } catch (error) {
-      backupError = String(error);
-    } finally {
-      backupBusy = false;
-    }
-  }
-
-  // --- Bisync ---
-  let bisyncBusy = $state(false);
-  let bisyncError = $state<string | null>(null);
-  let bisyncFormLocalPath = $state("");
-  let bisyncFormAutoEnabled = $state(true);
-  let bisyncFormAutoInterval = $state(15);
-  let bisyncRunResult = $state<BisyncRunEntry | null>(null);
-  let bisyncWasActiveOnOpen = $state(false);
-  let bisyncFormRemotePath = $state("");
-  let bisyncFormDryRun = $state(false);
-  // "Mostra dettagli" nel pannello di risultato di un "Esegui ora" appena
-  // fatto — un riquadro che si apre/chiude sul posto invece di un modal
-  // impilato sopra quello di configurazione bisync (più semplice da seguire
-  // per l'utente, niente due popup annidati per un'azione sola).
-  let bisyncDetailsExpanded = $state(false);
-  // Stesso principio nella cronologia, ma lì le voci sono tante: tiene la
-  // chiave (whenUnix) della singola voce aperta, non un booleano — al più
-  // una alla volta, cliccarne un'altra chiude la precedente.
-  let expandedHistoryEntryKey = $state<number | null>(null);
-  // Stesso principio dell'analogo lato backup, vedi lì per il perché.
-  let bisyncPathRootError = $state<string | null>(null);
-  let bisyncHomeWarningOpen = $state(false);
-  let pendingBisyncHomePath: string | null = $state(null);
-
-  function bisyncLocalPathOf(job: BisyncJob): string {
-    return job.path1.startsWith(prefix) ? job.path2 : job.path1;
-  }
-  function bisyncRemoteFsOf(job: BisyncJob): string {
-    return job.path1.startsWith(prefix) ? job.path1 : job.path2;
-  }
-
-  function openBisyncModal() {
-    if (bisyncJob) {
-      bisyncFormLocalPath = bisyncLocalPathOf(bisyncJob);
-      bisyncFormAutoEnabled = bisyncJob.autoIntervalMinutes !== null;
-      bisyncFormAutoInterval = bisyncJob.autoIntervalMinutes ?? 15;
-      bisyncFormRemotePath = remoteSubPathOf(bisyncRemoteFsOf(bisyncJob));
-    } else {
-      bisyncFormLocalPath = "";
-      bisyncFormAutoEnabled = true;
-      bisyncFormAutoInterval = 15;
-      bisyncFormRemotePath = "";
-    }
-    bisyncWasActiveOnOpen = bisyncJob?.autoIntervalMinutes !== null && bisyncJob !== null;
-    bisyncError = null;
-    bisyncRunResult = null;
-    bisyncDetailsExpanded = false;
-    bisyncFormDryRun = false;
-    bisyncPathRootError = null;
-    bisyncModalOpen = true;
-  }
-
-  async function pickBisyncFolder() {
-    const selected = await openFolderDialog({ directory: true, multiple: false, title: $t("remoteRow.chooseFolderDialogTitle") });
-    if (typeof selected !== "string") return;
-    bisyncPathRootError = null;
-    const risk = await invoke<string | null>("check_dangerous_path", { path: selected });
-    if (risk === "root") {
-      bisyncPathRootError = $t("remoteRow.dangerousPathRootError");
-      return;
-    }
-    if (risk === "home") {
-      pendingBisyncHomePath = selected;
-      bisyncHomeWarningOpen = true;
-      return;
-    }
-    bisyncFormLocalPath = selected;
-  }
-
-  function confirmBisyncHomePath() {
-    if (pendingBisyncHomePath) bisyncFormLocalPath = pendingBisyncHomePath;
-    pendingBisyncHomePath = null;
-    bisyncHomeWarningOpen = false;
-  }
-
-  function cancelBisyncHomePath() {
-    pendingBisyncHomePath = null;
-    bisyncHomeWarningOpen = false;
-  }
-
-  // Stesso principio di persistBackup: salva sempre il form prima di
-  // eseguire, così "Esegui ora" non gira mai su un percorso vecchio quando
-  // il form ha una modifica non ancora confermata.
-  async function persistBisync() {
-    const path1 = bisyncFormLocalPath.trim();
-    const path2 = `${prefix}${bisyncFormRemotePath}`;
-    const autoIntervalMinutes = bisyncFormAutoEnabled ? bisyncFormAutoInterval : null;
-    if (bisyncJob) {
-      await invoke("update_bisync_job", { oldName: bisyncJob.name, name: remoteName, path1, path2, autoIntervalMinutes });
-    } else {
-      await invoke("create_bisync_job", { name: remoteName, path1, path2, autoIntervalMinutes });
-    }
-  }
-
-  async function saveBisync() {
-    if (bisyncFormLocalPath.trim() === "") return;
-    bisyncBusy = true;
-    bisyncError = null;
-    try {
-      await persistBisync();
-      await onRefresh?.();
-      bisyncModalOpen = false;
-    } catch (error) {
-      bisyncError = String(error);
-    } finally {
-      bisyncBusy = false;
-    }
-  }
-
-  async function runBisyncNow() {
-    if (bisyncFormLocalPath.trim() === "") return;
-    bisyncBusy = true;
-    bisyncError = null;
-    bisyncRunResult = null;
-    try {
-      await persistBisync();
-      if (bisyncFormDryRun) {
-        // Stesso principio di runBackupNow: il risultato persiste in
-        // bisync.toml, arriva qui tramite `bisyncJob` dopo `onRefresh()`.
-        await invoke("dry_run_bisync_job", { name: remoteName });
-      } else {
-        bisyncRunResult = await invoke<BisyncRunEntry>("run_bisync_job", { name: remoteName });
-      }
-    } catch (error) {
-      bisyncError = String(error);
-    } finally {
-      bisyncBusy = false;
-      await onRefresh?.();
-    }
-  }
-
-  // Unico pulsante per eseguire con --force, usato sia dal pannello di
-  // risultato live sia dalla cronologia: il pulsante compare solo dentro il
-  // riquadro dei dettagli già espanso (log + avviso appena sopra, sempre
-  // visibili insieme), quindi non serve un secondo modal di conferma — la
-  // lettura del log e dell'avviso PRIMA di poter cliccare è già la
-  // "conferma", stesso principio di sicurezza di prima ma senza un altro
-  // popup impilato sopra quello attuale.
-  async function forceBisyncNow() {
-    bisyncBusy = true;
-    bisyncError = null;
-    try {
-      bisyncRunResult = await invoke<BisyncRunEntry>("run_bisync_job_forced", { name: remoteName });
-    } catch (error) {
-      bisyncError = String(error);
-    } finally {
-      bisyncBusy = false;
-      await onRefresh?.();
-    }
-  }
-
-  // Stesso principio di disableBackupAndClose, per la bisync.
-  async function disableBisyncAndClose() {
-    bisyncBusy = true;
-    bisyncError = null;
-    try {
-      await disableBisync();
-      bisyncModalOpen = false;
-    } catch (error) {
-      bisyncError = String(error);
-    } finally {
-      bisyncBusy = false;
-    }
-  }
-
-  // --- Remote stesso ---
+  // --- Remote stesso (eliminazione — resta un'azione a livello di remote,
+  // non di servizio, quindi fuori dal pannello unico). ---
   type RemoteUsage = { mountName: string | null; backupName: string | null; bisyncName: string | null };
   let deleteRemoteModalOpen = $state(false);
   let remoteUsage = $state<RemoteUsage | null>(null);
@@ -797,10 +211,16 @@
   <div class="row-main">
     <div class="remote-info">
       <span class="remote-name">{remoteName}</span>
-      {#if lastSuccessfulOp !== null}
-        <span class="last-op">{$t("remoteRow.lastOpSuccess", { values: { when: formatWhen(lastSuccessfulOp) } })}</span>
-      {:else}
+      {#if lastAttempt === null}
         <span class="last-op muted">{$t("remoteRow.noOpYet")}</span>
+      {:else if lastAttempt.outcome === "ok"}
+        <span class="last-op">{$t("remoteRow.lastOpSuccess", { values: { when: formatWhen(lastAttempt.whenUnix) } })}</span>
+      {:else if lastAttempt.outcome === "conflict"}
+        <span class="last-op conflict">{$t("remoteRow.lastOpConflict", { values: { when: formatWhen(lastAttempt.whenUnix) } })}</span>
+      {:else}
+        <span class="last-op failed">
+          {$t("remoteRow.lastOpFailed", { values: { when: formatWhen(lastAttempt.whenUnix), reason: truncate(lastAttempt.reason ?? "") } })}
+        </span>
       {/if}
       {#if countdownText}
         <span class="last-op countdown">{countdownText}</span>
@@ -810,35 +230,14 @@
       {/if}
     </div>
     <div class="row-actions">
-      <button
-        type="button"
-        class="icon-button action-mount"
-        class:active={activeService === "mount"}
-        title={$t("remoteRow.mountAction")}
-        onclick={() => onServiceIconClick("mount")}
-      >
-        <Icon kind="mount" />
-      </button>
-      <button
-        type="button"
-        class="icon-button action-backup"
-        class:active={activeService === "backup"}
-        title={$t("remoteRow.backupAction")}
-        onclick={() => onServiceIconClick("backup")}
-      >
-        <Icon kind="backup" />
-      </button>
-      <button
-        type="button"
-        class="icon-button action-bisync"
-        class:active={activeService === "bisync"}
-        title={$t("remoteRow.bisyncAction")}
-        onclick={() => onServiceIconClick("bisync")}
-      >
-        <Icon kind="bisync" />
-      </button>
-      <button type="button" class="icon-button status-button" title={$t("remoteRow.statusAndHistory")} onclick={() => (historyModalOpen = true)}>
-        <StatusDot color={statusColor} />
+      <button type="button" class="service-pill" class:mount={displayService === "mount"} class:backup={displayService === "backup"} class:bisync={displayService === "bisync"} onclick={() => (panelOpen = true)}>
+        {#if displayService}
+          <Icon kind={displayService} />
+          {SERVICE_LABELS[displayService]}
+        {:else}
+          <Icon kind="add" />
+          {$t("remoteRow.notConfigured")}
+        {/if}
       </button>
       <span class="separator"></span>
       <a class="icon-button" href={`/modifica-remote/${encodeURIComponent(remoteName)}`} title={$t("remoteRow.editRemote")}>
@@ -857,486 +256,8 @@
   </div>
 </li>
 
-<Modal bind:open={conflictModalOpen} title={$t("common.warning")}>
-  <div class="modal-form">
-    {#if activeService && conflictTargetKind}
-      <p>
-        {$t("remoteRow.conflictMessage", { values: { active: SERVICE_LABELS[activeService], target: SERVICE_LABELS[conflictTargetKind] } })}
-      </p>
-      <p class="hint">{$t("remoteRow.conflictQuestion")}</p>
-    {/if}
-    {#if conflictError}
-      <p class="error">✗ {conflictError}</p>
-    {/if}
-    <div class="row-actions modal-actions">
-      <button type="button" onclick={() => (conflictModalOpen = false)} disabled={conflictBusy}>{$t("common.cancel")}</button>
-      <button type="button" onclick={confirmConflictSwitch} disabled={conflictBusy}>
-        {conflictBusy ? $t("common.inProgress") : $t("common.confirm")}
-      </button>
-    </div>
-  </div>
-</Modal>
-
-<Modal bind:open={mountModalOpen} title={$t("remoteRow.mountTitle", { values: { remote: remoteName } })}>
-  <div class="modal-form">
-    <p class="hint">{$t("remoteRow.localFolder")}</p>
-    <div class="folder-picker">
-      <input type="text" bind:value={mountFormPoint} placeholder={$t("remoteRow.noFolderChosen")} readonly />
-      <button type="button" onclick={pickMountFolder}>{$t("common.chooseFolder")}</button>
-    </div>
-    <p class="hint">{$t("folderPicker.title", { values: { remote: remoteName } })}</p>
-    <div class="folder-picker">
-      <input type="text" value={mountFormRemotePath === "" ? $t("remoteRow.rootPath") : `/${mountFormRemotePath}`} placeholder="" readonly />
-      <button type="button" onclick={() => openRemotePicker((p) => (mountFormRemotePath = p))}>{$t("common.browse")}</button>
-    </div>
-    <label class="checkbox-row">
-      <input type="checkbox" bind:checked={mountFormAuto} />
-      {$t("remoteRow.autoMountAtStartup")}
-    </label>
-    {#if mountEntry}
-      <p class="hint">{mountEntry.mounted ? $t("remoteRow.currentlyMounted") : $t("remoteRow.currentlyNotMounted")}</p>
-    {/if}
-    {#if mountError}
-      <p class="error">✗ {mountError}</p>
-    {/if}
-    {#if mountErrorNeedsWinFsp}
-      {#if winFspInstallStarted}
-        <p class="hint">
-          {$t("remoteRow.winFspInstallerStarted")}
-        </p>
-      {:else}
-        <button type="button" onclick={installWinFsp} disabled={winFspInstallBusy}>
-          {winFspInstallBusy ? $t("remoteRow.downloadingWinFsp") : $t("remoteRow.installWinFsp")}
-        </button>
-      {/if}
-    {/if}
-    <div class="row-actions modal-actions">
-      {#if mountEntry?.mounted}
-        <button type="button" onclick={unmountOnly} disabled={mountBusy}>{mountBusy ? $t("common.inProgress") : $t("remoteRow.unmount")}</button>
-      {:else}
-        <button type="button" onclick={confirmMount} disabled={mountBusy || mountFormPoint.trim() === ""}>
-          {mountBusy ? $t("common.inProgress") : $t("remoteRow.mountAndOpen")}
-        </button>
-      {/if}
-    </div>
-  </div>
-</Modal>
-
-<Modal bind:open={backupModalOpen} title={$t("remoteRow.backupTitle", { values: { remote: remoteName } })}>
-  <div class="modal-form">
-    <div class="direction-toggle">
-      <label class="direction-option" class:selected={backupFormDirection === "toRemote"}>
-        <input type="radio" bind:group={backupFormDirection} value="toRemote" />
-        {$t("remoteRow.localToRemote", { values: { remote: remoteName } })}
-      </label>
-      <label class="direction-option" class:selected={backupFormDirection === "fromRemote"}>
-        <input type="radio" bind:group={backupFormDirection} value="fromRemote" />
-        {$t("remoteRow.remoteToLocal", { values: { remote: remoteName } })}
-      </label>
-    </div>
-    <p class="hint">{$t("remoteRow.localFolder")}</p>
-    <div class="folder-picker">
-      <input type="text" bind:value={backupFormLocalPath} placeholder={$t("remoteRow.noFolderChosen")} readonly />
-      <button type="button" onclick={pickBackupFolder}>{$t("common.chooseFolder")}</button>
-    </div>
-    {#if backupPathRootError}
-      <p class="error">✗ {backupPathRootError}</p>
-    {/if}
-    <p class="hint">{$t("folderPicker.title", { values: { remote: remoteName } })}</p>
-    <div class="folder-picker">
-      <input type="text" value={backupFormRemotePath === "" ? $t("remoteRow.rootPath") : `/${backupFormRemotePath}`} placeholder="" readonly />
-      <button type="button" onclick={() => openRemotePicker((p) => (backupFormRemotePath = p))}>{$t("common.browse")}</button>
-    </div>
-    <label class="checkbox-row">
-      <input type="checkbox" bind:checked={backupFormAutoEnabled} />
-      {$t("remoteRow.runAutomatically")}
-    </label>
-    {#if backupFormAutoEnabled}
-      <label class="interval-row">
-        {$t("remoteRow.intervalPrefix")} <input type="number" min="1" bind:value={backupFormAutoInterval} /> {$t("remoteRow.intervalSuffix")}
-      </label>
-    {/if}
-    <label class="checkbox-row">
-      <input type="checkbox" bind:checked={backupFormPropagateDeletions} onchange={onPropagateDeletionsChange} />
-      {$t("remoteRow.propagateDeletions")}
-    </label>
-    <p class="hint">
-      {#if backupFormPropagateDeletions}
-        {$t("remoteRow.propagateDeletionsOnHint")}
-      {:else}
-        {$t("remoteRow.propagateDeletionsOffHint")}
-      {/if}
-    </p>
-    <label class="checkbox-row">
-      <input type="checkbox" bind:checked={backupFormDryRun} />
-      {$t("remoteRow.dryRunCheckbox")}
-    </label>
-    {#if backupRunResult}
-      {#if backupRunResult.success}
-        <p class="ok">✓ {$t("remoteRow.executedNow")}</p>
-      {:else}
-        <p class="error">✗ {backupRunResult.message}</p>
-      {/if}
-    {/if}
-    {#if syncJob?.lastDryRun && !backupRunResult && syncJob.lastDryRun.whenUnix > (syncJob.history[0]?.whenUnix ?? 0)}
-      <!-- `!backupRunResult`: nasconde subito il pannello appena finito un run
-           vero in questa sessione, senza aspettare il prossimo refresh
-           periodico. Il confronto sulle date serve per i run veri arrivati
-           da fuori questa sessione (scheduler automatico, altra sessione
-           dell'app) — senza, un dry-run persistito restava visibile
-           indefinitamente anche dopo run reali successivi, perché
-           `backupRunResult` non si popola mai per quelli. Resta comunque
-           consultabile nella Cronologia in ogni caso. -->
-      {@const report = syncJob.lastDryRun}
-      {@const localIsSource = directionOf(syncJob) === "toRemote"}
-      <div class="conflict-box">
-        <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
-        <p>
-          {$t("remoteRow.dryRunLocalTotal", {
-            values: { count: localIsSource ? report.sourceTotalFiles : report.destinationTotalFiles },
-          })}
-        </p>
-        <p>
-          {$t("remoteRow.dryRunRemoteTotal", {
-            values: { count: localIsSource ? report.destinationTotalFiles : report.sourceTotalFiles },
-          })}
-        </p>
-        <p>{$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })}</p>
-        <p>
-          {#if report.wouldDelete > 0}
-            ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
-          {:else}
-            {$t("remoteRow.dryRunNoDeletes")}
-          {/if}
-        </p>
-      </div>
-    {/if}
-    {#if backupError}
-      <p class="error">✗ {backupError}</p>
-    {/if}
-    <div class="row-actions modal-actions">
-      {#if syncJob}
-        <button type="button" onclick={runBackupNow} disabled={backupBusy}>
-          {backupBusy
-            ? backupFormDryRun
-              ? $t("remoteRow.dryRunInProgress")
-              : $t("common.inProgress")
-            : backupFormDryRun
-              ? $t("remoteRow.dryRunButton")
-              : $t("remoteRow.runNow")}
-        </button>
-      {/if}
-      <button type="button" onclick={saveBackup} disabled={backupBusy || backupFormLocalPath.trim() === ""}>
-        {backupBusy ? $t("remoteRow.saving") : $t("remoteRow.saveAndClose")}
-      </button>
-      {#if backupWasActiveOnOpen}
-        <button type="button" onclick={disableBackupAndClose} disabled={backupBusy}>{$t("remoteRow.disable")}</button>
-      {/if}
-      {#if syncJob}
-        <button type="button" onclick={() => (backupTrashOpen = true)}>
-          <Icon kind="trash" />
-          {$t("trash.openButton")}
-        </button>
-      {/if}
-    </div>
-  </div>
-</Modal>
-
-<Modal bind:open={backupTrashOpen} title={$t("trash.title")}>
-  {#if syncJob}
-    <TrashView sides={[syncJob.destination]} />
-  {/if}
-</Modal>
-
-<Modal bind:open={propagateDeletionsWarningOpen} title={$t("common.warning")}>
-  <div class="modal-form">
-    <p>{$t("remoteRow.propagateDeletionsWarningIntro", { values: { remote: remoteName } })}</p>
-    <p>
-      <strong>{$t("remoteRow.propagateDeletionsWarningOnTitle")}</strong> {$t("remoteRow.propagateDeletionsWarningOnBody")}
-    </p>
-    <p>
-      <strong>{$t("remoteRow.propagateDeletionsWarningOffTitle")}</strong> {$t("remoteRow.propagateDeletionsWarningOffBody")}
-    </p>
-    <div class="row-actions modal-actions">
-      <button type="button" onclick={() => (propagateDeletionsWarningOpen = false)}>{$t("common.cancel")}</button>
-      <button type="button" onclick={confirmPropagateDeletions}>{$t("remoteRow.understoodEnable")}</button>
-    </div>
-  </div>
-</Modal>
-
-<Modal bind:open={backupHomeWarningOpen} title={$t("common.warning")} elevated>
-  <div class="modal-form">
-    <p>{$t("remoteRow.dangerousPathHomeWarning", { values: { path: pendingBackupHomePath ?? "" } })}</p>
-    <div class="row-actions modal-actions">
-      <button type="button" onclick={cancelBackupHomePath}>{$t("common.cancel")}</button>
-      <button type="button" onclick={confirmBackupHomePath}>{$t("remoteRow.dangerousPathHomeConfirm")}</button>
-    </div>
-  </div>
-</Modal>
-
-<Modal bind:open={bisyncHomeWarningOpen} title={$t("common.warning")} elevated>
-  <div class="modal-form">
-    <p>{$t("remoteRow.dangerousPathHomeWarning", { values: { path: pendingBisyncHomePath ?? "" } })}</p>
-    <div class="row-actions modal-actions">
-      <button type="button" onclick={cancelBisyncHomePath}>{$t("common.cancel")}</button>
-      <button type="button" onclick={confirmBisyncHomePath}>{$t("remoteRow.dangerousPathHomeConfirm")}</button>
-    </div>
-  </div>
-</Modal>
-
-<Modal bind:open={bisyncModalOpen} title={$t("remoteRow.bisyncTitle", { values: { remote: remoteName } })}>
-  <div class="modal-form">
-    <p class="hint">{$t("remoteRow.localFolder")}</p>
-    <div class="folder-picker">
-      <input type="text" bind:value={bisyncFormLocalPath} placeholder={$t("remoteRow.noFolderChosen")} readonly />
-      <button type="button" onclick={pickBisyncFolder}>{$t("common.chooseFolder")}</button>
-    </div>
-    {#if bisyncPathRootError}
-      <p class="error">✗ {bisyncPathRootError}</p>
-    {/if}
-    <p class="hint">{$t("folderPicker.title", { values: { remote: remoteName } })}</p>
-    <div class="folder-picker">
-      <input type="text" value={bisyncFormRemotePath === "" ? $t("remoteRow.rootPath") : `/${bisyncFormRemotePath}`} placeholder="" readonly />
-      <button type="button" onclick={() => openRemotePicker((p) => (bisyncFormRemotePath = p))}>{$t("common.browse")}</button>
-    </div>
-    <p class="hint">
-      {$t("remoteRow.bisyncFirstRunHint")}
-    </p>
-    <label class="checkbox-row">
-      <input type="checkbox" bind:checked={bisyncFormAutoEnabled} />
-      {$t("remoteRow.runAutomatically")}
-    </label>
-    {#if bisyncFormAutoEnabled}
-      <label class="interval-row">
-        {$t("remoteRow.intervalPrefix")} <input type="number" min="1" bind:value={bisyncFormAutoInterval} /> {$t("remoteRow.intervalSuffix")}
-      </label>
-    {/if}
-    {#if bisyncJob?.needsResync}
-      <p class="hint">{$t("remoteRow.needsResyncHint")}</p>
-    {/if}
-    <label class="checkbox-row">
-      <input type="checkbox" bind:checked={bisyncFormDryRun} />
-      {$t("remoteRow.dryRunCheckbox")}
-    </label>
-    {#if bisyncJob?.lastDryRun && !bisyncRunResult && bisyncJob.lastDryRun.whenUnix > (bisyncJob.history[0]?.whenUnix ?? 0)}
-      <!-- Stesso principio del backup (vedi lì per il perché del confronto
-           sulle date, non solo sullo stato effimero della sessione): dopo un
-           run vero — anche arrivato dallo scheduler automatico, non solo da
-           questa sessione — il dry-run persistito è superato, resta in
-           Cronologia ma non qui accanto al risultato più recente. -->
-      {@const report = bisyncJob.lastDryRun}
-      <div class="conflict-box">
-        <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
-        <p>{$t("remoteRow.dryRunLocalTotal", { values: { count: report.path1TotalFiles } })}</p>
-        <p>{$t("remoteRow.dryRunRemoteTotal", { values: { count: report.path2TotalFiles } })}</p>
-        <p>{$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })}</p>
-        <p>
-          {#if report.wouldDelete > 0}
-            ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
-          {:else}
-            {$t("remoteRow.dryRunNoDeletes")}
-          {/if}
-        </p>
-      </div>
-      <LogView text={report.log} />
-    {/if}
-    {#if bisyncRunResult}
-      {#if bisyncRunResult.success && bisyncRunResult.conflictPaths.length === 0}
-        <p class="ok">✓ {$t("remoteRow.executedNow")}</p>
-      {:else if bisyncRunResult.success}
-        <div class="conflict-box">
-          <strong>⚠ {$t("remoteRow.conflictFilesCount", { values: { count: bisyncRunResult.conflictPaths.length } })}</strong>
-          <p>{$t("remoteRow.noVersionLost")}</p>
-        </div>
-      {:else}
-        <p class="error">✗ {bisyncRunResult.message}</p>
-        {#if bisyncRunResult.log || bisyncRunResult.needsForce}
-          <button type="button" onclick={() => (bisyncDetailsExpanded = !bisyncDetailsExpanded)}>
-            {bisyncDetailsExpanded ? $t("remoteRow.hideDetailedLog") : $t("remoteRow.showDetailedLog")}
-          </button>
-        {/if}
-        {#if bisyncDetailsExpanded}
-          {#if bisyncRunResult.log}<LogView text={bisyncRunResult.log} />{/if}
-          {#if bisyncRunResult.needsForce}
-            <div class="conflict-box">
-              <p>{$t("remoteRow.forceBisyncWarningIntro")}</p>
-              <p>{$t("remoteRow.forceBisyncWarningHint")}</p>
-            </div>
-            <button type="button" onclick={forceBisyncNow} disabled={bisyncBusy}>
-              {bisyncBusy ? $t("common.inProgress") : $t("remoteRow.runWithForce")}
-            </button>
-          {/if}
-        {/if}
-      {/if}
-    {/if}
-    {#if bisyncError}
-      <p class="error">✗ {bisyncError}</p>
-    {/if}
-    <div class="row-actions modal-actions">
-      {#if bisyncJob}
-        <button type="button" onclick={runBisyncNow} disabled={bisyncBusy}>
-          {bisyncBusy
-            ? bisyncFormDryRun
-              ? $t("remoteRow.dryRunInProgress")
-              : $t("common.inProgress")
-            : bisyncFormDryRun
-              ? $t("remoteRow.dryRunButton")
-              : $t("remoteRow.runNow")}
-        </button>
-      {/if}
-      <button type="button" onclick={saveBisync} disabled={bisyncBusy || bisyncFormLocalPath.trim() === ""}>
-        {bisyncBusy ? $t("remoteRow.saving") : $t("remoteRow.saveAndClose")}
-      </button>
-      {#if bisyncWasActiveOnOpen}
-        <button type="button" onclick={disableBisyncAndClose} disabled={bisyncBusy}>{$t("remoteRow.disable")}</button>
-      {/if}
-      {#if bisyncJob}
-        <button type="button" onclick={() => (bisyncTrashOpen = true)}>
-          <Icon kind="trash" />
-          {$t("trash.openButton")}
-        </button>
-      {/if}
-    </div>
-  </div>
-</Modal>
-
-<Modal bind:open={bisyncTrashOpen} title={$t("trash.title")}>
-  {#if bisyncJob}
-    <TrashView sides={[bisyncJob.path1, bisyncJob.path2]} />
-  {/if}
-</Modal>
-
-<RemoteFolderPicker bind:open={remotePickerOpen} {remoteName} onSelect={(path) => remotePickerOnSelect?.(path)} />
-
-<Modal bind:open={historyModalOpen} title={$t("remoteRow.historyTitle", { values: { remote: remoteName } })}>
-  {#if activeService === null}
-    <p class="hint">{$t("remoteRow.noActiveService")}</p>
-  {:else if activeService === "mount" && mountEntry}
-    {#if mountEntry.history.length === 0}
-      <p class="hint">{$t("remoteRow.noMountAttempts")}</p>
-    {:else}
-      <ul class="history-list">
-        {#each mountEntry.history as entry (entry.whenUnix + entry.action)}
-          <li>
-            <span class={entry.success ? "ok" : "error"}>{entry.success ? "✓" : "✗"} {entry.action}</span>
-            <span class="hint">{formatWhen(entry.whenUnix)}</span>
-            {#if !entry.success}<p class="error">{entry.message}</p>{/if}
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  {:else if activeService === "backup" && syncJob}
-    {#if syncJob.history.length === 0}
-      <p class="hint">{$t("remoteRow.noRunsYet")}</p>
-    {:else}
-      <ul class="history-list">
-        {#each syncJob.history as entry (entry.whenUnix)}
-          <li>
-            <span class={entry.success ? "ok" : "error"}>{entry.success ? `✓ ${$t("remoteRow.succeeded")}` : `✗ ${$t("remoteRow.failed")}`}</span>
-            <span class="hint">{formatWhen(entry.whenUnix)}</span>
-            {#if !entry.success}<p class="error">{entry.message}</p>{/if}
-            {#if entry.transfers.length > 0}
-              <button
-                type="button"
-                onclick={() => (expandedHistoryEntryKey = expandedHistoryEntryKey === entry.whenUnix ? null : entry.whenUnix)}
-              >
-                {expandedHistoryEntryKey === entry.whenUnix
-                  ? $t("remoteRow.hideDetailedLog")
-                  : $t("remoteRow.showTransfersCount", { values: { count: entry.transfers.length } })}
-              </button>
-              {#if expandedHistoryEntryKey === entry.whenUnix}
-                <LogView text={formatTransfers(entry.transfers)} />
-              {/if}
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    {/if}
-    {#if syncJob.lastDryRun}
-      {@const report = syncJob.lastDryRun}
-      {@const localIsSource = directionOf(syncJob) === "toRemote"}
-      <div class="conflict-box">
-        <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
-        <p>
-          {$t("remoteRow.dryRunLocalTotal", {
-            values: { count: localIsSource ? report.sourceTotalFiles : report.destinationTotalFiles },
-          })}
-          · {$t("remoteRow.dryRunRemoteTotal", {
-            values: { count: localIsSource ? report.destinationTotalFiles : report.sourceTotalFiles },
-          })}
-        </p>
-        <p>
-          {$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })} ·
-          {#if report.wouldDelete > 0}
-            ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
-          {:else}
-            {$t("remoteRow.dryRunNoDeletes")}
-          {/if}
-        </p>
-      </div>
-    {/if}
-  {:else if activeService === "bisync" && bisyncJob}
-    {#if bisyncJob.history.length === 0}
-      <p class="hint">{$t("remoteRow.noRunsYet")}</p>
-    {:else}
-      <ul class="history-list">
-        {#each bisyncJob.history as entry, index (entry.whenUnix)}
-          <li>
-            {#if !entry.success}
-              <span class="error">✗ {$t("remoteRow.failed")}</span>
-            {:else if entry.conflictPaths.length > 0}
-              <span class="yellow-text">⚠ {$t("remoteRow.conflictsCount", { values: { count: entry.conflictPaths.length } })}</span>
-            {:else}
-              <span class="ok">✓ {$t("remoteRow.succeeded")}</span>
-            {/if}
-            <span class="hint">{formatWhen(entry.whenUnix)}</span>
-            {#if !entry.success}
-              <p class="error">{entry.message}</p>
-              {#if entry.log || (entry.needsForce && index === 0)}
-                <button
-                  type="button"
-                  onclick={() => (expandedHistoryEntryKey = expandedHistoryEntryKey === entry.whenUnix ? null : entry.whenUnix)}
-                >
-                  {expandedHistoryEntryKey === entry.whenUnix ? $t("remoteRow.hideDetailedLog") : $t("remoteRow.showDetailedLog")}
-                </button>
-              {/if}
-              {#if expandedHistoryEntryKey === entry.whenUnix}
-                {#if entry.log}<LogView text={entry.log} />{/if}
-                {#if entry.needsForce && index === 0}
-                  <div class="conflict-box">
-                    <p>{$t("remoteRow.forceBisyncWarningIntro")}</p>
-                    <p>{$t("remoteRow.forceBisyncWarningHint")}</p>
-                  </div>
-                  <button type="button" onclick={forceBisyncNow} disabled={bisyncBusy}>
-                    {bisyncBusy ? $t("common.inProgress") : $t("remoteRow.runWithForce")}
-                  </button>
-                {/if}
-              {/if}
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    {/if}
-    {#if bisyncJob.lastDryRun}
-      {@const report = bisyncJob.lastDryRun}
-      <div class="conflict-box">
-        <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
-        <p>
-          {$t("remoteRow.dryRunLocalTotal", { values: { count: report.path1TotalFiles } })} ·
-          {$t("remoteRow.dryRunRemoteTotal", { values: { count: report.path2TotalFiles } })}
-        </p>
-        <p>
-          {$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })} ·
-          {#if report.wouldDelete > 0}
-            ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
-          {:else}
-            {$t("remoteRow.dryRunNoDeletes")}
-          {/if}
-        </p>
-      </div>
-      <LogView text={report.log} />
-    {/if}
-  {/if}
+<Modal bind:open={panelOpen} title={$t("remotePanel.title", { values: { remote: remoteName } })}>
+  <RemotePanel {remoteName} {mountEntry} {syncJob} {bisyncJob} {onRefresh} />
 </Modal>
 
 <Modal bind:open={deleteRemoteModalOpen} title={$t("remoteRow.deleteTitle", { values: { remote: remoteName } })}>
@@ -1358,7 +279,7 @@
     {/if}
     <div class="row-actions modal-actions">
       <button type="button" onclick={() => (deleteRemoteModalOpen = false)} disabled={deletingRemote}>{$t("common.cancel")}</button>
-      <button type="button" onclick={confirmDeleteRemote} disabled={deletingRemote}>
+      <button type="button" class="btn-danger" onclick={confirmDeleteRemote} disabled={deletingRemote}>
         {deletingRemote ? $t("remoteRow.deleting") : $t("common.confirm")}
       </button>
     </div>
@@ -1423,6 +344,14 @@
   color: var(--accent);
 }
 
+.last-op.failed {
+  color: var(--error);
+}
+
+.last-op.conflict {
+  color: var(--warning-text);
+}
+
 .row-actions {
   display: flex;
   align-items: center;
@@ -1437,15 +366,47 @@
   margin: 0 0.1em;
 }
 
-/* Un colore per azione (mount = accento dell'app, backup = blu, bisync =
-   viola) invece di un unico stile piatto: da spento è un contorno tenue
-   con l'icona già nel suo colore, da attivo il chip si riempie a tinta
-   piena con un alone colorato che lo fa "accendere" — modifica resta
-   sempre neutro (nessun concetto di attivo/spento), elimina si colora di
-   rosso solo al passaggio del mouse, mai a riposo. Elevazione leggera
-   (ombra + sollevamento in hover) per l'effetto "piatto ma con un po' di
-   profondità" richiesto, invece del semplice `filter: brightness` di
-   prima. */
+/* Un solo indicatore invece delle 3 icone mount/backup/bisync di prima —
+   colorato per famiglia di servizio (mount = accento dell'app, backup =
+   blu, bisync = viola), stesso principio cromatico di prima ma un solo
+   controllo invece di tre, dato che sono comunque una scelta mutuamente
+   esclusiva (audit UX 21/8/2026, punto B). */
+.service-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.5em 0.9em;
+  border-radius: 100px;
+  border: 1px solid var(--border-color-subtle);
+  background-color: var(--surface-tint);
+  color: var(--text-muted);
+  font-size: 0.85em;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-icon-rest);
+  transition: box-shadow 0.14s ease, transform 0.14s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.service-pill:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-icon-hover);
+}
+
+.service-pill.mount {
+  color: var(--accent);
+  background-color: var(--accent-bg);
+}
+
+.service-pill.backup {
+  color: var(--blue);
+  background-color: var(--blue-bg);
+}
+
+.service-pill.bisync {
+  color: var(--violet);
+  background-color: var(--violet-bg);
+}
+
 .icon-button {
   display: inline-flex;
   align-items: center;
@@ -1478,132 +439,10 @@
   opacity: 0.5;
 }
 
-.icon-button.action-mount {
-  color: var(--accent);
-  background-color: var(--accent-bg);
-}
-
-.icon-button.action-backup {
-  color: var(--blue);
-  background-color: var(--blue-bg);
-}
-
-.icon-button.action-bisync {
-  color: var(--violet);
-  background-color: var(--violet-bg);
-}
-
-.icon-button.action-mount.active {
-  color: var(--bg-surface);
-  background-color: var(--accent);
-  border-color: transparent;
-  box-shadow: var(--shadow-icon-rest), 0 0 0 4px var(--accent-bg);
-}
-
-.icon-button.action-backup.active {
-  color: var(--bg-surface);
-  background-color: var(--blue);
-  border-color: transparent;
-  box-shadow: var(--shadow-icon-rest), 0 0 0 4px var(--blue-bg);
-}
-
-.icon-button.action-bisync.active {
-  color: var(--bg-surface);
-  background-color: var(--violet);
-  border-color: transparent;
-  box-shadow: var(--shadow-icon-rest), 0 0 0 4px var(--violet-bg);
-}
-
-.icon-button.active:hover:not(:disabled) {
-  box-shadow: var(--shadow-icon-hover);
-}
-
 .icon-button.action-delete:hover:not(:disabled),
 .icon-button.action-delete:focus-visible {
   color: var(--bg-surface);
   background-color: var(--status-red);
   border-color: transparent;
-}
-
-.modal-form {
-  display: flex;
-  flex-direction: column;
-  /* Ridotto da 0.7em: con i margini dei paragrafi già azzerati a monte
-     (vedi Modal.svelte), questo gap è l'unica spaziatura verticale reale
-     tra un'etichetta/hint e il campo sotto — 0.7em risultava comunque
-     più aria del necessario per un form denso. */
-  gap: 0.5em;
-}
-
-.modal-actions {
-  justify-content: flex-end;
-}
-
-.direction-toggle {
-  display: flex;
-  gap: 0.6em;
-  flex-wrap: wrap;
-}
-
-.direction-option {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 0.4em;
-  padding: 0.4em 0.6em;
-  border-radius: 6px;
-  border: 1px solid var(--border-color);
-  font-size: 0.9em;
-}
-
-.direction-option.selected {
-  border-color: var(--accent);
-  background-color: var(--accent-bg);
-}
-
-.direction-option input {
-  width: auto;
-}
-
-.conflict-box {
-  padding: 0.6em 0.8em;
-  border-radius: 6px;
-  background-color: var(--warning-bg);
-  color: var(--warning-text);
-  font-size: 0.85em;
-}
-
-.conflict-box p {
-  margin: 0.3em 0 0;
-}
-
-.conflict-box ul {
-  margin: 0.3em 0 0;
-  padding-left: 1.2em;
-}
-
-.yellow-text {
-  color: var(--warning-text);
-}
-
-.history-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.6em;
-}
-
-.history-list li {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15em;
-  padding-bottom: 0.6em;
-  border-bottom: 1px solid var(--border-color-subtle);
-}
-
-.history-list li:last-child {
-  border-bottom: none;
 }
 </style>

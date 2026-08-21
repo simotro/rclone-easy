@@ -89,7 +89,7 @@
     <p class="startup-warning">⚠ {startupWarning}</p>
   {/if}
 
-  <section>
+  <section class="remotes-section">
     <div class="top-actions">
       <button type="button" class="add-remote-button" onclick={() => goto("/nuovo-remote")}>
         <Icon kind="add" />
@@ -105,11 +105,20 @@
     {:else if ownRemotes.value.length === 0}
       <p class="empty">{$t("home.noRemotesYet")}</p>
     {:else}
-      <ul class="remote-list">
-        {#each ownRemotes.value as name (name)}
-          <RemoteRow remoteName={name} {mounts} {jobs} {bisyncJobs} onDeleted={loadOwnRemotes} onRefresh={loadServices} />
-        {/each}
-      </ul>
+      <!-- Scorre qui, non l'intera finestra (audit UX 21/8/2026, punto E):
+           con molti remote configurati, prima l'intero corpo della pagina
+           scorreva via, portandosi dietro anche "Aggiungi Remote" e
+           "Impostazioni". `min-height: 0` è necessario perché un figlio
+           flex non si restringe mai sotto la dimensione del suo contenuto
+           per conto suo — senza, `overflow-y: auto` qui sotto non avrebbe
+           mai occasione di scattare. -->
+      <div class="remote-list-scroll">
+        <ul class="remote-list">
+          {#each ownRemotes.value as name (name)}
+            <RemoteRow remoteName={name} {mounts} {jobs} {bisyncJobs} onDeleted={loadOwnRemotes} onRefresh={loadServices} />
+          {/each}
+        </ul>
+      </div>
     {/if}
   </section>
 </main>
@@ -119,6 +128,10 @@
   margin: 0 auto;
   max-width: 44em;
   padding: 4vh 1.5em;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
 }
 
 .app-title {
@@ -136,8 +149,20 @@
   margin: 0;
 }
 
-section {
+.remotes-section {
   margin-top: 1.5em;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.remote-list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* Un po' di margine per non far toccare la scrollbar all'ultima riga. */
+  padding-bottom: 0.2em;
 }
 
 .empty {

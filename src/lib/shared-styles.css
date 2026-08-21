@@ -33,6 +33,11 @@
   --border-color-subtle: rgba(0, 0, 0, 0.15);
   --accent: #2a94ae;
   --accent-bg: rgba(42, 148, 174, 0.12);
+  /* Testo/icona sopra un fondo pieno `--accent` (pulsante primario) — un
+     token a parte perché il contrasto giusto si inverte tra i temi: bianco
+     regge sul teal scuro chiaro, ma sparirebbe sul ciano chiaro del tema
+     scuro sotto. */
+  --accent-contrast: #ffffff;
   --ok: #1a7f37;
   --error: #cf222e;
   --warning-bg: #fff8e1;
@@ -74,6 +79,7 @@
     --border-color-subtle: rgba(255, 255, 255, 0.2);
     --accent: #68c9e0;
     --accent-bg: rgba(104, 201, 224, 0.14);
+    --accent-contrast: #0d2226;
     --ok: #3fb950;
     --error: #ff7b72;
     --warning-bg: #4a3b00;
@@ -102,6 +108,7 @@
   --border-color-subtle: rgba(255, 255, 255, 0.2);
   --accent: #68c9e0;
   --accent-bg: rgba(104, 201, 224, 0.14);
+  --accent-contrast: #0d2226;
   --ok: #3fb950;
   --error: #ff7b72;
   --warning-bg: #4a3b00;
@@ -129,6 +136,11 @@
   --border-color-subtle: rgba(0, 0, 0, 0.15);
   --accent: #2a94ae;
   --accent-bg: rgba(42, 148, 174, 0.12);
+  /* Testo/icona sopra un fondo pieno `--accent` (pulsante primario) — un
+     token a parte perché il contrasto giusto si inverte tra i temi: bianco
+     regge sul teal scuro chiaro, ma sparirebbe sul ciano chiaro del tema
+     scuro sotto. */
+  --accent-contrast: #ffffff;
   --ok: #1a7f37;
   --error: #cf222e;
   --warning-bg: #fff8e1;
@@ -219,6 +231,34 @@ button:disabled {
   opacity: 0.6;
 }
 
+/* Gerarchia dei pulsanti (audit UX 21/8/2026): `button` sopra resta la
+   variante secondaria/neutra, invariata — usata per il grosso delle azioni.
+   `.btn-primary` per l'unica azione "fai questo" di una vista (Esegui ora).
+   `.btn-danger` per le azioni distruttive (Disabilita, Elimina, Forza
+   comunque) — mai piena come la primaria, per non competere visivamente con
+   "fai questo": solo bordo e testo colorati. Va sempre dentro
+   `.danger-actions`, mai adiacente a un pulsante normale senza stacco. */
+.btn-primary {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.btn-danger {
+  border-color: var(--error);
+  background-color: transparent;
+  color: var(--error);
+  box-shadow: none;
+}
+
+.danger-actions {
+  margin-left: auto;
+  padding-left: 0.8em;
+  border-left: 1px solid var(--border-color-subtle);
+  display: flex;
+  gap: 0.5em;
+}
+
 .ok {
   color: var(--ok);
   font-size: 0.9em;
@@ -271,4 +311,85 @@ button:disabled {
   display: flex;
   gap: 0.5em;
   flex-wrap: wrap;
+}
+
+/* Spostate qui da RemoteRow.svelte il 21/8/2026 durante l'estrazione di
+   RemotePanel.svelte: usate da entrambi i componenti, non ha più senso
+   tenerle locali (scoped) a uno solo dei due. */
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+}
+
+.modal-actions {
+  justify-content: flex-end;
+}
+
+.direction-toggle {
+  display: flex;
+  gap: 0.6em;
+  flex-wrap: wrap;
+}
+
+.direction-option {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.4em 0.6em;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  font-size: 0.9em;
+}
+
+.direction-option.selected {
+  border-color: var(--accent);
+  background-color: var(--accent-bg);
+}
+
+.direction-option input {
+  width: auto;
+}
+
+.conflict-box {
+  padding: 0.6em 0.8em;
+  border-radius: 6px;
+  background-color: var(--warning-bg);
+  color: var(--warning-text);
+  font-size: 0.85em;
+}
+
+.conflict-box p {
+  margin: 0.3em 0 0;
+}
+
+.conflict-box ul {
+  margin: 0.3em 0 0;
+  padding-left: 1.2em;
+}
+
+.yellow-text {
+  color: var(--warning-text);
+}
+
+.history-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6em;
+}
+
+.history-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+  padding-bottom: 0.6em;
+  border-bottom: 1px solid var(--border-color-subtle);
+}
+
+.history-list li:last-child {
+  border-bottom: none;
 }
