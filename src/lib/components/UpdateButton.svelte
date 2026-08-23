@@ -12,6 +12,20 @@
   let open = $state(false);
   let installing = $state(false);
   let installError = $state<string | null>(null);
+  // Percentuale di avanzamento del download: nota solo se il server manda
+  // Content-Length nell'evento "Started" (di solito sì, per GitHub
+  // Releases) — altrimenti resta null e la UI mostra un indicatore
+  // indeterminato invece di una percentuale inventata.
+  let downloadTotal = $state<number | null>(null);
+  let downloadReceived = $state(0);
+  // Vero da quando il file è già stato scaricato e sostituito su disco, in
+  // attesa che l'utente scelga di riavviare — prima l'app si riavviava da
+  // sola non appena finiva il download, senza che l'utente potesse scegliere
+  // il momento (Simone, 21/8/2026).
+  let readyToRestart = $state(false);
+  let restarting = $state(false);
+
+  let downloadPercent = $derived(downloadTotal ? Math.min(100, Math.round((downloadReceived / downloadTotal) * 100)) : null);
 
   // Un solo controllo automatico all'avvio dell'app (non ripetuto ad ogni
   // montaggio del componente, che con questa disposizione resta comunque
@@ -44,17 +58,30 @@
     if (s.status !== "available") return;
     installing = true;
     installError = null;
+    downloadTotal = null;
+    downloadReceived = 0;
     try {
-      await s.update.downloadAndInstall();
+      await s.update.downloadAndInstall((event) => {
+        if (event.event === "Started") downloadTotal = event.data.contentLength ?? null;
+        else if (event.event === "Progress") downloadReceived += event.data.chunkLength;
+      });
       // L'AppImage/l'installer NSIS sono già stati sostituiti sul disco a
-      // questo punto — restart_app (non il semplice relaunch del plugin
-      // updater) fa ripartire l'app passando comunque dal nostro
-      // spegnimento pulito del demone rclone rcd, vedi lib.rs::restart_app.
-      await invoke("restart_app");
+      // questo punto, ma il riavvio vero e proprio parte solo quando lo
+      // conferma l'utente (restartNow), non in automatico.
+      installing = false;
+      readyToRestart = true;
     } catch (error) {
       installError = String(error);
       installing = false;
     }
+  }
+
+  async function restartNow() {
+    restarting = true;
+    // restart_app (non il semplice relaunch del plugin updater) fa
+    // ripartire l'app passando comunque dal nostro spegnimento pulito del
+    // demone rclone rcd, vedi lib.rs::restart_app.
+    await invoke("restart_app");
   }
 
   async function openDownloadPage() {
@@ -86,16 +113,32 @@
         {#if installError}
           <p class="error">✗ {installError}</p>
         {/if}
-        <div class="actions">
-          <button type="button" class="link-button" onclick={skipUpdate} disabled={installing}>{$t("update.skipVersion")}</button>
-          {#if s.installKind === "appimage" || s.installKind === "windows"}
-            <button type="button" onclick={installNow} disabled={installing}>
-              {installing ? $t("update.installing") : $t("update.installNow")}
+        {#if readyToRestart}
+          <p class="ready-hint">{$t("update.readyToRestart")}</p>
+          <div class="actions">
+            <button type="button" class="link-button" onclick={() => (open = false)} disabled={restarting}>{$t("update.later")}</button>
+            <button type="button" onclick={restartNow} disabled={restarting}>
+              {restarting ? $t("update.restarting") : $t("update.restartNow")}
             </button>
-          {:else}
-            <button type="button" onclick={openDownloadPage}>{$t("update.openDownloadPage")}</button>
+          </div>
+        {:else}
+          {#if installing}
+            <div class="progress-track" role="progressbar" aria-valuenow={downloadPercent ?? undefined} aria-valuemin={0} aria-valuemax={100}>
+              <div class="progress-fill" class:indeterminate={downloadPercent === null} style={downloadPercent !== null ? `width: ${downloadPercent}%` : undefined}></div>
+            </div>
+            <p class="hint">{downloadPercent !== null ? $t("update.downloadingPercent", { values: { percent: downloadPercent } }) : $t("update.installing")}</p>
           {/if}
-        </div>
+          <div class="actions">
+            <button type="button" class="link-button" onclick={skipUpdate} disabled={installing}>{$t("update.skipVersion")}</button>
+            {#if s.installKind === "appimage" || s.installKind === "windows"}
+              <button type="button" onclick={installNow} disabled={installing}>
+                {installing ? $t("update.installing") : $t("update.installNow")}
+              </button>
+            {:else}
+              <button type="button" onclick={openDownloadPage}>{$t("update.openDownloadPage")}</button>
+            {/if}
+          </div>
+        {/if}
       </div>
     {/if}
   </Modal>
@@ -145,5 +188,41 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.ready-hint {
+  color: var(--text-color);
+}
+
+.progress-track {
+  width: 100%;
+  height: 0.5em;
+  border-radius: 100px;
+  background-color: var(--surface-tint);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 100px;
+  background-color: var(--accent);
+  transition: width 0.2s ease;
+}
+
+/* Content-Length non sempre disponibile (dipende dal server) — senza una
+   percentuale nota, una barra piena ferma sembrerebbe bloccata: questa si
+   anima da sola per mostrare comunque che qualcosa sta succedendo. */
+.progress-fill.indeterminate {
+  width: 40%;
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
 }
 </style>

@@ -783,43 +783,6 @@ pub async fn delete_remote(app: AppHandle, state: tauri::State<'_, RcdState>, na
     Ok(())
 }
 
-/// Nomi delle voci (mount/backup/bisync) che referenziano un remote, per
-/// mostrarle nel modal di conferma prima di un'eliminazione a cascata —
-/// `None` per un tipo di servizio non configurato per questo remote.
-#[derive(Debug, Serialize, PartialEq, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteUsage {
-    pub mount_name: Option<String>,
-    pub backup_name: Option<String>,
-    pub bisync_name: Option<String>,
-}
-
-fn remote_usage_in(config_dir: &std::path::Path, name: &str) -> RemoteUsage {
-    let mount_name = crate::mounts::load_from_dir(config_dir)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|m| references_remote(&m.remote, name))
-        .map(|m| m.name);
-    let backup_name = crate::jobs::load_from_dir(config_dir)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|j| references_remote(&j.source, name) || references_remote(&j.destination, name))
-        .map(|j| j.name);
-    let bisync_name = crate::bisync::load_from_dir(config_dir)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|j| references_remote(&j.path1, name) || references_remote(&j.path2, name))
-        .map(|j| j.name);
-    RemoteUsage { mount_name, backup_name, bisync_name }
-}
-
-#[tauri::command]
-pub async fn remote_usage(app: AppHandle, name: String) -> Result<RemoteUsage, String> {
-    let config_dir =
-        app.path().app_config_dir().map_err(|e| format!("impossibile determinare la cartella di configurazione: {e}"))?;
-    Ok(remote_usage_in(&config_dir, &name))
-}
-
 /// Elimina il remote insieme a mount/backup/bisync che lo referenziano
 /// (al più uno per tipo, per via del vincolo "un solo mount/backup/bisync
 /// per remote" già applicato altrove) — usata dal modal di conferma in cui
@@ -1553,31 +1516,6 @@ mod tests {
         let result = check_remote_not_in_use(&dir.path, "prova");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("bidirezionale"));
-    }
-
-    #[test]
-    fn remote_usage_in_reports_nothing_when_the_remote_is_free() {
-        let dir = TempDir::new("remote-usage-free");
-        let usage = remote_usage_in(&dir.path, "prova");
-        assert_eq!(usage, RemoteUsage { mount_name: None, backup_name: None, bisync_name: None });
-    }
-
-    #[test]
-    fn remote_usage_in_names_every_kind_of_reference() {
-        let dir = TempDir::new("remote-usage-full");
-        crate::mounts::create_mount_in(&dir.path, "un-mount", "prova:x", "/tmp/a", false).unwrap();
-        crate::jobs::create_job_in(&dir.path, "un-backup", "/tmp/b", "prova:y", None, false).unwrap();
-        crate::bisync::create_bisync_job_in(&dir.path, "un-bisync", "/tmp/c", "prova:z", None).unwrap();
-
-        let usage = remote_usage_in(&dir.path, "prova");
-        assert_eq!(
-            usage,
-            RemoteUsage {
-                mount_name: Some("un-mount".to_string()),
-                backup_name: Some("un-backup".to_string()),
-                bisync_name: Some("un-bisync".to_string()),
-            }
-        );
     }
 
     #[tokio::test]

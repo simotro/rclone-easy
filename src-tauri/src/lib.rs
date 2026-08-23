@@ -17,7 +17,7 @@ mod remotes;
 use remotes::{
     create_remote, delete_remote, delete_remote_cascade, get_provider_options, get_remote_for_edit, import_remote,
     list_own_remotes, list_provider_types, list_remote_dir, list_s3_endpoints, list_s3_providers, list_s3_regions,
-    own_config_path, remote_usage, update_remote,
+    own_config_path, update_remote,
 };
 
 mod interactive_remote;
@@ -63,7 +63,7 @@ use jobs::{create_job, delete_job, dry_run_job, list_jobs, run_job, update_job};
 mod mounts;
 use mounts::{
     create_mount, delete_mount, download_and_launch_winfsp_installer, list_mounts, mount_now, mount_now_and_open,
-    unmount_now, update_mount,
+    open_mount_folder, unmount_now, update_mount,
 };
 
 mod bisync;
@@ -274,7 +274,6 @@ pub fn run() {
             update_remote,
             delete_remote,
             delete_remote_cascade,
-            remote_usage,
             get_remote_for_edit,
             list_s3_providers,
             list_s3_regions,
@@ -298,6 +297,7 @@ pub fn run() {
             delete_mount,
             mount_now,
             mount_now_and_open,
+            open_mount_folder,
             unmount_now,
             download_and_launch_winfsp_installer,
             list_bisync_jobs,

@@ -67,6 +67,22 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build
 
+      - name: Toglie la versione dal nome dell'AppImage
+        # L'updater sostituisce il contenuto dell'AppImage in esecuzione
+        # mantenendone il nome sul disco dell'utente: con la versione nel
+        # nome, dopo un aggiornamento il file resta con quella vecchia pur
+        # contenendo la versione nuova. Le altre app AppImage evitano il
+        # problema non mettendo mai la versione nel nome fin dalla prima
+        # release (convenzione ufficiale del progetto AppImage) — deb/rpm
+        # restano versionati come da convenzione delle rispettive
+        # distribuzioni, dato che non si auto-aggiornano da soli.
+        run: |
+          cd src-tauri/target/release/bundle/appimage
+          for f in *.AppImage *.AppImage.sig; do
+            [ -e "$f" ] || continue
+            mv "$f" "$(echo "$f" | sed -E 's/_[0-9]+\.[0-9]+\.[0-9]+_/_/')"
+          done
+
       - name: Carica gli installer Linux
         uses: actions/upload-artifact@v7
         with:

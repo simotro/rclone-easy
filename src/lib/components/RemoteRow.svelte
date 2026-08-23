@@ -1,9 +1,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { listen } from "@tauri-apps/api/event";
+  import { goto } from "$app/navigation";
   import Modal from "./Modal.svelte";
   import Icon from "./Icon.svelte";
-  import RemotePanel from "./RemotePanel.svelte";
   import { now, formatCountdown, nextRunAtMs } from "$lib/now";
   import type { MountEntry, SyncJob, BisyncJob } from "$lib/types";
   import { t } from "$lib/i18n";
@@ -36,8 +35,12 @@
 
   type ServiceKind = "mount" | "backup" | "bisync";
 
+  // Un mount conta come "attivo" anche solo con l'auto-mount all'avvio
+  // abilitato, non solo se montato adesso — stessa definizione del backend
+  // (activity.rs::active_service_for_remote), duplicata anche in
+  // RemotePanel.svelte per lo stesso motivo (vedi lì per il perché).
   let activeService = $derived.by<ServiceKind | null>(() => {
-    if (mountEntry?.mounted) return "mount";
+    if (mountEntry?.mounted || mountEntry?.autoMount) return "mount";
     if (syncJob?.autoIntervalMinutes !== null && syncJob !== null) return "backup";
     if (bisyncJob?.autoIntervalMinutes !== null && bisyncJob !== null) return "bisync";
     return null;
@@ -73,17 +76,17 @@
   type LastAttempt = { whenUnix: number; outcome: AttemptOutcome; reason: string | null };
 
   let lastAttempt = $derived.by<LastAttempt | null>(() => {
-    if (activeService === "mount" && mountEntry) {
+    if (displayService === "mount" && mountEntry) {
       const latest = mountEntry.history[0];
       if (!latest) return null;
       return { whenUnix: latest.whenUnix, outcome: latest.success ? "ok" : "failed", reason: latest.success ? null : latest.message };
     }
-    if (activeService === "backup" && syncJob) {
+    if (displayService === "backup" && syncJob) {
       const latest = syncJob.history[0];
       if (!latest) return null;
       return { whenUnix: latest.whenUnix, outcome: latest.success ? "ok" : "failed", reason: latest.success ? null : latest.message };
     }
-    if (activeService === "bisync" && bisyncJob) {
+    if (displayService === "bisync" && bisyncJob) {
       const latest = bisyncJob.history[0];
       if (!latest) return null;
       if (!latest.success) return { whenUnix: latest.whenUnix, outcome: "failed", reason: latest.message };
@@ -95,6 +98,48 @@
 
   function formatWhen(whenUnix: number): string {
     return new Date(whenUnix * 1000).toLocaleString();
+  }
+
+  async function openMountFolder(mountPoint: string) {
+    await invoke("open_mount_folder", { mountPoint });
+  }
+
+  // "Esegui ora"/"Monta"/"Smonta" — spostati qui dal tab "Esegui e stato"
+  // del pannello, eliminato perché ridondante con quello che questa riga
+  // già mostra (stato) e con la Cronologia (esito, log, recupero da
+  // conflitti bisync bloccati) (Simone, 22/8/2026). Un link di testo in
+  // coda alla riga di stato invece di un pulsante a parte accanto alla
+  // pill — niente forma/colore in più che compete con la pill, niente
+  // disallineamento tra righe di larghezza diversa (idea di Simone,
+  // 22/8/2026, dopo aver trovato il primo pulsante troppo "rumoroso").
+  let quickActionBusy = $state(false);
+  let quickActionError = $state<string | null>(null);
+  let quickActionDisabled = $derived(Boolean(syncJob?.isRunning || syncJob?.isDryRunning || bisyncJob?.isRunning || bisyncJob?.isDryRunning));
+  let showQuickActionInline = $derived(Boolean(displayService) && !quickActionDisabled);
+  let quickActionLabel = $derived.by(() => {
+    if (displayService === "mount") return mountEntry?.mounted ? $t("remoteRow.unmount") : $t("remoteRow.mountAndOpen");
+    return $t("remoteRow.runNow");
+  });
+
+  async function runQuickAction() {
+    if (!displayService || quickActionBusy || quickActionDisabled) return;
+    quickActionBusy = true;
+    quickActionError = null;
+    try {
+      if (displayService === "mount" && mountEntry) {
+        if (mountEntry.mounted) await invoke("unmount_now", { name: mountEntry.name });
+        else await invoke("mount_now_and_open", { name: mountEntry.name });
+      } else if (displayService === "backup") {
+        await invoke("run_job", { name: remoteName });
+      } else if (displayService === "bisync") {
+        await invoke("run_bisync_job", { name: remoteName });
+      }
+    } catch (error) {
+      quickActionError = String(error);
+    } finally {
+      quickActionBusy = false;
+      await onRefresh?.();
+    }
   }
 
   // Estratto breve del motivo di un fallimento per la riga collassata — mai
@@ -129,66 +174,47 @@
     return null;
   });
 
-  let panelOpen = $state(false);
-
-  let rootEl: HTMLLIElement | undefined = $state();
-  let highlighted = $state(false);
-
   // Cliccando una voce "Configura" o un avviso nel menu della tray, il
-  // backend porta la finestra in primo piano ed emette questo evento —
-  // scorriamo fino a questa riga e la evidenziamo, aprendo anche il
-  // pannello se veniva da un avviso (vedi tray.rs::focus_remote).
-  // L'evidenziazione resta finché la finestra non torna nascosta in tray
-  // (evento separato, vedi sotto) invece di sparire dopo un timeout
-  // arbitrario — l'utente potrebbe metterci più di qualche secondo a
-  // trovare/leggere la riga giusta.
+  // backend porta la finestra in primo piano ed emette un evento — gestito
+  // ora in +layout.svelte (naviga direttamente alla pagina del remote,
+  // niente più evidenziazione della riga: la riga non è più "dietro" a
+  // niente, la pagina di destinazione dice già da sola di quale remote si
+  // tratta). Vedi tray.rs::focus_remote.
+
+  // --- Menu "⋮" (Modifica/Elimina) — sostituisce le due icone singole
+  // affiancate alla pill di stato, disomogenee con quella (audit UX,
+  // Simone 21/8/2026, punti 7/9/10). Un solo listener a livello di
+  // documento invece che condizionato all'apertura: attaccato fin dal
+  // mount, così il click che APRE il menu (che raggiunge document in
+  // bubbling DOPO aver aperto) non rischia di richiuderlo subito — il
+  // controllo `moreMenuEl.contains` lo esclude comunque perché il pulsante
+  // che apre sta dentro lo stesso contenitore.
+  let moreMenuOpen = $state(false);
+  let moreMenuEl: HTMLDivElement | undefined = $state();
+
   $effect(() => {
-    let cancelled = false;
-    let unlistenFocus: (() => void) | undefined;
-    let unlistenHidden: (() => void) | undefined;
-
-    listen<{ remote: string; openHistory: boolean }>("rclone-easy://tray-focus-remote", (event) => {
-      if (event.payload.remote !== remoteName) return;
-      rootEl?.scrollIntoView({ behavior: "smooth", block: "center" });
-      highlighted = true;
-      if (event.payload.openHistory) panelOpen = true;
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenFocus = fn;
-    });
-
-    listen("rclone-easy://window-hidden", () => {
-      highlighted = false;
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenHidden = fn;
-    });
-
+    function onDocClick(event: MouseEvent) {
+      if (moreMenuOpen && moreMenuEl && !moreMenuEl.contains(event.target as Node)) moreMenuOpen = false;
+    }
+    function onKeydown(event: KeyboardEvent) {
+      if (event.key === "Escape") moreMenuOpen = false;
+    }
+    document.addEventListener("click", onDocClick);
+    document.addEventListener("keydown", onKeydown);
     return () => {
-      cancelled = true;
-      unlistenFocus?.();
-      unlistenHidden?.();
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onKeydown);
     };
   });
 
   // --- Remote stesso (eliminazione — resta un'azione a livello di remote,
   // non di servizio, quindi fuori dal pannello unico). ---
-  type RemoteUsage = { mountName: string | null; backupName: string | null; bisyncName: string | null };
   let deleteRemoteModalOpen = $state(false);
-  let remoteUsage = $state<RemoteUsage | null>(null);
   let deletingRemote = $state(false);
   let deleteRemoteError = $state<string | null>(null);
 
-  async function openDeleteRemoteModal() {
+  function openDeleteRemoteModal() {
     deleteRemoteError = null;
-    remoteUsage = null;
-    try {
-      remoteUsage = await invoke<RemoteUsage>("remote_usage", { name: remoteName });
-    } catch (error) {
-      // L'elenco di cosa verrebbe eliminato insieme al remote è solo
-      // informativo: se la richiesta fallisce si mostra comunque il modal
-      // di conferma, semplicemente senza quel dettaglio.
-    }
     deleteRemoteModalOpen = true;
   }
 
@@ -207,72 +233,131 @@
   }
 </script>
 
-<li class="remote-row" class:highlighted bind:this={rootEl}>
+<li class="remote-row">
   <div class="row-main">
     <div class="remote-info">
       <span class="remote-name">{remoteName}</span>
-      {#if lastAttempt === null}
-        <span class="last-op muted">{$t("remoteRow.noOpYet")}</span>
+      {#snippet quickActionLink()}
+        {#if showQuickActionInline}
+          <button type="button" class="inline-action-link" onclick={runQuickAction} disabled={quickActionBusy}>
+            {quickActionBusy ? $t("common.inProgress") : quickActionLabel}
+          </button>
+        {/if}
+      {/snippet}
+      {#if displayService === "mount"}
+        {#if mountEntry?.mounted}
+          <span class="last-op">
+            {$t("remoteRow.mountedOn")}
+            <button type="button" class="path-link" onclick={() => openMountFolder(mountEntry.mountPoint)}>{mountEntry.mountPoint}</button>
+            {@render quickActionLink()}
+          </span>
+        {:else if lastAttempt?.outcome === "failed"}
+          <span class="last-op failed">
+            {$t("remoteRow.lastOpFailed", { values: { when: formatWhen(lastAttempt.whenUnix), reason: truncate(lastAttempt.reason ?? "") } })}
+            {@render quickActionLink()}
+          </span>
+        {:else}
+          <span class="last-op">
+            {$t("remoteRow.currentlyNotMounted")}
+            {@render quickActionLink()}
+          </span>
+        {/if}
+      {:else if lastAttempt === null}
+        <span class="last-op">
+          {$t("remoteRow.noOpYet")}
+          {#if !countdownText}{@render quickActionLink()}{/if}
+        </span>
       {:else if lastAttempt.outcome === "ok"}
-        <span class="last-op">{$t("remoteRow.lastOpSuccess", { values: { when: formatWhen(lastAttempt.whenUnix) } })}</span>
+        <span class="last-op">
+          {$t("remoteRow.lastOpSuccess", { values: { when: formatWhen(lastAttempt.whenUnix) } })}
+          {#if !countdownText}{@render quickActionLink()}{/if}
+        </span>
       {:else if lastAttempt.outcome === "conflict"}
-        <span class="last-op conflict">{$t("remoteRow.lastOpConflict", { values: { when: formatWhen(lastAttempt.whenUnix) } })}</span>
+        <span class="last-op conflict">
+          {$t("remoteRow.lastOpConflict", { values: { when: formatWhen(lastAttempt.whenUnix) } })}
+          {#if !countdownText}{@render quickActionLink()}{/if}
+        </span>
       {:else}
         <span class="last-op failed">
           {$t("remoteRow.lastOpFailed", { values: { when: formatWhen(lastAttempt.whenUnix), reason: truncate(lastAttempt.reason ?? "") } })}
+          {#if !countdownText}{@render quickActionLink()}{/if}
         </span>
       {/if}
       {#if countdownText}
-        <span class="last-op countdown">{countdownText}</span>
+        <span class="last-op countdown">
+          {countdownText}
+          {@render quickActionLink()}
+        </span>
       {/if}
       {#if deleteRemoteError}
         <span class="error">✗ {deleteRemoteError}</span>
       {/if}
+      {#if quickActionError}
+        <span class="error">✗ {truncate(quickActionError)}</span>
+      {/if}
     </div>
     <div class="row-actions">
-      <button type="button" class="service-pill" class:mount={displayService === "mount"} class:backup={displayService === "backup"} class:bisync={displayService === "bisync"} onclick={() => (panelOpen = true)}>
+      <button
+        type="button"
+        class="service-pill"
+        class:mount={displayService === "mount"}
+        class:backup={displayService === "backup"}
+        class:bisync={displayService === "bisync"}
+        onclick={() => goto(`/remote/${encodeURIComponent(remoteName)}`)}
+      >
         {#if displayService}
           <Icon kind={displayService} />
           {SERVICE_LABELS[displayService]}
         {:else}
-          <Icon kind="add" />
-          {$t("remoteRow.notConfigured")}
+          {$t("remoteRow.configure")}
         {/if}
       </button>
       <span class="separator"></span>
-      <a class="icon-button" href={`/modifica-remote/${encodeURIComponent(remoteName)}`} title={$t("remoteRow.editRemote")}>
-        <Icon kind="edit" />
-      </a>
-      <button
-        type="button"
-        class="icon-button action-delete"
-        title={$t("remoteRow.deleteRemote")}
-        onclick={openDeleteRemoteModal}
-        disabled={deletingRemote}
-      >
-        <Icon kind="delete" />
-      </button>
+      <div class="more-menu" bind:this={moreMenuEl}>
+        <button
+          type="button"
+          class="icon-button"
+          title={$t("remoteRow.moreActions")}
+          aria-haspopup="menu"
+          aria-expanded={moreMenuOpen}
+          onclick={() => (moreMenuOpen = !moreMenuOpen)}
+        >
+          <Icon kind="more" />
+        </button>
+        {#if moreMenuOpen}
+          <div class="more-menu-panel" role="menu">
+            <a
+              class="more-menu-item"
+              role="menuitem"
+              href={`/modifica-remote/${encodeURIComponent(remoteName)}`}
+              onclick={() => (moreMenuOpen = false)}
+            >
+              <Icon kind="edit" />
+              {$t("remoteRow.editRemote")}
+            </a>
+            <button
+              type="button"
+              class="more-menu-item danger"
+              role="menuitem"
+              onclick={() => {
+                moreMenuOpen = false;
+                openDeleteRemoteModal();
+              }}
+              disabled={deletingRemote}
+            >
+              <Icon kind="delete" />
+              {$t("remoteRow.deleteRemote")}
+            </button>
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
 </li>
 
-<Modal bind:open={panelOpen} title={$t("remotePanel.title", { values: { remote: remoteName } })}>
-  <RemotePanel {remoteName} {mountEntry} {syncJob} {bisyncJob} {onRefresh} />
-</Modal>
-
 <Modal bind:open={deleteRemoteModalOpen} title={$t("remoteRow.deleteTitle", { values: { remote: remoteName } })}>
   <div class="modal-form">
     <p>{$t("remoteRow.deleteConfirmQuestion")}</p>
-    {#if remoteUsage && (remoteUsage.mountName || remoteUsage.backupName || remoteUsage.bisyncName)}
-      <div class="conflict-box">
-        <strong>{$t("remoteRow.alsoDeleted")}</strong>
-        <ul>
-          {#if remoteUsage.mountName}<li>{$t("remoteRow.mountNamed", { values: { name: remoteUsage.mountName } })}</li>{/if}
-          {#if remoteUsage.backupName}<li>{$t("remoteRow.backupNamed", { values: { name: remoteUsage.backupName } })}</li>{/if}
-          {#if remoteUsage.bisyncName}<li>{$t("remoteRow.bisyncNamed", { values: { name: remoteUsage.bisyncName } })}</li>{/if}
-        </ul>
-      </div>
-    {/if}
     <p class="hint">{$t("remoteRow.irreversible")}</p>
     {#if deleteRemoteError}
       <p class="error">✗ {deleteRemoteError}</p>
@@ -292,25 +377,8 @@
   background-color: var(--bg-surface);
   box-shadow: var(--shadow-md);
   padding: 0.8em 1em;
-  outline: 2px solid transparent;
-  outline-offset: 2px;
-  transition: outline-color 0.3s ease;
 }
 
-.remote-row.highlighted {
-  outline-color: var(--accent);
-  animation: remote-row-pulse 1.6s ease;
-}
-
-@keyframes remote-row-pulse {
-  0%,
-  100% {
-    background-color: var(--bg-surface);
-  }
-  20% {
-    background-color: var(--accent-bg);
-  }
-}
 
 .row-main {
   display: flex;
@@ -336,10 +404,6 @@
   color: var(--text-muted);
 }
 
-.last-op.muted {
-  font-style: italic;
-}
-
 .last-op.countdown {
   color: var(--accent);
 }
@@ -350,6 +414,18 @@
 
 .last-op.conflict {
   color: var(--warning-text);
+}
+
+.path-link {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 .row-actions {
@@ -407,14 +483,39 @@
   background-color: var(--violet-bg);
 }
 
+.inline-action-link {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.inline-action-link:disabled {
+  color: inherit;
+  text-decoration: none;
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* Stessa "famiglia" visiva della pill accanto (stesso raggio angoli
+   completamente arrotondato, stesso font-size, stesso sollevamento in
+   hover) invece di un quadrato dagli angoli appena smussati — prima le due
+   forme non sembravano appartenere allo stesso controllo (Simone,
+   23/8/2026). */
 .icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.7em;
-  height: 2.7em;
-  font-size: 1rem;
-  border-radius: 12px;
+  aspect-ratio: 1;
+  padding: 0.6em;
+  font-size: 0.85em;
+  border-radius: 100px;
   border: 1px solid var(--border-color-subtle);
   background-color: var(--surface-tint);
   color: var(--text-color);
@@ -426,7 +527,7 @@
 }
 
 .icon-button:hover:not(:disabled) {
-  transform: translateY(-2px);
+  transform: translateY(-1px);
   box-shadow: var(--shadow-icon-hover);
 }
 
@@ -439,10 +540,57 @@
   opacity: 0.5;
 }
 
-.icon-button.action-delete:hover:not(:disabled),
-.icon-button.action-delete:focus-visible {
+.more-menu {
+  position: relative;
+}
+
+.more-menu-panel {
+  position: absolute;
+  top: calc(100% + 0.4em);
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 11em;
+  padding: 0.35em;
+  border-radius: 10px;
+  border: 1px solid var(--border-color-subtle);
+  background-color: var(--bg-surface);
+  box-shadow: var(--shadow-icon-hover);
+}
+
+.more-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  width: 100%;
+  padding: 0.55em 0.7em;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  box-shadow: none;
+  color: var(--text-color);
+  text-decoration: none;
+  font-size: 0.9em;
+  text-align: left;
+  cursor: pointer;
+}
+
+.more-menu-item:hover:not(:disabled) {
+  background-color: var(--surface-tint);
+}
+
+.more-menu-item.danger {
+  color: var(--status-red);
+}
+
+.more-menu-item.danger:hover:not(:disabled) {
   color: var(--bg-surface);
   background-color: var(--status-red);
-  border-color: transparent;
+}
+
+.more-menu-item:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 </style>

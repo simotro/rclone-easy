@@ -579,6 +579,14 @@ fn open_in_file_manager(path: &str) {
     crate::open_external::open_path(path);
 }
 
+/// Apre il percorso locale di un mount già attivo — richiamato dal link
+/// "Montato su ..." nella riga del remote, distinto da `mount_now_and_open`
+/// che monta anche.
+#[tauri::command]
+pub fn open_mount_folder(mount_point: String) {
+    open_in_file_manager(&mount_point);
+}
+
 #[tauri::command]
 pub async fn unmount_now(app: AppHandle, state: tauri::State<'_, RcdState>, name: String) -> Result<(), String> {
     let config_dir = app_config_dir(&app)?;

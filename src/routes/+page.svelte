@@ -3,7 +3,6 @@
   import { goto } from "$app/navigation";
   import RemoteRow from "$lib/components/RemoteRow.svelte";
   import SettingsButton from "$lib/components/SettingsButton.svelte";
-  import Icon from "$lib/components/Icon.svelte";
   import type { MountEntry, SyncJob, BisyncJob } from "$lib/types";
   import { t } from "$lib/i18n";
 
@@ -92,7 +91,6 @@
   <section class="remotes-section">
     <div class="top-actions">
       <button type="button" class="add-remote-button" onclick={() => goto("/nuovo-remote")}>
-        <Icon kind="add" />
         {$t("home.addRemote")}
       </button>
       <SettingsButton {onRemotesChanged} />

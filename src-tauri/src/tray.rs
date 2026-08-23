@@ -25,15 +25,11 @@ const CONFIGURE_PREFIX: &str = "configure:";
 /// `build_menu_from_remotes`.
 const WARNING_PREFIX: &str = "warning:";
 /// Evento ascoltato da `RemoteRow.svelte`: porta la finestra in primo piano
-/// e scorre/evidenzia la riga del remote indicato nel payload, aprendone
-/// anche la cronologia se il click veniva da una voce di avviso. Stesso
-/// schema di nome (`rclone-easy://...`) degli altri eventi verso il
+/// e naviga alla pagina del remote indicato nel payload (`/remote/[name]`),
+/// aprendola sulla Cronologia se il click veniva da una voce di avviso.
+/// Stesso schema di nome (`rclone-easy://...`) degli altri eventi verso il
 /// frontend, vedi `oauth_remote.rs`.
 const FOCUS_REMOTE_EVENT: &str = "rclone-easy://tray-focus-remote";
-/// Evento ascoltato da `RemoteRow.svelte`: spegne l'evidenziazione aperta da
-/// `FOCUS_REMOTE_EVENT`, che deve restare accesa finché la finestra non
-/// torna nascosta in tray — vedi `hide_main_window`.
-const WINDOW_HIDDEN_EVENT: &str = "rclone-easy://window-hidden";
 /// Evento ascoltato da `SettingsButton.svelte`: apre il modal Impostazioni —
 /// stesso schema di `FOCUS_REMOTE_EVENT` per la voce "Impostazioni" del menu
 /// della tray, vedi `open_settings`.
@@ -687,23 +683,18 @@ pub(crate) fn show_main_window(app: &AppHandle) {
     let _ = window.set_focus();
 }
 
-/// Nasconde la finestra principale e notifica il frontend (`RemoteRow.svelte`,
-/// in ascolto su `WINDOW_HIDDEN_EVENT`) di spegnere l'evidenziazione aperta
-/// da `focus_remote` — persiste finché la finestra resta visibile, non un
-/// timeout arbitrario. Punto unico usato sia dal toggle della tray sia
-/// dall'intercettazione della chiusura (`lib.rs::hide_instead_of_close`),
-/// per non duplicare l'emit in due posti.
+/// Nasconde la finestra principale. Punto unico usato sia dal toggle della
+/// tray sia dall'intercettazione della chiusura
+/// (`lib.rs::hide_instead_of_close`).
 pub(crate) fn hide_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else { return };
     let _ = window.hide();
-    let _ = app.emit(WINDOW_HIDDEN_EVENT, ());
 }
 
-/// Porta la finestra in primo piano e notifica il frontend (`RemoteRow.svelte`,
-/// in ascolto su `FOCUS_REMOTE_EVENT`) di scorrere fino alla riga del
-/// remote indicato ed evidenziarla, aprendone anche la cronologia se si
-/// veniva da una voce di avviso — vedi `on_menu_event` per "Configura" e le
-/// voci di avviso.
+/// Porta la finestra in primo piano e notifica il frontend (`+layout.svelte`,
+/// in ascolto su `FOCUS_REMOTE_EVENT`) di navigare alla pagina del remote
+/// indicato, aprendola sulla cronologia se si veniva da una voce di avviso —
+/// vedi `on_menu_event` per "Configura" e le voci di avviso.
 fn focus_remote(app: &AppHandle, remote: &str, open_history: bool) {
     show_main_window(app);
     let _ = app.emit(FOCUS_REMOTE_EVENT, serde_json::json!({ "remote": remote, "openHistory": open_history }));

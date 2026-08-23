@@ -2,7 +2,7 @@
   let {
     kind,
   }: {
-    kind: "mount" | "backup" | "bisync" | "edit" | "delete" | "eye" | "eye-off" | "quit" | "copy" | "settings" | "add" | "trash" | "restore";
+    kind: "mount" | "backup" | "bisync" | "edit" | "delete" | "eye" | "eye-off" | "quit" | "copy" | "settings" | "add" | "trash" | "restore" | "more";
   } = $props();
 </script>
 
@@ -77,6 +77,12 @@
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
     <path d="M3 12a9 9 0 1 0 3-6.7" />
     <polyline points="3 4 3 9 8 9" />
+  </svg>
+{:else if kind === "more"}
+  <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+    <circle cx="12" cy="5" r="1.9" />
+    <circle cx="12" cy="12" r="1.9" />
+    <circle cx="12" cy="19" r="1.9" />
   </svg>
 {:else if kind === "quit"}
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">

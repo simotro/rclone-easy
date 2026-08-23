@@ -106,7 +106,21 @@ h2 {
 .content {
   padding: 0.9em 1.1em;
   overflow-y: auto;
+  /* Esplicito, non lasciato al default "visible": senza, la sola
+     overflow-y: auto basta perché il motore calcoli anche overflow-x come
+     auto (regola CSS su valori misti) — un contenuto figlio che eccede la
+     larghezza per un pelo (un input non ristretto, un testo lungo) finiva
+     tagliato di netto al bordo invece che andare a capo o scorrere,
+     rompendo la forma sempre uguale del modal. */
+  overflow-x: hidden;
   min-height: 0;
+  /* Quando il contenuto è alto abbastanza da far comparire la barra di
+     scroll verticale DI QUESTO box, quella barra mangia larghezza dal
+     contenuto senza che il resto del CSS ne tenga conto — bottoni e testo
+     a filo del bordo destro finivano tagliati (Simone, 22/8/2026). Spazio
+     riservato esplicitamente invece di sperare che basti quello implicito. */
+  scrollbar-gutter: stable;
+  padding-right: calc(1.1em + 0.6em);
 }
 
 /* I paragrafi (hint/errori/avvisi) dentro un modal usano il margine di

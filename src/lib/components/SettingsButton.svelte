@@ -4,7 +4,6 @@
   import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
   import { isEnabled as isAutostartEnabled, enable as enableAutostart, disable as disableAutostart } from "@tauri-apps/plugin-autostart";
   import Modal from "./Modal.svelte";
-  import Icon from "./Icon.svelte";
   import ImportRemotesPanel from "./ImportRemotesPanel.svelte";
   import PasswordField from "./PasswordField.svelte";
   import { t } from "$lib/i18n";
@@ -290,7 +289,6 @@
 </script>
 
 <button type="button" class="settings-trigger" onclick={() => (open = true)}>
-  <Icon kind="settings" />
   {$t("settings.title")}
 </button>
 

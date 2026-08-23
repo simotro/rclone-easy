@@ -305,6 +305,14 @@ button:disabled {
 
 .folder-picker input {
   flex: 1;
+  /* Un <input> flessibile di default non si restringe mai sotto la propria
+     larghezza minima "naturale" (min-width: auto implicito sugli elementi
+     flex) — con un percorso/placeholder lungo dentro un modal a larghezza
+     fissa, questo spingeva l'intera riga (e tutto ciò che veniva dopo nello
+     stesso contenitore scrollabile) oltre il bordo destro, tagliato invece
+     di scorrere (Simone, 22/8/2026: il pulsante "Salva modifiche" appariva
+     mozzato). */
+  min-width: 0;
 }
 
 .row-actions {

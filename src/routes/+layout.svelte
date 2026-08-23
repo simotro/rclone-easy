@@ -1,5 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
+  import { goto } from "$app/navigation";
   import "$lib/shared-styles.css";
   import { initTheme } from "$lib/theme.svelte";
   import "$lib/i18n";
@@ -23,6 +25,29 @@
     invoke<boolean>("needs_unlock")
       .then((needsUnlock) => (unlockState = needsUnlock ? "locked" : "unlocked"))
       .catch(() => (unlockState = "unlocked"));
+  });
+
+  // Cliccando "Configura" o una voce di avviso nel menu della tray, il
+  // backend porta la finestra in primo piano ed emette questo evento — a
+  // livello di layout (non più per-riga in RemoteRow.svelte) perché ora
+  // naviga direttamente alla pagina del remote, indipendentemente da quale
+  // pagina è aperta al momento. Una voce di avviso porta dritti alla
+  // Cronologia (dove si vede cosa è fallito) invece che alla scheda
+  // Configura di default — vedi tray.rs::focus_remote.
+  $effect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<{ remote: string; openHistory: boolean }>("rclone-easy://tray-focus-remote", (event) => {
+      const path = `/remote/${encodeURIComponent(event.payload.remote)}`;
+      goto(event.payload.openHistory ? `${path}?tab=cronologia` : path);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   });
 </script>
 

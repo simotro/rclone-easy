@@ -2,17 +2,22 @@
   // Pannello unico per un remote — sostituisce la costellazione di modal
   // separati che c'era prima (mount/backup/bisync/cronologia/cestino×2/
   // avviso propagazione/avviso home×2/conflitto: 11 stati "aperto" diversi,
-  // fino a due impilati insieme). Un solo `Modal` aperto alla volta (quello
-  // che ospita QUESTO pannello, gestito dal chiamante), quattro schede
-  // interne — mai un secondo popup sopra. Vedi l'audit UX del 21/8/2026 per
-  // il ragionamento completo dietro questa scelta.
+  // fino a due impilati insieme). Vive in una pagina propria
+  // (src/routes/remote/[name]/+page.svelte), non più dentro un Modal
+  // (Simone, 22/8/2026: un contenuto così variabile per altezza/larghezza
+  // — form di configurazione, elenchi di cronologia lunghi — dentro una
+  // scatola a dimensione fissa produceva salti di dimensione e contenuto
+  // tagliato ai bordi, due giri di bug diversi sullo stesso sintomo). Vedi
+  // l'audit UX del 21/8/2026 per il ragionamento originale dietro le
+  // quattro schede interne.
   import { invoke } from "@tauri-apps/api/core";
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
+  import { untrack } from "svelte";
   import Icon from "./Icon.svelte";
   import LogView from "./LogView.svelte";
   import TrashView from "./TrashView.svelte";
   import RemoteFolderPicker from "./RemoteFolderPicker.svelte";
-  import type { MountEntry, SyncJob, BisyncJob, BisyncRunEntry, TransferEvent } from "$lib/types";
+  import type { MountEntry, SyncJob, BisyncJob, TransferEvent } from "$lib/types";
   import { t } from "$lib/i18n";
 
   let {
@@ -20,12 +25,17 @@
     mountEntry,
     syncJob,
     bisyncJob,
+    initialTab,
     onRefresh,
   }: {
     remoteName: string;
     mountEntry: MountEntry | null;
     syncJob: SyncJob | null;
     bisyncJob: BisyncJob | null;
+    // Dalla tray, una voce di avviso porta direttamente alla Cronologia
+    // (dove si vede cosa è fallito) invece che alla scheda Configura di
+    // default — vedi src/routes/remote/[name]/+page.svelte.
+    initialTab?: "configura" | "cronologia" | "cestino";
     onRefresh?: () => void | Promise<void>;
   } = $props();
 
@@ -33,8 +43,16 @@
 
   type ServiceKind = "mount" | "backup" | "bisync";
 
+  // Un mount conta come "attivo" anche solo con l'auto-mount all'avvio
+  // abilitato, non solo se montato adesso — deve rispecchiare esattamente
+  // `active_service_for_remote` nel backend (activity.rs), l'unica autorità
+  // reale su cosa il backend rifiuterà di sovrapporre. Prima qui si guardava
+  // solo `mounted`: passando ad es. da un mount con auto-mount ma smontato
+  // al momento a un backup/bisync, non compariva alcun avviso qui, ma il
+  // salvataggio veniva comunque rifiutato dal backend un attimo dopo,
+  // incoerenza notata da Simone il 22/8/2026.
   let activeService = $derived.by<ServiceKind | null>(() => {
-    if (mountEntry?.mounted) return "mount";
+    if (mountEntry?.mounted || mountEntry?.autoMount) return "mount";
     if (syncJob?.autoIntervalMinutes !== null && syncJob !== null) return "backup";
     if (bisyncJob?.autoIntervalMinutes !== null && bisyncJob !== null) return "bisync";
     return null;
@@ -60,8 +78,8 @@
   // apertura, non tenuti agganciati per sempre a quella funzione).
   const openingService = initialService();
   let selectedService = $state<ServiceKind | null>(openingService);
-  type Tab = "configura" | "esegui" | "cronologia" | "cestino";
-  let activeTab = $state<Tab>(openingService ? "esegui" : "configura");
+  type Tab = "configura" | "cronologia" | "cestino";
+  let activeTab = $state<Tab>(untrack(() => initialTab ?? "configura"));
 
   function activateServiceForm(kind: ServiceKind) {
     selectedService = kind;
@@ -89,6 +107,14 @@
       return;
     }
     activateServiceForm(kind);
+  }
+
+  // Cliccare la tab del servizio già selezionato non deve fare nulla — in
+  // particolare non deve riportare su "Configura" chi sta guardando "Esegui
+  // e stato" o "Cronologia" di quello stesso servizio.
+  function selectService(kind: ServiceKind) {
+    if (kind === selectedService) return;
+    requestService(kind);
   }
 
   async function disableActiveService() {
@@ -255,17 +281,7 @@
   let backupFormAutoEnabled = $state(true);
   let backupFormAutoInterval = $state(15);
   let backupFormPropagateDeletions = $state(false);
-  let backupRunResult = $state<{ success: boolean; message: string } | null>(null);
-  // Ripiega sull'ultimo tentativo persistito (`syncJob.history[0]`) quando
-  // non c'è ancora un risultato fresco in questa sessione — senza questo,
-  // riaprendo il pannello su un backup l'ultima volta fallito, la scheda
-  // "Esegui e stato" mostrava solo i controlli di routine, senza una parola
-  // sul perché, esattamente il problema di "stato onesto" che questo giro
-  // di lavoro doveva risolvere anche qui, non solo nella riga collassata.
-  let backupDisplayResult = $derived<{ success: boolean; message: string } | null>(
-    backupRunResult ?? (syncJob?.history[0] ? { success: syncJob.history[0].success, message: syncJob.history[0].message } : null),
-  );
-  let backupFormDryRun = $state(false);
+  let backupDryRunBusy = $state(false);
   let backupFormRemotePath = $state("");
   let backupPathRootError = $state<string | null>(null);
   // Avvisi che PRIMA erano un secondo Modal impilato sopra quello di
@@ -301,8 +317,6 @@
       backupFormRemotePath = "";
     }
     backupError = null;
-    backupRunResult = null;
-    backupFormDryRun = false;
     backupPathRootError = null;
     backupPropagateWarningOpen = false;
     backupHomeWarningPath = null;
@@ -368,27 +382,20 @@
     }
   }
 
-  async function runBackupNow() {
+  // "Esegui ora" vero e proprio è passato alla riga del remote in
+  // RemoteRow.svelte (Simone, 22/8/2026): questo pannello si occupa solo di
+  // provarne l'effetto prima di salvare, non di lanciarlo per davvero.
+  async function tryDryRunBackup() {
     if (backupFormLocalPath.trim() === "") return;
-    backupBusy = true;
+    backupDryRunBusy = true;
     backupError = null;
-    backupRunResult = null;
     try {
       await persistBackup();
-      if (backupFormDryRun) {
-        await invoke("dry_run_job", { name: remoteName });
-      } else {
-        await invoke("run_job", { name: remoteName });
-        backupRunResult = { success: true, message: "" };
-      }
+      await invoke("dry_run_job", { name: remoteName });
     } catch (error) {
-      if (backupFormDryRun) {
-        backupError = String(error);
-      } else {
-        backupRunResult = { success: false, message: String(error) };
-      }
+      backupError = String(error);
     } finally {
-      backupBusy = false;
+      backupDryRunBusy = false;
       await onRefresh?.();
     }
   }
@@ -399,14 +406,8 @@
   let bisyncFormLocalPath = $state("");
   let bisyncFormAutoEnabled = $state(true);
   let bisyncFormAutoInterval = $state(15);
-  let bisyncRunResult = $state<BisyncRunEntry | null>(null);
-  // Stesso principio di `backupDisplayResult` qui sopra: senza questo, un
-  // bisync bloccato da "too many deletes" tornava a mostrare solo
-  // "Esegui ora" appena si riapriva il pannello, nascondendo il blocco e il
-  // pulsante "Forza comunque" finché non si andava a cercarli in Cronologia.
-  let bisyncDisplayResult = $derived<BisyncRunEntry | null>(bisyncRunResult ?? bisyncJob?.history[0] ?? null);
+  let bisyncDryRunBusy = $state(false);
   let bisyncFormRemotePath = $state("");
-  let bisyncFormDryRun = $state(false);
   let expandedHistoryEntryKey = $state<number | null>(null);
   let bisyncPathRootError = $state<string | null>(null);
   let bisyncHomeWarningPath = $state<string | null>(null);
@@ -431,8 +432,6 @@
       bisyncFormRemotePath = "";
     }
     bisyncError = null;
-    bisyncRunResult = null;
-    bisyncFormDryRun = false;
     bisyncPathRootError = null;
     bisyncHomeWarningPath = null;
   }
@@ -483,22 +482,20 @@
     }
   }
 
-  async function runBisyncNow() {
+  // "Esegui ora" vero e proprio è passato alla riga del remote in
+  // RemoteRow.svelte (Simone, 22/8/2026): questo pannello si occupa solo di
+  // provarne l'effetto prima di salvare, non di lanciarlo per davvero.
+  async function tryDryRunBisync() {
     if (bisyncFormLocalPath.trim() === "") return;
-    bisyncBusy = true;
+    bisyncDryRunBusy = true;
     bisyncError = null;
-    bisyncRunResult = null;
     try {
       await persistBisync();
-      if (bisyncFormDryRun) {
-        await invoke("dry_run_bisync_job", { name: remoteName });
-      } else {
-        bisyncRunResult = await invoke<BisyncRunEntry>("run_bisync_job", { name: remoteName });
-      }
+      await invoke("dry_run_bisync_job", { name: remoteName });
     } catch (error) {
       bisyncError = String(error);
     } finally {
-      bisyncBusy = false;
+      bisyncDryRunBusy = false;
       await onRefresh?.();
     }
   }
@@ -507,7 +504,7 @@
     bisyncBusy = true;
     bisyncError = null;
     try {
-      bisyncRunResult = await invoke<BisyncRunEntry>("run_bisync_job_forced", { name: remoteName });
+      await invoke("run_bisync_job_forced", { name: remoteName });
     } catch (error) {
       bisyncError = String(error);
     } finally {
@@ -523,14 +520,32 @@
 </script>
 
 <div class="panel">
+  <!-- Selettore di servizio sempre visibile, invece del vecchio link
+       testuale "Cambia servizio (attuale: X)" nascosto dentro la scheda
+       Configura — cambiare servizio resta raggiungibile anche mentre si
+       guarda "Esegui e stato" o "Cronologia" (Simone, 21/8/2026: quel link
+       era "poco evidente"). Stessa codifica cromatica per famiglia di
+       servizio di .service-pill in RemoteRow.svelte. -->
+  <div class="service-tabs">
+    <button type="button" class="service-tab" class:mount={selectedService === "mount"} onclick={() => selectService("mount")}>
+      <Icon kind="mount" />
+      {$t("remoteRow.service.mount")}
+    </button>
+    <button type="button" class="service-tab" class:backup={selectedService === "backup"} onclick={() => selectService("backup")}>
+      <Icon kind="backup" />
+      {$t("remoteRow.service.backup")}
+    </button>
+    <button type="button" class="service-tab" class:bisync={selectedService === "bisync"} onclick={() => selectService("bisync")}>
+      <Icon kind="bisync" />
+      {$t("remoteRow.service.bisync")}
+    </button>
+  </div>
+
   <div class="tabs">
     <button type="button" class="tab" class:active={activeTab === "configura"} onclick={() => (activeTab = "configura")}>
       {$t("remotePanel.tabConfigure")}
     </button>
     {#if selectedService}
-      <button type="button" class="tab" class:active={activeTab === "esegui"} onclick={() => (activeTab = "esegui")}>
-        {$t("remotePanel.tabRun")}
-      </button>
       <button type="button" class="tab" class:active={activeTab === "cronologia"} onclick={() => (activeTab = "cronologia")}>
         {$t("remotePanel.tabHistory")}
       </button>
@@ -543,55 +558,37 @@
   </div>
 
   <div class="tab-content">
-    {#if activeTab === "configura"}
-      {#if selectedService === null}
-        <p class="hint">{$t("remotePanel.pickServiceHint")}</p>
-        <div class="service-picker">
-          <button type="button" class="service-card" onclick={() => requestService("mount")}>
-            <Icon kind="mount" />
-            <div>
-              <strong>{$t("remoteRow.service.mount")}</strong>
-              <p class="hint">{$t("remoteRow.mountAction")}</p>
-            </div>
-          </button>
-          <button type="button" class="service-card" onclick={() => requestService("backup")}>
-            <Icon kind="backup" />
-            <div>
-              <strong>{$t("remoteRow.service.backup")}</strong>
-              <p class="hint">{$t("remoteRow.backupAction")}</p>
-            </div>
-          </button>
-          <button type="button" class="service-card" onclick={() => requestService("bisync")}>
-            <Icon kind="bisync" />
-            <div>
-              <strong>{$t("remoteRow.service.bisync")}</strong>
-              <p class="hint">{$t("remoteRow.bisyncAction")}</p>
-            </div>
+    {#if pendingServiceSwitch}
+      <!-- Dentro .tab-content (altezza fissa, vedi sotto) invece che tra
+           i due gruppi di tab come prima: comparendo solo quando si passa
+           da un servizio attivo a un altro tramite i pulsanti Mount/
+           Backup/Sincronizzazione, da fuori faceva "saltare" il modal
+           proprio in quel percorso e non negli altri (Simone, 22/8/2026). -->
+      <div class="inline-warning">
+        <p>
+          {$t("remotePanel.serviceSwitchWarning", {
+            values: { active: activeService ? SERVICE_LABELS[activeService] : "", target: SERVICE_LABELS[pendingServiceSwitch] },
+          })}
+        </p>
+        {#if serviceSwitchError}
+          <p>✗ {serviceSwitchError}</p>
+        {/if}
+        <div class="row-actions modal-actions">
+          <button type="button" onclick={() => (pendingServiceSwitch = null)} disabled={serviceSwitchBusy}>{$t("common.cancel")}</button>
+          <button type="button" onclick={confirmServiceSwitch} disabled={serviceSwitchBusy}>
+            {serviceSwitchBusy ? $t("common.inProgress") : $t("common.confirm")}
           </button>
         </div>
-        {#if pendingServiceSwitch}
-          <div class="inline-warning">
-            <p>
-              {$t("remotePanel.serviceSwitchWarning", {
-                values: { active: activeService ? SERVICE_LABELS[activeService] : "", target: SERVICE_LABELS[pendingServiceSwitch] },
-              })}
-            </p>
-            {#if serviceSwitchError}
-              <p>✗ {serviceSwitchError}</p>
-            {/if}
-            <div class="row-actions modal-actions">
-              <button type="button" onclick={() => (pendingServiceSwitch = null)} disabled={serviceSwitchBusy}>{$t("common.cancel")}</button>
-              <button type="button" onclick={confirmServiceSwitch} disabled={serviceSwitchBusy}>
-                {serviceSwitchBusy ? $t("common.inProgress") : $t("common.confirm")}
-              </button>
-            </div>
-          </div>
-        {/if}
+      </div>
+    {:else if activeTab === "configura"}
+      {#if selectedService === null}
+        <p class="hint">{$t("remotePanel.pickServiceHint")}</p>
+        <ul class="service-hints">
+          <li><button type="button" class="service-hint-link mount" onclick={() => selectService("mount")}>{$t("remoteRow.service.mount")}</button> — {$t("remoteRow.mountAction")}</li>
+          <li><button type="button" class="service-hint-link backup" onclick={() => selectService("backup")}>{$t("remoteRow.service.backup")}</button> — {$t("remoteRow.backupAction")}</li>
+          <li><button type="button" class="service-hint-link bisync" onclick={() => selectService("bisync")}>{$t("remoteRow.service.bisync")}</button> — {$t("remoteRow.bisyncAction")}</li>
+        </ul>
       {:else}
-        <button type="button" class="change-service-link" onclick={() => (selectedService = null)}>
-          {$t("remotePanel.changeService", { values: { current: SERVICE_LABELS[selectedService] } })}
-        </button>
-
         {#if selectedService === "mount"}
           <div class="modal-form">
             <p class="hint">{$t("remoteRow.localFolder")}</p>
@@ -702,11 +699,31 @@
                 {backupFormPropagateDeletions ? $t("remoteRow.propagateDeletionsOnHint") : $t("remoteRow.propagateDeletionsOffHint")}
               </p>
             {/if}
+            {#if syncJob?.lastDryRun && syncJob.lastDryRun.whenUnix > (syncJob.history[0]?.whenUnix ?? 0)}
+              {@const report = syncJob.lastDryRun}
+              {@const localIsSource = directionOf(syncJob) === "toRemote"}
+              <div class="conflict-box">
+                <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
+                <p>{$t("remoteRow.dryRunLocalTotal", { values: { count: localIsSource ? report.sourceTotalFiles : report.destinationTotalFiles } })}</p>
+                <p>{$t("remoteRow.dryRunRemoteTotal", { values: { count: localIsSource ? report.destinationTotalFiles : report.sourceTotalFiles } })}</p>
+                <p>{$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })}</p>
+                <p>
+                  {#if report.wouldDelete > 0}
+                    ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
+                  {:else}
+                    {$t("remoteRow.dryRunNoDeletes")}
+                  {/if}
+                </p>
+              </div>
+            {/if}
             {#if backupError}
               <LogView text={backupError} />
             {/if}
             <div class="row-actions modal-actions">
-              <button type="button" class="btn-primary" onclick={saveBackup} disabled={backupBusy || backupFormLocalPath.trim() === ""}>
+              <button type="button" onclick={tryDryRunBackup} disabled={backupDryRunBusy || backupBusy || backupFormLocalPath.trim() === ""}>
+                {backupDryRunBusy ? $t("remoteRow.dryRunInProgress") : $t("remoteRow.dryRunButton")}
+              </button>
+              <button type="button" class="btn-primary" onclick={saveBackup} disabled={backupBusy || backupDryRunBusy || backupFormLocalPath.trim() === ""}>
                 {backupBusy ? $t("remoteRow.saving") : $t("remoteRow.saveChanges")}
               </button>
             </div>
@@ -753,135 +770,38 @@
             {#if bisyncJob?.needsResync}
               <p class="hint">{$t("remoteRow.needsResyncHint")}</p>
             {/if}
+            {#if bisyncJob?.lastDryRun && bisyncJob.lastDryRun.whenUnix > (bisyncJob.history[0]?.whenUnix ?? 0)}
+              {@const report = bisyncJob.lastDryRun}
+              <div class="conflict-box">
+                <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
+                <p>{$t("remoteRow.dryRunLocalTotal", { values: { count: report.path1TotalFiles } })}</p>
+                <p>{$t("remoteRow.dryRunRemoteTotal", { values: { count: report.path2TotalFiles } })}</p>
+                <p>{$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })}</p>
+                <p>
+                  {#if report.wouldDelete > 0}
+                    ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
+                  {:else}
+                    {$t("remoteRow.dryRunNoDeletes")}
+                  {/if}
+                </p>
+              </div>
+              <LogView text={report.log} />
+            {/if}
             {#if bisyncError}
               <LogView text={bisyncError} />
             {/if}
             <div class="row-actions modal-actions">
-              <button type="button" class="btn-primary" onclick={saveBisync} disabled={bisyncBusy || bisyncFormLocalPath.trim() === ""}>
+              <button type="button" onclick={tryDryRunBisync} disabled={bisyncDryRunBusy || bisyncBusy || bisyncFormLocalPath.trim() === ""}>
+                {bisyncDryRunBusy ? $t("remoteRow.dryRunInProgress") : $t("remoteRow.dryRunButton")}
+              </button>
+              <button type="button" class="btn-primary" onclick={saveBisync} disabled={bisyncBusy || bisyncDryRunBusy || bisyncFormLocalPath.trim() === ""}>
                 {bisyncBusy ? $t("remoteRow.saving") : $t("remoteRow.saveChanges")}
               </button>
             </div>
           </div>
         {/if}
       {/if}
-    {/if}
-
-    {#if activeTab === "esegui" && selectedService}
-      <div class="modal-form">
-        {#if selectedService === "backup"}
-          <label class="checkbox-row">
-            <input type="checkbox" bind:checked={backupFormDryRun} />
-            {$t("remoteRow.dryRunCheckbox")}
-          </label>
-          {#if backupDisplayResult}
-            {#if backupDisplayResult.success}
-              <p class="ok">✓ {backupRunResult ? $t("remoteRow.executedNow") : $t("remoteRow.lastRunSucceeded")}</p>
-            {:else}
-              <LogView text={backupDisplayResult.message} />
-            {/if}
-          {/if}
-          {#if syncJob?.lastDryRun && !backupRunResult && syncJob.lastDryRun.whenUnix > (syncJob.history[0]?.whenUnix ?? 0)}
-            {@const report = syncJob.lastDryRun}
-            {@const localIsSource = directionOf(syncJob) === "toRemote"}
-            <div class="conflict-box">
-              <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
-              <p>{$t("remoteRow.dryRunLocalTotal", { values: { count: localIsSource ? report.sourceTotalFiles : report.destinationTotalFiles } })}</p>
-              <p>{$t("remoteRow.dryRunRemoteTotal", { values: { count: localIsSource ? report.destinationTotalFiles : report.sourceTotalFiles } })}</p>
-              <p>{$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })}</p>
-              <p>
-                {#if report.wouldDelete > 0}
-                  ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
-                {:else}
-                  {$t("remoteRow.dryRunNoDeletes")}
-                {/if}
-              </p>
-            </div>
-          {/if}
-          <div class="row-actions modal-actions">
-            <button type="button" class="btn-primary" onclick={runBackupNow} disabled={backupBusy || backupFormLocalPath.trim() === ""}>
-              {backupBusy
-                ? backupFormDryRun
-                  ? $t("remoteRow.dryRunInProgress")
-                  : $t("common.inProgress")
-                : backupFormDryRun
-                  ? $t("remoteRow.dryRunButton")
-                  : $t("remoteRow.runNow")}
-            </button>
-          </div>
-        {:else if selectedService === "bisync"}
-          <label class="checkbox-row">
-            <input type="checkbox" bind:checked={bisyncFormDryRun} />
-            {$t("remoteRow.dryRunCheckbox")}
-          </label>
-          {#if bisyncJob?.lastDryRun && !bisyncRunResult && bisyncJob.lastDryRun.whenUnix > (bisyncJob.history[0]?.whenUnix ?? 0)}
-            {@const report = bisyncJob.lastDryRun}
-            <div class="conflict-box">
-              <strong>{$t("remoteRow.dryRunResultTitle", { values: { when: formatWhen(report.whenUnix) } })}</strong>
-              <p>{$t("remoteRow.dryRunLocalTotal", { values: { count: report.path1TotalFiles } })}</p>
-              <p>{$t("remoteRow.dryRunRemoteTotal", { values: { count: report.path2TotalFiles } })}</p>
-              <p>{$t("remoteRow.dryRunWouldTransfer", { values: { count: report.wouldTransfer } })}</p>
-              <p>
-                {#if report.wouldDelete > 0}
-                  ⚠ {$t("remoteRow.dryRunWouldDelete", { values: { count: report.wouldDelete } })}
-                {:else}
-                  {$t("remoteRow.dryRunNoDeletes")}
-                {/if}
-              </p>
-            </div>
-            <LogView text={report.log} />
-          {/if}
-          {#if bisyncDisplayResult}
-            {#if bisyncDisplayResult.success && bisyncDisplayResult.conflictPaths.length === 0}
-              <p class="ok">✓ {bisyncRunResult ? $t("remoteRow.executedNow") : $t("remoteRow.lastRunSucceeded")}</p>
-            {:else if bisyncDisplayResult.success}
-              <div class="conflict-box">
-                <strong>⚠ {$t("remoteRow.conflictFilesCount", { values: { count: bisyncDisplayResult.conflictPaths.length } })}</strong>
-                <p>{$t("remoteRow.noVersionLost")}</p>
-              </div>
-            {:else}
-              <LogView text={bisyncDisplayResult.log || bisyncDisplayResult.message} />
-              {#if bisyncDisplayResult.needsForce}
-                <div class="inline-warning">
-                  <p>{$t("remoteRow.forceBisyncWarningIntro")}</p>
-                  <p>{$t("remoteRow.forceBisyncWarningHint")}</p>
-                  <div class="row-actions modal-actions">
-                    <button type="button" class="btn-danger" onclick={forceBisyncNow} disabled={bisyncBusy}>
-                      {bisyncBusy ? $t("common.inProgress") : $t("remoteRow.runWithForce")}
-                    </button>
-                  </div>
-                </div>
-              {/if}
-            {/if}
-          {/if}
-          <div class="row-actions modal-actions">
-            <button type="button" class="btn-primary" onclick={runBisyncNow} disabled={bisyncBusy || bisyncFormLocalPath.trim() === ""}>
-              {bisyncBusy
-                ? bisyncFormDryRun
-                  ? $t("remoteRow.dryRunInProgress")
-                  : $t("common.inProgress")
-                : bisyncFormDryRun
-                  ? $t("remoteRow.dryRunButton")
-                  : $t("remoteRow.runNow")}
-            </button>
-          </div>
-        {:else if selectedService === "mount"}
-          <p class="hint">{mountEntry?.mounted ? $t("remoteRow.currentlyMounted") : $t("remoteRow.currentlyNotMounted")}</p>
-          <div class="row-actions modal-actions">
-            {#if mountEntry?.mounted}
-              <button type="button" class="btn-danger" onclick={unmountOnly} disabled={mountBusy}>
-                {mountBusy ? $t("common.inProgress") : $t("remoteRow.unmount")}
-              </button>
-            {:else}
-              <button type="button" class="btn-primary" onclick={confirmMount} disabled={mountBusy || mountFormPoint.trim() === ""}>
-                {mountBusy ? $t("common.inProgress") : $t("remoteRow.mountAndOpen")}
-              </button>
-            {/if}
-          </div>
-        {/if}
-      </div>
-    {/if}
-
-    {#if activeTab === "cronologia" && selectedService}
+    {:else if activeTab === "cronologia" && selectedService}
       {#if selectedService === "mount" && mountEntry}
         {#if mountEntry.history.length === 0}
           <p class="hint">{$t("remoteRow.noMountAttempts")}</p>
@@ -935,6 +855,9 @@
                   <span class="ok">✓ {$t("remoteRow.succeeded")}</span>
                 {/if}
                 <span class="hint">{formatWhen(entry.whenUnix)}</span>
+                {#if entry.conflictPaths.length > 0 && index === 0}
+                  <p class="hint">{$t("remoteRow.noVersionLost")}</p>
+                {/if}
                 {#if !entry.success}
                   <LogView text={entry.log || entry.message} />
                   {#if entry.needsForce && index === 0}
@@ -954,9 +877,7 @@
           </ul>
         {/if}
       {/if}
-    {/if}
-
-    {#if activeTab === "cestino" && selectedService === "backup" && syncJob}
+    {:else if activeTab === "cestino" && selectedService === "backup" && syncJob}
       <TrashView sides={[syncJob.destination]} />
     {:else if activeTab === "cestino" && selectedService === "bisync" && bisyncJob}
       <TrashView sides={[bisyncJob.path1, bisyncJob.path2]} />
@@ -995,38 +916,90 @@
   border-bottom-color: var(--accent);
 }
 
+/* Altezza fissa invece di min-height: senza un tetto il box dell'intero
+   modal (centrato in verticale da Modal.svelte) cresce o si restringe a
+   ogni cambio di scheda, "saltando" sullo schermo — con un'altezza fissa e
+   lo scroll qui dentro, a scorrere è solo il contenuto (tipicamente la
+   Cronologia con molte voci), il modal resta fermo (Simone, 22/8/2026). */
+/* Niente più altezza fissa con scroll proprio (era un ripiego per stare
+   dentro la scatola del Modal, vedi il commento in cima al file): in una
+   pagina normale il contenuto scorre con la pagina stessa
+   (`.app-body` in +layout.svelte), come le altre pagine dell'app.
+   `min-height` solo per non far collassare bruscamente il layout passando
+   a una scheda molto corta (es. Cestino vuoto). */
 .tab-content {
-  min-height: 12em;
+  min-height: 14em;
 }
 
-.service-picker {
+.service-tabs {
+  display: flex;
+  gap: 0.6em;
+}
+
+.service-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.6em 1em;
+  border-radius: 10px;
+  border: 1px solid var(--border-color-subtle);
+  background-color: var(--surface-tint);
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 0.9em;
+}
+
+.service-tab.mount {
+  color: var(--accent);
+  background-color: var(--accent-bg);
+  border-color: var(--accent);
+}
+
+.service-tab.backup {
+  color: var(--blue);
+  background-color: var(--blue-bg);
+  border-color: var(--blue);
+}
+
+.service-tab.bisync {
+  color: var(--violet);
+  background-color: var(--violet-bg);
+  border-color: var(--violet);
+}
+
+.service-hints {
   display: flex;
   flex-direction: column;
-  gap: 0.7em;
-  margin-top: 0.8em;
+  gap: 0.4em;
+  margin: 0.8em 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-muted);
+  font-size: 0.9em;
 }
 
-.service-card {
-  display: flex;
-  align-items: center;
-  gap: 0.9em;
-  text-align: left;
-  padding: 0.9em 1.1em;
-}
-
-.service-card p {
-  margin: 0.15em 0 0;
-}
-
-.change-service-link {
+.service-hint-link {
   background: none;
   border: none;
   box-shadow: none;
   padding: 0;
+  margin: 0;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.service-hint-link.mount {
   color: var(--accent);
-  font-weight: 500;
-  font-size: 0.85em;
-  margin-bottom: 0.9em;
+}
+
+.service-hint-link.backup {
+  color: var(--blue);
+}
+
+.service-hint-link.bisync {
+  color: var(--violet);
 }
 
 .inline-warning {
