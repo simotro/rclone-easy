@@ -497,21 +497,21 @@ async fn run_bisync_subprocess(
     // path on the same remote"), e che coesistono senza collisioni con
     // `--conflict-suffix` già usato sopra per i conflitti veri (verificato
     // con un run che innesca entrambi i meccanismi nello stesso giro).
-    // `None` solo nel caso limite di un lato già radice (vedi
-    // `trash::trash_fs_for`): quel lato prosegue senza questa protezione
-    // aggiuntiva, l'altro lato (se non è anch'esso un caso limite) resta
-    // comunque protetto.
+    // Tutto o niente sui due lati, non un OR: `--suffix` non è per-lato in
+    // rclone, si applica a entrambi indipendentemente da quali
+    // `--backup-dir1/2` sono presenti — con un solo lato protetto (l'altro
+    // `None` per il caso limite di `trash::trash_fs_for`, un lato già
+    // radice), quel lato riceveva comunque `--suffix` senza un
+    // `--backup-dir` a cui appoggiarsi, e finiva rinominato sul posto
+    // invece che spostato: file orfani nella cartella live, invisibili al
+    // Cestino dell'app (bug reale trovato da Simone il 25/8/2026).
     let backup_dir1 = crate::trash::trash_fs_for(path1);
     let backup_dir2 = crate::trash::trash_fs_for(path2);
-    if backup_dir1.is_some() || backup_dir2.is_some() {
+    if let (Some(dir1), Some(dir2)) = (backup_dir1, backup_dir2) {
         args.push("--suffix".to_string());
         args.push(crate::trash::trash_suffix(now_unix()));
-    }
-    if let Some(dir1) = backup_dir1 {
         args.push("--backup-dir1".to_string());
         args.push(dir1);
-    }
-    if let Some(dir2) = backup_dir2 {
         args.push("--backup-dir2".to_string());
         args.push(dir2);
     }
