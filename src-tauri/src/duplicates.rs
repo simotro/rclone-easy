@@ -129,8 +129,29 @@ fn review_destination(id: &str, combined_path: &str) -> String {
     format!("{REVIEW_FOLDER}/{dir}{id}__{basename}")
 }
 
+/// Antepone `fs` a un percorso relativo per ottenere un percorso rclone
+/// completo ("remote:sotto/percorso") — necessario per `moveid`: la
+/// documentazione di rclone lo descrive genericamente come "an rclone
+/// path", e non è relativo a `fs` come si potrebbe presumere guardando gli
+/// altri comandi `backend/command` di questo modulo. Verificato dal vivo:
+/// passandogli un percorso senza `remote:` davanti, rclone lo tratta come
+/// un percorso LOCALE relativo alla working directory del processo `rclone
+/// rcd` (che nel bundle AppImage è dentro il punto di mount squashfs, di
+/// sola lettura — da cui il fuorviante "mkdir ...: read-only file system",
+/// un errore del filesystem locale, non del remote). Senza questa
+/// qualificazione esplicita, "Sposta per revisione"/"Elimina" scaricavano
+/// l'oggetto in una cartella locale e cancellavano l'originale dal remote,
+/// invece di spostarlo lì.
+fn qualify(fs: &str, relative: &str) -> String {
+    if fs.ends_with(':') {
+        format!("{fs}{relative}")
+    } else {
+        format!("{fs}/{relative}")
+    }
+}
+
 async fn moveid(info: &rcd::ConnectionInfo, fs: &str, id: &str, dest_path: &str) -> Result<(), String> {
-    info.call("backend/command", serde_json::json!({ "command": "moveid", "fs": fs, "arg": [id, dest_path] })).await?;
+    info.call("backend/command", serde_json::json!({ "command": "moveid", "fs": fs, "arg": [id, qualify(fs, dest_path)] })).await?;
     Ok(())
 }
 
@@ -176,6 +197,19 @@ pub async fn delete_duplicate(state: tauri::State<'_, RcdState>, fs: String, id:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualify_joins_a_bare_remote_root_without_an_extra_slash() {
+        assert_eq!(qualify("remote-a:", ".rclone-easy-duplicates-review/1abc__doc.xlsx"), "remote-a:.rclone-easy-duplicates-review/1abc__doc.xlsx");
+    }
+
+    #[test]
+    fn qualify_joins_a_remote_root_with_a_subfolder() {
+        assert_eq!(
+            qualify("remote-a:sotto/cartella", ".rclone-easy-duplicates-review/1abc__doc.xlsx"),
+            "remote-a:sotto/cartella/.rclone-easy-duplicates-review/1abc__doc.xlsx"
+        );
+    }
 
     #[test]
     fn resolve_relative_path_combines_a_remote_root_with_a_nested_name() {
