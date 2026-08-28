@@ -5,6 +5,7 @@
   // ma non presume nulla sul tipo di remote oltre a quello: "Apri" compare
   // solo se `remoteKind` lo supporta (vedi il commento lì sotto).
   import { invoke } from "@tauri-apps/api/core";
+  import { untrack } from "svelte";
   import Modal from "./Modal.svelte";
   import { t } from "$lib/i18n";
   import type { DuplicateObject } from "$lib/types";
@@ -37,13 +38,13 @@
   let remoteKind = $state<string | null>(null);
   let canOpenInBrowser = $derived(remoteKind === "drive");
 
-  async function load() {
+  async function load(currentRemoteName: string, currentPath1: string, currentPath2: string, currentName: string) {
     loading = true;
     error = null;
     try {
       const [kindResult, objectsResult] = await Promise.all([
-        invoke<{ kind: string }>("get_remote_for_edit", { name: remoteName }).then((r) => r.kind),
-        invoke<DuplicateObject[]>("list_duplicate_group", { path1, path2, name }),
+        invoke<{ kind: string }>("get_remote_for_edit", { name: currentRemoteName }).then((r) => r.kind),
+        invoke<DuplicateObject[]>("list_duplicate_group", { path1: currentPath1, path2: currentPath2, name: currentName }),
       ]);
       remoteKind = kindResult;
       objects = objectsResult;
@@ -54,8 +55,19 @@
     }
   }
 
+  // `path1`/`path2`/`remoteName` arrivano dal job bisync ricaricato ogni 10s
+  // da +page.svelte (countdown della prossima esecuzione automatica) — una
+  // NUOVA istanza dell'oggetto job ad ogni giro, pur con lo stesso contenuto.
+  // Letti dentro `untrack` così l'effetto non li considera una dipendenza:
+  // senza questo, il modal ripartiva da capo (spinner, richieste rcd) ogni
+  // 10s anche restando fermo sullo stesso gruppo, per un cambiamento che non
+  // ha alcun effetto reale sui dati mostrati. Resta invece tracciato `name`,
+  // che DEVE far ricaricare quando si passa a un altro nome duplicato senza
+  // chiudere il modal (vedi `examineDuplicate` in RemotePanel.svelte).
   $effect(() => {
-    if (open) load();
+    if (!open) return;
+    const currentName = name;
+    untrack(() => load(remoteName, path1, path2, currentName));
   });
 
   async function openInBrowser(obj: DuplicateObject) {

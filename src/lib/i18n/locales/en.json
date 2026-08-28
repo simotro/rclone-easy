@@ -202,7 +202,7 @@
     "succeeded": "succeeded",
     "failed": "failed",
     "conflictsCount": "{count} conflicts",
-    "duplicateNamesWarning": "⚠ {count} duplicate names on the remote, ignored during sync — see History",
+    "duplicateNamesWarning": "⚠ {count} duplicate names on the remote, ignored during sync — see",
     "duplicateNamesFound": "{count} duplicate names found on the remote (rclone uses one and ignores the rest):",
     "deleteTitle": "Delete {remote}?",
     "deleteConfirmQuestion": "Do you really want to delete this remote?",

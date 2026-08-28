@@ -298,6 +298,13 @@
       {#if duplicateNamesCount > 0}
         <span class="last-op conflict">
           {$t("remoteRow.duplicateNamesWarning", { values: { count: duplicateNamesCount } })}
+          <button
+            type="button"
+            class="inline-action-link"
+            onclick={() => goto(`/remote/${encodeURIComponent(remoteName)}?tab=cronologia`)}
+          >
+            {$t("remotePanel.tabHistory")}
+          </button>
         </span>
       {/if}
       {#if deleteRemoteError}

@@ -202,7 +202,7 @@
     "succeeded": "riuscita",
     "failed": "fallita",
     "conflictsCount": "{count} conflitti",
-    "duplicateNamesWarning": "⚠ {count} nomi duplicati sul remote, ignorati durante la sincronizzazione — vedi Cronologia",
+    "duplicateNamesWarning": "⚠ {count} nomi duplicati sul remote, ignorati durante la sincronizzazione — vedi",
     "duplicateNamesFound": "{count} nomi duplicati trovati sul remote (rclone ne usa uno e ignora gli altri):",
     "deleteTitle": "Eliminare {remote}?",
     "deleteConfirmQuestion": "Vuoi davvero eliminare questo remote?",

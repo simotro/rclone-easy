@@ -55,7 +55,18 @@ fn resolve_relative_path(root: &str, name: &str) -> (String, String) {
     (remote_prefix, combined)
 }
 
-async fn list_matches_on(info: &rcd::ConnectionInfo, remote_prefix: &str, combined_path: &str) -> Vec<DuplicateObject> {
+/// `root` è `path1` o `path2` del job così come configurato (può includere
+/// una sottocartella, es. "remote-a:Squadra/Documenti") — finisce
+/// direttamente in `DuplicateObject.fs`, che deve restare sulla STESSA base
+/// usata per interpretare `name` in `move_for_review_in`/`delete_in`
+/// (entrambi relativi a `root`, mai al bare `remote_prefix`): altrimenti
+/// `moveid` riceverebbe un `fs` diverso dalla cartella dove l'oggetto vive
+/// davvero, tentando di creare `REVIEW_FOLDER` nella radice nuda del
+/// remote invece che nella sottocartella configurata — dove l'account può
+/// non avere permesso di scrittura anche quando ce l'ha nella sottocartella
+/// (bug reale: `mkdir .rclone-easy-duplicates-review: read-only file
+/// system` su un remote con `path1`/`path2` puntato a una sottocartella).
+async fn list_matches_on(info: &rcd::ConnectionInfo, root: &str, remote_prefix: &str, combined_path: &str) -> Vec<DuplicateObject> {
     let basename = combined_path.rsplit('/').next().unwrap_or(combined_path);
     let parent = &combined_path[..combined_path.len() - basename.len()];
     let parent = parent.trim_end_matches('/');
@@ -73,7 +84,7 @@ async fn list_matches_on(info: &rcd::ConnectionInfo, remote_prefix: &str, combin
                 id: item.get("ID")?.as_str()?.to_string(),
                 size: item.get("Size").and_then(|s| s.as_i64()).unwrap_or(-1),
                 mod_time: item.get("ModTime").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
-                fs: remote_prefix.to_string(),
+                fs: root.to_string(),
             })
         })
         .collect()
@@ -95,7 +106,7 @@ pub(crate) async fn list_group_in(state: &RcdState, path1: &str, path2: &str, na
             // salta senza nemmeno interrogare rcd.
             continue;
         }
-        let matches = list_matches_on(&info, &remote_prefix, &combined).await;
+        let matches = list_matches_on(&info, root, &remote_prefix, &combined).await;
         if matches.len() > 1 {
             return Ok(matches);
         }
@@ -127,11 +138,13 @@ async fn moveid(info: &rcd::ConnectionInfo, fs: &str, id: &str, dest_path: &str)
 /// `REVIEW_FOLDER` sullo stesso remote — non cancella nulla, risolve solo
 /// la collisione di nome nella cartella originale: dal giro successivo
 /// bisync non lo segnala più come duplicato lì, e l'oggetto resta
-/// recuperabile finché non si decide cosa farne con calma.
+/// recuperabile finché non si decide cosa farne con calma. `fs` (radice
+/// completa, vedi `list_matches_on`) e `name` sono già sulla stessa base —
+/// niente `resolve_relative_path` qui, servirebbe solo a chi parte da un
+/// nome relativo a un'altra radice.
 pub(crate) async fn move_for_review_in(state: &RcdState, fs: &str, id: &str, name: &str) -> Result<(), String> {
     let info = rcd::connection_info(state).await?;
-    let (_, combined) = resolve_relative_path(fs, name);
-    let dest = review_destination(id, &combined);
+    let dest = review_destination(id, name.trim_start_matches('/'));
     moveid(&info, fs, id, &dest).await
 }
 
@@ -149,8 +162,7 @@ pub async fn move_duplicate_for_review(state: tauri::State<'_, RcdState>, fs: St
 /// Drive: finisce nel Cestino nativo del servizio, non sparisce all'istante).
 pub(crate) async fn delete_in(state: &RcdState, fs: &str, id: &str, name: &str) -> Result<(), String> {
     let info = rcd::connection_info(state).await?;
-    let (_, combined) = resolve_relative_path(fs, name);
-    let dest = review_destination(id, &combined);
+    let dest = review_destination(id, name.trim_start_matches('/'));
     moveid(&info, fs, id, &dest).await?;
     info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": dest })).await?;
     Ok(())
