@@ -1,9 +1,11 @@
 <script lang="ts">
   // Dettaglio di un gruppo di nomi duplicati (bisync.rs::extract_duplicate_names)
   // con azioni per singolo oggetto — pensato per Google Drive (l'unico
-  // backend comune dove un nome duplicato può esistere per costruzione),
-  // ma non presume nulla sul tipo di remote oltre a quello: "Apri" compare
-  // solo se `remoteKind` lo supporta (vedi il commento lì sotto).
+  // backend comune dove un nome duplicato può esistere per costruzione).
+  // "Apri locale" è sempre disponibile (best-effort); "Apri remoto" compare
+  // solo se `remoteKind` lo supporta (vedi il commento lì sotto) — così
+  // l'utente ha comunque un modo di vedere il file anche sui backend non
+  // ancora coperti dall'apertura per ID.
   import { invoke } from "@tauri-apps/api/core";
   import { untrack } from "svelte";
   import Modal from "./Modal.svelte";
@@ -13,17 +15,27 @@
   let {
     open = $bindable(false),
     remoteName,
+    localRoot,
     path1,
     path2,
     name,
     onRefresh,
+    onResolved,
   }: {
     open: boolean;
     remoteName: string;
+    // Lato locale del job bisync (sempre esattamente uno) — un nome
+    // duplicato è per costruzione sempre relativo a questa stessa radice,
+    // vedi "Apri locale" sotto.
+    localRoot: string;
     path1: string;
     path2: string;
     name: string;
     onRefresh?: () => void | Promise<void>;
+    // Chiamato quando il gruppo scende a una sola versione rimasta (o
+    // zero): non c'è più nulla da decidere per questo nome — vedi la
+    // chiusura automatica in `moveForReview`/`confirmDelete`.
+    onResolved?: (name: string) => void;
   } = $props();
 
   let objects = $state<DuplicateObject[]>([]);
@@ -70,8 +82,27 @@
     untrack(() => load(remoteName, path1, path2, currentName));
   });
 
-  async function openInBrowser(obj: DuplicateObject) {
+  async function openRemote(obj: DuplicateObject) {
     await invoke("open_url_in_browser", { url: `https://drive.google.com/open?id=${encodeURIComponent(obj.id)}` });
+  }
+
+  // Best-effort: apre il file locale che si chiama come questo gruppo — può
+  // non esistere ancora, o essere quello dell'ALTRO duplicato (non c'è modo
+  // di distinguerli per nome per costruzione), ma resta comunque il modo più
+  // rapido di dare un'occhiata al contenuto senza lasciare l'app.
+  async function openLocal() {
+    await invoke("open_local_duplicate", { localRoot, name });
+  }
+
+  // Restando a una sola versione (o nessuna) non c'è più ambiguità da
+  // risolvere per questo nome — chiude da sé invece di lasciare il modal
+  // aperto su un elenco con una sola voce, e segnala al chiamante di
+  // marcarlo come risolto nell'elenco della cronologia.
+  function closeIfResolved() {
+    if (objects.length <= 1) {
+      open = false;
+      onResolved?.(name);
+    }
   }
 
   async function moveForReview(obj: DuplicateObject) {
@@ -81,6 +112,7 @@
       await invoke("move_duplicate_for_review", { fs: obj.fs, id: obj.id, name });
       objects = objects.filter((o) => o.id !== obj.id);
       await onRefresh?.();
+      closeIfResolved();
     } catch (e) {
       error = String(e);
     } finally {
@@ -96,6 +128,7 @@
       objects = objects.filter((o) => o.id !== obj.id);
       pendingDeleteId = null;
       await onRefresh?.();
+      closeIfResolved();
     } catch (e) {
       error = String(e);
     } finally {
@@ -149,8 +182,9 @@
             </div>
           {:else}
             <div class="object-actions">
+              <button type="button" onclick={openLocal} disabled={busyId !== null}>{$t("duplicates.openLocal")}</button>
               {#if canOpenInBrowser}
-                <button type="button" onclick={() => openInBrowser(obj)} disabled={busyId !== null}>{$t("duplicates.open")}</button>
+                <button type="button" onclick={() => openRemote(obj)} disabled={busyId !== null}>{$t("duplicates.openRemote")}</button>
               {/if}
               <button type="button" onclick={() => moveForReview(obj)} disabled={busyId !== null}>
                 {busyId === obj.id ? $t("common.inProgress") : $t("duplicates.moveForReview")}

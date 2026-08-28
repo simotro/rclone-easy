@@ -108,10 +108,20 @@
   "duplicates": {
     "title": "Nomi duplicati — {name}",
     "resolved": "Tutti gli oggetti di questo nome sono stati risolti.",
-    "open": "Apri",
+    "openLocal": "Apri locale",
+    "openRemote": "Apri remoto",
     "moveForReview": "Sposta per revisione",
     "delete": "Elimina",
     "deleteConfirm": "Eliminare questo oggetto? Se il remote usa il cestino nativo (predefinito per Google Drive), resta recuperabile da lì, non sparisce all'istante."
+  },
+  "review": {
+    "title": "Attesa revisione",
+    "loading": "Caricamento…",
+    "empty": "Nessun file in attesa di revisione.",
+    "movedOn": "Spostato il {when}",
+    "deletePermanently": "Elimina definitivamente",
+    "deleting": "Eliminazione…",
+    "deleteConfirm": "Eliminare definitivamente questo file? Se il remote usa il cestino nativo (predefinito per Google Drive), resta recuperabile da lì, non sparisce all'istante."
   },
   "remoteRow": {
     "backupRunning": "Backup in corso…",

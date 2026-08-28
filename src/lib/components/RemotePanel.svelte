@@ -16,9 +16,10 @@
   import Icon from "./Icon.svelte";
   import LogView from "./LogView.svelte";
   import TrashView from "./TrashView.svelte";
+  import ReviewView from "./ReviewView.svelte";
   import RemoteFolderPicker from "./RemoteFolderPicker.svelte";
   import DuplicateGroupModal from "./DuplicateGroupModal.svelte";
-  import type { MountEntry, SyncJob, BisyncJob, TransferEvent } from "$lib/types";
+  import type { MountEntry, SyncJob, BisyncJob, TransferEvent, TrashEntry, ReviewEntry } from "$lib/types";
   import { t } from "$lib/i18n";
 
   let {
@@ -79,7 +80,7 @@
   // apertura, non tenuti agganciati per sempre a quella funzione).
   const openingService = initialService();
   let selectedService = $state<ServiceKind | null>(openingService);
-  type Tab = "configura" | "cronologia" | "cestino";
+  type Tab = "configura" | "cronologia" | "revisione" | "cestino";
   let activeTab = $state<Tab>(untrack(() => initialTab ?? "configura"));
 
   function activateServiceForm(kind: ServiceKind) {
@@ -417,11 +418,59 @@
   // nome all'altro non richiede prima chiuderlo e riaprirlo.
   let examiningDuplicateName = $state<string | null>(null);
   let duplicateModalOpen = $state(false);
+  // Nomi già lavorati (spostati per revisione o eliminati) in questa
+  // sessione — non tolti dall'elenco (l'utente vuole ancora vedere quanti
+  // ne restano), solo marcati con una spunta. Non persistito: al prossimo
+  // giro di bisync la voce sparisce da sé dall'elenco se davvero risolta.
+  let resolvedDuplicateNames = $state<Set<string>>(new Set());
 
   function examineDuplicate(name: string) {
     examiningDuplicateName = name;
     duplicateModalOpen = true;
   }
+
+  function handleDuplicateResolved(name: string) {
+    resolvedDuplicateNames.add(name);
+    loadExtraCounts();
+  }
+
+  // Conteggi per mostrare le tab "Attesa revisione"/"Cestino" solo quando
+  // contengono davvero qualcosa (altrimenti una tab vuota non serve a
+  // nessuno) — ricaricati ad ogni cambio di servizio e, tramite le stesse
+  // prop `syncJob`/`bisyncJob` ricaricate ogni 10s da +page.svelte, anche
+  // periodicamente insieme al resto del pannello.
+  let trashCount = $state(0);
+  let reviewCount = $state(0);
+
+  async function loadExtraCounts() {
+    if (selectedService === "backup" && syncJob) {
+      trashCount = (await invoke<TrashEntry[]>("list_trash", { dest: syncJob.destination })).length;
+      reviewCount = 0;
+    } else if (selectedService === "bisync" && bisyncJob) {
+      const [trash1, trash2, review] = await Promise.all([
+        invoke<TrashEntry[]>("list_trash", { dest: bisyncJob.path1 }),
+        invoke<TrashEntry[]>("list_trash", { dest: bisyncJob.path2 }),
+        invoke<ReviewEntry[]>("list_review_entries", { path1: bisyncJob.path1, path2: bisyncJob.path2 }),
+      ]);
+      trashCount = trash1.length + trash2.length;
+      reviewCount = review.length;
+    } else {
+      trashCount = 0;
+      reviewCount = 0;
+    }
+  }
+
+  $effect(() => {
+    loadExtraCounts();
+  });
+
+  // Se la tab attiva smette di avere contenuto (es. ultimo file eliminato
+  // definitivamente dalla scheda stessa) non deve restare "appesa" su una
+  // tab che non compare più nella barra.
+  $effect(() => {
+    if (activeTab === "revisione" && reviewCount === 0) activeTab = "cronologia";
+    if (activeTab === "cestino" && trashCount === 0) activeTab = "cronologia";
+  });
 
   function bisyncLocalPathOf(job: BisyncJob): string {
     return job.path1.startsWith(prefix) ? job.path2 : job.path1;
@@ -560,7 +609,12 @@
       <button type="button" class="tab" class:active={activeTab === "cronologia"} onclick={() => (activeTab = "cronologia")}>
         {$t("remotePanel.tabHistory")}
       </button>
-      {#if selectedService !== "mount"}
+      {#if selectedService === "bisync" && reviewCount > 0}
+        <button type="button" class="tab" class:active={activeTab === "revisione"} onclick={() => (activeTab = "revisione")}>
+          {$t("review.title")}
+        </button>
+      {/if}
+      {#if selectedService !== "mount" && trashCount > 0}
         <button type="button" class="tab" class:active={activeTab === "cestino"} onclick={() => (activeTab = "cestino")}>
           {$t("trash.title")}
         </button>
@@ -876,8 +930,8 @@
                   <ul class="duplicate-names-list">
                     {#each entry.duplicateNames as dupName (dupName)}
                       <li>
-                        <button type="button" class="duplicate-name-link" onclick={() => examineDuplicate(dupName)}>
-                          {dupName}
+                        <button type="button" class="duplicate-name-link" class:resolved={resolvedDuplicateNames.has(dupName)} onclick={() => examineDuplicate(dupName)}>
+                          {#if resolvedDuplicateNames.has(dupName)}✓ {/if}{dupName}
                         </button>
                       </li>
                     {/each}
@@ -905,6 +959,8 @@
           </ul>
         {/if}
       {/if}
+    {:else if activeTab === "revisione" && selectedService === "bisync" && bisyncJob}
+      <ReviewView {remoteName} localRoot={bisyncLocalPathOf(bisyncJob)} path1={bisyncJob.path1} path2={bisyncJob.path2} {onRefresh} />
     {:else if activeTab === "cestino" && selectedService === "backup" && syncJob}
       <TrashView sides={[syncJob.destination]} />
     {:else if activeTab === "cestino" && selectedService === "bisync" && bisyncJob}
@@ -919,10 +975,12 @@
   <DuplicateGroupModal
     bind:open={duplicateModalOpen}
     {remoteName}
+    localRoot={bisyncLocalPathOf(bisyncJob)}
     path1={bisyncJob.path1}
     path2={bisyncJob.path2}
     name={examiningDuplicateName ?? ""}
     {onRefresh}
+    onResolved={handleDuplicateResolved}
   />
 {/if}
 
@@ -1063,6 +1121,10 @@
   cursor: pointer;
   text-align: left;
   word-break: break-word;
+}
+
+.duplicate-name-link.resolved {
+  color: var(--text-muted);
 }
 
 </style>

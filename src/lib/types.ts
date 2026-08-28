@@ -69,6 +69,15 @@ export type DuplicateObject = {
   fs: string;
 };
 
+export type ReviewEntry = {
+  id: string;
+  name: string;
+  size: number;
+  modTime: string;
+  fs: string;
+  reviewPath: string;
+};
+
 export type BisyncJob = {
   name: string;
   path1: string;

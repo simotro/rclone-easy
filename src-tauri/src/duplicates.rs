@@ -194,6 +194,118 @@ pub async fn delete_duplicate(state: tauri::State<'_, RcdState>, fs: String, id:
     delete_in(&state, &fs, &id, &name).await
 }
 
+/// Apre nel file manager/app predefinita il file locale che corrisponde per
+/// nome a un oggetto duplicato o a una voce in attesa di revisione — un
+/// job bisync ha sempre un solo lato locale, e il nome (ricostruito dal log
+/// o dalla cartella di revisione) è sempre relativo a quella stessa radice.
+/// Best-effort come `mounts::open_mount_folder`: non verifica che il file
+/// esista davvero (potrebbe non esserci ancora, o essere quello dell'ALTRO
+/// duplicato con lo stesso nome — non c'è modo di saperlo per costruzione),
+/// apre comunque il percorso e lascia che sia l'app di sistema a segnalare
+/// un eventuale file mancante.
+#[tauri::command]
+pub fn open_local_duplicate(local_root: String, name: String) {
+    let path = std::path::Path::new(&local_root).join(name.trim_start_matches('/'));
+    crate::open_external::open_path(&path.to_string_lossy());
+}
+
+/// Un oggetto già spostato in `REVIEW_FOLDER` — a differenza di
+/// `DuplicateObject`, `name` è già il percorso completo ricostruito
+/// (struttura di sottocartelle originale inclusa, vedi `review_destination`),
+/// pronto da mostrare in UI senza ulteriori calcoli.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewEntry {
+    pub id: String,
+    pub name: String,
+    pub size: i64,
+    pub mod_time: String,
+    /// Radice del remote su cui vive (per `delete_review_entry`/apertura
+    /// remota) — stesso principio di `DuplicateObject::fs`.
+    pub fs: String,
+    /// Percorso relativo dentro `fs` (comprensivo del prefisso
+    /// `REVIEW_FOLDER`), da ripassare a `delete_review_entry`.
+    pub review_path: String,
+}
+
+fn extract_list(body: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+    body.get("list").and_then(|v| v.as_array()).cloned().ok_or_else(|| format!("campo 'list' mancante nella risposta di rclone rcd: {body}"))
+}
+
+/// Toglie il prefisso `"{id}__"` da un nome dentro `REVIEW_FOLDER` (vedi
+/// `review_destination`) per recuperare il nome originale. `id` va preso
+/// dal campo `ID` della risposta di `operations/list` (l'ID vero e attuale
+/// dell'oggetto), MAI ricavato tagliando la stringa alla prima/ultima `__`
+/// trovata: un ID Drive reale può a sua volta terminare con `_` (osservato
+/// dal vivo, es. `"...LlV3u_"`), che sommato al separatore produce tre
+/// underscore consecutivi — tagliare al primo `__` in quel caso perde
+/// l'ultimo carattere dell'ID vero. Conoscendo già l'ID per altra via, un
+/// semplice `strip_prefix` è inequivocabile a prescindere da cosa
+/// contengano ID o nome originale.
+fn parse_review_name(id: &str, name: &str) -> Option<String> {
+    name.strip_prefix(&format!("{id}__")).map(str::to_string)
+}
+
+/// Elenca il contenuto di `REVIEW_FOLDER` su entrambi i lati del job (un
+/// nome duplicato può essere stato trovato su uno dei due, vedi
+/// `list_group_in`) — lista vuota, non un errore, se quel lato è locale o se
+/// la cartella di revisione non esiste ancora lì.
+pub(crate) async fn list_review_entries_in(state: &RcdState, path1: &str, path2: &str) -> Result<Vec<ReviewEntry>, String> {
+    let info = rcd::connection_info(state).await?;
+    let mut entries = Vec::new();
+    for root in [path1, path2] {
+        let (remote_prefix, _) = split_remote_and_path(root);
+        if remote_prefix.is_empty() {
+            continue;
+        }
+        let list_fs = qualify(root, REVIEW_FOLDER);
+        let body = info
+            .call("operations/list", serde_json::json!({ "fs": list_fs, "remote": "", "opt": { "filesOnly": true, "recurse": true, "noModTime": false } }))
+            .await;
+        let body = match body {
+            Ok(body) => body,
+            Err(e) if e.contains("directory not found") => continue,
+            Err(e) => return Err(e),
+        };
+        for item in extract_list(&body)? {
+            let path = item.get("Path").and_then(|v| v.as_str()).unwrap_or_default();
+            let basename = item.get("Name").and_then(|v| v.as_str()).unwrap_or_default();
+            let Some(id) = item.get("ID").and_then(|v| v.as_str()) else { continue };
+            let Some(original_name) = parse_review_name(id, basename) else { continue };
+            let dir_prefix = path.strip_suffix(basename).unwrap_or("");
+            entries.push(ReviewEntry {
+                id: id.to_string(),
+                name: format!("{dir_prefix}{original_name}"),
+                size: item.get("Size").and_then(|v| v.as_i64()).unwrap_or(-1),
+                mod_time: item.get("ModTime").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                fs: root.to_string(),
+                review_path: path.to_string(),
+            });
+        }
+    }
+    entries.sort_by(|a, b| b.mod_time.cmp(&a.mod_time));
+    Ok(entries)
+}
+
+#[tauri::command]
+pub async fn list_review_entries(state: tauri::State<'_, RcdState>, path1: String, path2: String) -> Result<Vec<ReviewEntry>, String> {
+    list_review_entries_in(&state, &path1, &path2).await
+}
+
+/// Cancella per sempre una voce già in `REVIEW_FOLDER` — a differenza di
+/// `delete_in`, nessuno spostamento preliminare: il nome lì dentro è già
+/// univoco (prefisso ID), niente ambiguità da risolvere.
+pub(crate) async fn delete_review_entry_in(state: &RcdState, fs: &str, review_path: &str) -> Result<(), String> {
+    let info = rcd::connection_info(state).await?;
+    info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": review_path })).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_review_entry(state: tauri::State<'_, RcdState>, fs: String, review_path: String) -> Result<(), String> {
+    delete_review_entry_in(&state, &fs, &review_path).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +345,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_review_name_strips_the_known_id_prefix() {
+        assert_eq!(parse_review_name("1abc", "1abc__Elenco (2).xlsx"), Some("Elenco (2).xlsx".to_string()));
+    }
+
+    #[test]
+    fn parse_review_name_is_none_when_the_name_does_not_start_with_that_id() {
+        assert_eq!(parse_review_name("1abc", "documento-normale.xlsx"), None);
+    }
+
+    /// Caso reale osservato dal vivo: un ID Drive può terminare con `_`,
+    /// producendo tre underscore consecutivi prima del nome originale
+    /// (uno dell'ID, due del separatore) — un taglio "al primo/ultimo `__`"
+    /// romperebbe questo caso, `strip_prefix` con l'ID già noto no.
+    #[test]
+    fn parse_review_name_handles_an_id_that_itself_ends_with_an_underscore() {
+        assert_eq!(
+            parse_review_name("1emtJL_Q-tuPrCmbbjjbnL-ICM5LlV3u_", "1emtJL_Q-tuPrCmbbjjbnL-ICM5LlV3u___nota.docx"),
+            Some("nota.docx".to_string())
+        );
+    }
+
+    #[test]
     fn review_destination_keeps_the_original_folder_structure_readable() {
         let dest = review_destination("1abc", "sotto/cartella/Elenco (2).xlsx");
         assert_eq!(dest, ".rclone-easy-duplicates-review/sotto/cartella/1abc__Elenco (2).xlsx");
@@ -267,5 +401,23 @@ mod tests {
         let result = list_group_in(&state, &path1_dir.path.to_string_lossy(), &path2_dir.path.to_string_lossy(), "doc.txt").await;
 
         assert_eq!(result, Ok(Vec::new()), "due percorsi locali non possono avere nomi duplicati: {result:?}");
+    }
+
+    /// Stessa cautela di `list_group_in_skips_local_sides...`: una cartella
+    /// di revisione può esistere solo sul lato remoto, mai su quello locale.
+    #[tokio::test]
+    async fn list_review_entries_in_skips_local_sides_and_returns_empty_when_nothing_matches() {
+        use crate::rcd::tests::TempDir;
+
+        let config_dir = TempDir::new("duplicates-review-list-config");
+        let path1_dir = TempDir::new("duplicates-review-list-path1");
+        let path2_dir = TempDir::new("duplicates-review-list-path2");
+        std::fs::create_dir_all(&path1_dir.path).unwrap();
+        std::fs::create_dir_all(&path2_dir.path).unwrap();
+
+        let state = crate::rcd::build_state(config_dir.config_path()).await;
+        let result = list_review_entries_in(&state, &path1_dir.path.to_string_lossy(), &path2_dir.path.to_string_lossy()).await;
+
+        assert_eq!(result, Ok(Vec::new()), "due percorsi locali non possono avere una cartella di revisione: {result:?}");
     }
 }

@@ -108,10 +108,20 @@
   "duplicates": {
     "title": "Duplicate names — {name}",
     "resolved": "Every object with this name has been resolved.",
-    "open": "Open",
+    "openLocal": "Open local",
+    "openRemote": "Open remote",
     "moveForReview": "Move for review",
     "delete": "Delete",
     "deleteConfirm": "Delete this object? If the remote uses its native trash (the default for Google Drive), it stays recoverable from there, it doesn't disappear instantly."
+  },
+  "review": {
+    "title": "Pending review",
+    "loading": "Loading…",
+    "empty": "No files pending review.",
+    "movedOn": "Moved on {when}",
+    "deletePermanently": "Delete permanently",
+    "deleting": "Deleting…",
+    "deleteConfirm": "Permanently delete this file? If the remote uses its native trash (the default for Google Drive), it stays recoverable from there, it doesn't disappear instantly."
   },
   "remoteRow": {
     "backupRunning": "Backup in progress…",
