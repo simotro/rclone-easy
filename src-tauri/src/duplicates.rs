@@ -155,6 +155,27 @@ async fn moveid(info: &rcd::ConnectionInfo, fs: &str, id: &str, dest_path: &str)
     Ok(())
 }
 
+/// Svuota la cache degli `Fs` di rclone (RC `fscache/clear`) prima di
+/// cancellare un oggetto dentro `REVIEW_FOLDER` — bug reale verificato dal
+/// vivo: quando la struttura di sottocartelle dentro `REVIEW_FOLDER`
+/// ricalca nomi già presenti altrove nell'albero reale dello stesso remote
+/// (es. `REVIEW_FOLDER/GESTIONALE COPASS/Gruppo Informatico/...`, mentre
+/// `GESTIONALE COPASS/Gruppo Informatico/...` esiste anche fuori da
+/// `REVIEW_FOLDER`), `operations/deletefile` sul processo `rcd` di lunga
+/// durata può fallire con "object not found" pur risolvendo correttamente
+/// lo stesso percorso un istante prima con `operations/list` — lo stesso
+/// comando eseguito da un processo `rclone` a sé (niente cache condivisa)
+/// riesce sempre. Riconducibile alla dircache interna del backend Drive che
+/// resta disallineata dopo `moveid` (un comando a basso livello che non
+/// passa dai percorsi normali di rclone che la aggiornerebbero). Costo
+/// trascurabile (l'unico Fs coinvolto qui si ricrea al prossimo utilizzo),
+/// nessun rischio per operazioni in corso su altri remote (la cache serve
+/// solo a riusare connessioni già aperte, non tiene stato che altre
+/// operazioni già in corso perderebbero).
+async fn clear_fs_cache(info: &rcd::ConnectionInfo) {
+    let _ = info.call("fscache/clear", serde_json::json!({})).await;
+}
+
 /// Sposta un oggetto specifico (per ID, senza ambiguità di nome) in
 /// `REVIEW_FOLDER` sullo stesso remote — non cancella nulla, risolve solo
 /// la collisione di nome nella cartella originale: dal giro successivo
@@ -185,6 +206,7 @@ pub(crate) async fn delete_in(state: &RcdState, fs: &str, id: &str, name: &str) 
     let info = rcd::connection_info(state).await?;
     let dest = review_destination(id, name.trim_start_matches('/'));
     moveid(&info, fs, id, &dest).await?;
+    clear_fs_cache(&info).await;
     info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": dest })).await?;
     Ok(())
 }
@@ -297,6 +319,7 @@ pub async fn list_review_entries(state: tauri::State<'_, RcdState>, path1: Strin
 /// univoco (prefisso ID), niente ambiguità da risolvere.
 pub(crate) async fn delete_review_entry_in(state: &RcdState, fs: &str, review_path: &str) -> Result<(), String> {
     let info = rcd::connection_info(state).await?;
+    clear_fs_cache(&info).await;
     info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": review_path })).await?;
     Ok(())
 }
