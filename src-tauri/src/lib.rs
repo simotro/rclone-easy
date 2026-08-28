@@ -54,6 +54,9 @@ mod remote_lock;
 mod trash;
 use trash::{list_trash, restore_trash_entry};
 
+mod duplicates;
+use duplicates::{delete_duplicate, list_duplicate_group, move_duplicate_for_review};
+
 mod path_safety;
 use path_safety::check_dangerous_path;
 
@@ -309,6 +312,9 @@ pub fn run() {
             dry_run_bisync_job,
             list_trash,
             restore_trash_entry,
+            list_duplicate_group,
+            move_duplicate_for_review,
+            delete_duplicate,
             check_dangerous_path,
             export_backup,
             import_backup,

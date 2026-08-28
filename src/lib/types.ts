@@ -40,6 +40,7 @@ export type BisyncRunEntry = {
   message: string;
   whenUnix: number;
   conflictPaths: string[];
+  duplicateNames: string[];
   log: string;
   needsForce: boolean;
 };
@@ -58,6 +59,13 @@ export type TrashEntry = {
   originalPath: string;
   whenUnix: number;
   size: number;
+};
+
+export type DuplicateObject = {
+  id: string;
+  size: number;
+  modTime: string;
+  fs: string;
 };
 
 export type BisyncJob = {

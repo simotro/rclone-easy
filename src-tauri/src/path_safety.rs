@@ -1,5 +1,18 @@
 use std::path::{Path, PathBuf};
 
+/// Cestino nativo del sistema operativo (specifica XDG Trash: `$topdir/
+/// .Trash-$uid`) che un file manager crea DENTRO una cartella quando questa
+/// viene vista come un filesystem a parte — capita tipicamente se quella
+/// stessa cartella è stata usata come punto di montaggio FUSE (la funzione
+/// "Mount" di questa app monta proprio così) prima di essere riconfigurata
+/// per bisync/backup: la cartella resta lì, indistinguibile da un contenuto
+/// vero, e bisync/backup la risincronizzerebbe come tale — compreso
+/// ricaricare sul remote file che l'utente pensava di aver cancellato per
+/// sempre. `*` al posto dello uid specifico: non ha senso legare
+/// l'esclusione all'utente di QUESTA macchina, la cartella può essere stata
+/// creata da chiunque abbia mai montato/navigato quel percorso.
+pub(crate) const OS_TRASH_EXCLUDE: &str = "/.Trash-*/**";
+
 /// Home directory dell'utente corrente, letta dalla variabile d'ambiente
 /// giusta per piattaforma — niente crate esterna (`dirs`/`home`) solo per
 /// questo, coerente con le dipendenze già minimali del progetto.

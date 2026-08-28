@@ -433,8 +433,12 @@ async fn execute_sync(state: &RcdState, source: &str, destination: &str, propaga
                 // esclude davvero il contenuto della cartella. Il cestino
                 // (trash.rs) non ha bisogno di un'esclusione analoga: è una
                 // cartella fratella della destinazione, non annidata al suo
-                // interno, quindi non entra mai nel confronto.
-                "_filter": { "ExcludeRule": [crate::remote_lock::LOCK_FOLDER_EXCLUDE] },
+                // interno, quindi non entra mai nel confronto. Esclude anche
+                // un eventuale cestino nativo del sistema lasciato da un
+                // vecchio mount FUSE sullo stesso percorso (vedi
+                // path_safety::OS_TRASH_EXCLUDE) — stesso rischio di bisync,
+                // ricaricare contenuto che l'utente pensava cancellato.
+                "_filter": { "ExcludeRule": [crate::remote_lock::LOCK_FOLDER_EXCLUDE, crate::path_safety::OS_TRASH_EXCLUDE] },
             }),
         )
         .await?;

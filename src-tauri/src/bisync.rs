@@ -58,6 +58,14 @@ pub struct BisyncRunResult {
     /// su azione esplicita dell'utente dopo aver visto `log`.
     #[serde(default)]
     pub needs_force: bool,
+    /// Nomi trovati più volte nella stessa cartella sul remote (tipicamente
+    /// Google Drive, l'unico backend comune che lo permette) — rclone ne usa
+    /// uno e ignora gli altri silenziosamente durante il confronto, quindi
+    /// senza questo campo l'informazione restava sepolta nel log grezzo.
+    /// `#[serde(default)]` per compatibilità con le voci di history già
+    /// salvate su disco prima di questo campo.
+    #[serde(default)]
+    pub duplicate_names: Vec<String>,
 }
 
 /// `BisyncJob` unito allo stato live "in esecuzione ora" — stesso principio
@@ -313,6 +321,32 @@ fn extract_conflict_paths(stderr: &str) -> Vec<String> {
     paths
 }
 
+/// Estrae i nomi (percorso relativo dentro path1/path2) che rclone ha
+/// incontrato più volte nella stessa cartella durante il confronto e ha
+/// dovuto ignorare — succede solo su backend che permettono nomi duplicati
+/// nella stessa cartella (in pratica solo Google Drive tra quelli comuni: Mega
+/// e i backend WebDAV impongono nomi univoci per costruzione). Il campo
+/// `object` del log JSON contiene già il percorso pulito, quindi qui non
+/// serve affettare il testo del messaggio come in `extract_conflict_paths`.
+/// Deduplicato: un gruppo con più di due copie genera più righe di log per
+/// lo stesso nome (una per ogni copia in eccesso oltre la prima).
+fn extract_duplicate_names(stderr: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in stderr.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Some(msg) = value.get("msg").and_then(|m| m.as_str()) else { continue };
+        if !strip_ansi(msg).contains("Duplicate object found") {
+            continue;
+        }
+        let Some(object) = value.get("object").and_then(|o| o.as_str()) else { continue };
+        let object = object.to_string();
+        if !names.contains(&object) {
+            names.push(object);
+        }
+    }
+    names
+}
+
 /// Messaggio più utile disponibile nei log per spiegare un fallimento,
 /// ripulito dai codici ANSI — stesso principio di
 /// `rcd::error_message_from_response`: mostrare il messaggio più specifico
@@ -481,12 +515,19 @@ async fn run_bisync_subprocess(
         // sleep"). rclone lo ignora silenziosamente sui backend che non lo
         // supportano (es. il lato locale), quindi è sicuro passarlo sempre.
         "--fast-list".to_string(),
-        // Esclude la cartella dei lock condivisi (vedi remote_lock.rs) dal
-        // confronto — altrimenti finirebbe trattata come contenuto vero da
-        // sincronizzare tra i due lati, innocuo se `path2` non la contiene
-        // affatto.
+        // Esclude la cartella dei lock condivisi (vedi remote_lock.rs),
+        // quella dei duplicati messi da parte per revisione (vedi
+        // duplicates.rs) e un eventuale cestino nativo del sistema lasciato
+        // da un vecchio mount FUSE sullo stesso percorso (vedi
+        // path_safety::OS_TRASH_EXCLUDE) dal confronto — altrimenti
+        // finirebbero trattate come contenuto vero da risincronizzare tra i
+        // due lati, innocuo se un lato non le contiene affatto.
         "--exclude".to_string(),
         crate::remote_lock::LOCK_FOLDER_EXCLUDE.to_string(),
+        "--exclude".to_string(),
+        crate::duplicates::REVIEW_FOLDER_EXCLUDE.to_string(),
+        "--exclude".to_string(),
+        crate::path_safety::OS_TRASH_EXCLUDE.to_string(),
     ];
     // Invece di cancellare/sovrascrivere per sempre, rclone sposta ciò che
     // verrebbe perso in un "cestino" fratello di `path1`/`path2` (trash.rs)
@@ -635,6 +676,7 @@ async fn execute_bisync(
     let (status, stderr) = run_bisync_subprocess(config_path, workdir, path1, path2, resync, force, false, config_password).await?;
 
     let conflict_paths = extract_conflict_paths(&stderr);
+    let duplicate_names = extract_duplicate_names(&stderr);
     let log = readable_log(&stderr);
 
     let (success, message, needs_force) = if status.success() {
@@ -646,7 +688,7 @@ async fn execute_bisync(
         (false, message, needs_force)
     };
 
-    Ok(BisyncRunResult { success, message, when_unix: now_unix(), conflict_paths, log, needs_force })
+    Ok(BisyncRunResult { success, message, when_unix: now_unix(), conflict_paths, duplicate_names, log, needs_force })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1293,6 +1335,36 @@ mod tests {
     fn extract_conflict_paths_is_empty_when_there_are_none() {
         let stderr = json_log_line("notice", "Bisync successful");
         assert!(extract_conflict_paths(&stderr).is_empty());
+    }
+
+    /// Formato reale verificato con `rclone check -vv --use-json-log` contro
+    /// un vero Google Drive: il nome duplicato è già nel campo `object`, non
+    /// dentro `msg` come per `extract_conflict_paths`.
+    #[test]
+    fn extract_duplicate_names_reads_the_object_field() {
+        let stderr = [
+            r#"{"level":"notice","msg":"Duplicate object found in destination - ignoring","object":"Brogliaccio.xlsx"}"#.to_string(),
+            r#"{"level":"notice","msg":"Duplicate object found in destination - ignoring","object":"cartella/Elenco (2).xlsx"}"#
+                .to_string(),
+            json_log_line("notice", "something unrelated"),
+        ]
+        .join("\n");
+
+        let names = extract_duplicate_names(&stderr);
+        assert_eq!(names, vec!["Brogliaccio.xlsx", "cartella/Elenco (2).xlsx"]);
+    }
+
+    #[test]
+    fn extract_duplicate_names_deduplicates_repeated_lines_for_the_same_name() {
+        let line = r#"{"level":"notice","msg":"Duplicate object found in destination - ignoring","object":"stesso-nome.docx"}"#;
+        let stderr = [line, line, line].join("\n");
+        assert_eq!(extract_duplicate_names(&stderr), vec!["stesso-nome.docx"]);
+    }
+
+    #[test]
+    fn extract_duplicate_names_is_empty_when_there_are_none() {
+        let stderr = json_log_line("notice", "Bisync successful");
+        assert!(extract_duplicate_names(&stderr).is_empty());
     }
 
     #[test]

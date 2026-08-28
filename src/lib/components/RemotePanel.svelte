@@ -17,6 +17,7 @@
   import LogView from "./LogView.svelte";
   import TrashView from "./TrashView.svelte";
   import RemoteFolderPicker from "./RemoteFolderPicker.svelte";
+  import DuplicateGroupModal from "./DuplicateGroupModal.svelte";
   import type { MountEntry, SyncJob, BisyncJob, TransferEvent } from "$lib/types";
   import { t } from "$lib/i18n";
 
@@ -411,6 +412,16 @@
   let expandedHistoryEntryKey = $state<number | null>(null);
   let bisyncPathRootError = $state<string | null>(null);
   let bisyncHomeWarningPath = $state<string | null>(null);
+  // "Esamina" su un nome duplicato (vedi duplicates.rs) — un solo modal,
+  // il nome esaminato è tenuto separato da "aperto" così passare da un
+  // nome all'altro non richiede prima chiuderlo e riaprirlo.
+  let examiningDuplicateName = $state<string | null>(null);
+  let duplicateModalOpen = $state(false);
+
+  function examineDuplicate(name: string) {
+    examiningDuplicateName = name;
+    duplicateModalOpen = true;
+  }
 
   function bisyncLocalPathOf(job: BisyncJob): string {
     return job.path1.startsWith(prefix) ? job.path2 : job.path1;
@@ -858,6 +869,20 @@
                 {#if entry.conflictPaths.length > 0 && index === 0}
                   <p class="hint">{$t("remoteRow.noVersionLost")}</p>
                 {/if}
+                {#if entry.duplicateNames.length > 0}
+                  <p class="hint">
+                    {$t("remoteRow.duplicateNamesFound", { values: { count: entry.duplicateNames.length } })}
+                  </p>
+                  <ul class="duplicate-names-list">
+                    {#each entry.duplicateNames as dupName (dupName)}
+                      <li>
+                        <button type="button" class="duplicate-name-link" onclick={() => examineDuplicate(dupName)}>
+                          {dupName}
+                        </button>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
                 {#if !entry.success}
                   <LogView text={entry.log || entry.message} />
                   {#if entry.needsForce && index === 0}
@@ -886,6 +911,17 @@
 </div>
 
 <RemoteFolderPicker bind:open={remotePickerOpen} {remoteName} onSelect={(path) => remotePickerOnSelect?.(path)} />
+
+{#if bisyncJob}
+  <DuplicateGroupModal
+    bind:open={duplicateModalOpen}
+    {remoteName}
+    path1={bisyncJob.path1}
+    path2={bisyncJob.path2}
+    name={examiningDuplicateName ?? ""}
+    {onRefresh}
+  />
+{/if}
 
 <style>
 .panel {
@@ -1002,19 +1038,28 @@
   color: var(--violet);
 }
 
-.inline-warning {
-  padding: 0.8em 1em;
-  border-radius: 8px;
-  background-color: var(--warning-bg);
-  color: var(--warning-text);
-  font-size: 0.9em;
+.duplicate-names-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2em;
 }
 
-.inline-warning :global(p) {
-  margin: 0 0 0.5em;
+.duplicate-name-link {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-size: 0.85em;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+  text-align: left;
+  word-break: break-word;
 }
 
-.inline-warning .modal-actions {
-  margin-top: 0.3em;
-}
 </style>

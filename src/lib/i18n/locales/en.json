@@ -104,6 +104,14 @@
     "restore": "Restore",
     "restoring": "Restoring…"
   },
+  "duplicates": {
+    "title": "Duplicate names — {name}",
+    "resolved": "Every object with this name has been resolved.",
+    "open": "Open",
+    "moveForReview": "Move for review",
+    "delete": "Delete",
+    "deleteConfirm": "Delete this object? If the remote uses its native trash (the default for Google Drive), it stays recoverable from there, it doesn't disappear instantly."
+  },
   "remoteRow": {
     "backupRunning": "Backup in progress…",
     "backupFirstSoon": "First backup starting shortly",
@@ -192,6 +200,8 @@
     "succeeded": "succeeded",
     "failed": "failed",
     "conflictsCount": "{count} conflicts",
+    "duplicateNamesWarning": "⚠ {count} duplicate names on the remote, ignored during sync — see History",
+    "duplicateNamesFound": "{count} duplicate names found on the remote (rclone uses one and ignores the rest):",
     "deleteTitle": "Delete {remote}?",
     "deleteConfirmQuestion": "Do you really want to delete this remote?",
     "irreversible": "This action cannot be undone.",

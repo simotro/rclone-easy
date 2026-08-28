@@ -334,6 +334,24 @@ button:disabled {
   justify-content: flex-end;
 }
 
+/* Stesso motivo di .row-actions/.modal-actions sopra: usata da più
+   componenti, non ha senso tenerla scoped a uno solo. */
+.inline-warning {
+  padding: 0.8em 1em;
+  border-radius: 8px;
+  background-color: var(--warning-bg);
+  color: var(--warning-text);
+  font-size: 0.9em;
+}
+
+.inline-warning p {
+  margin: 0 0 0.5em;
+}
+
+.inline-warning .modal-actions {
+  margin-top: 0.3em;
+}
+
 .direction-toggle {
   display: flex;
   gap: 0.6em;

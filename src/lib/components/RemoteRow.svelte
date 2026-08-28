@@ -96,6 +96,12 @@
     return null;
   });
 
+  // Segnale indipendente dall'esito del run: rclone può ignorare nomi
+  // duplicati sul remote (in pratica solo Google Drive tra i backend comuni)
+  // anche in un run altrimenti riuscito — senza questo l'informazione
+  // restava sepolta nel log grezzo.
+  let duplicateNamesCount = $derived(displayService === "bisync" ? (bisyncJob?.history[0]?.duplicateNames.length ?? 0) : 0);
+
   function formatWhen(whenUnix: number): string {
     return new Date(whenUnix * 1000).toLocaleString();
   }
@@ -287,6 +293,11 @@
         <span class="last-op countdown">
           {countdownText}
           {@render quickActionLink()}
+        </span>
+      {/if}
+      {#if duplicateNamesCount > 0}
+        <span class="last-op conflict">
+          {$t("remoteRow.duplicateNamesWarning", { values: { count: duplicateNamesCount } })}
         </span>
       {/if}
       {#if deleteRemoteError}

@@ -104,6 +104,14 @@
     "restore": "Ripristina",
     "restoring": "Ripristino…"
   },
+  "duplicates": {
+    "title": "Nomi duplicati — {name}",
+    "resolved": "Tutti gli oggetti di questo nome sono stati risolti.",
+    "open": "Apri",
+    "moveForReview": "Sposta per revisione",
+    "delete": "Elimina",
+    "deleteConfirm": "Eliminare questo oggetto? Se il remote usa il cestino nativo (predefinito per Google Drive), resta recuperabile da lì, non sparisce all'istante."
+  },
   "remoteRow": {
     "backupRunning": "Backup in corso…",
     "backupFirstSoon": "Primo backup a momenti",
@@ -192,6 +200,8 @@
     "succeeded": "riuscita",
     "failed": "fallita",
     "conflictsCount": "{count} conflitti",
+    "duplicateNamesWarning": "⚠ {count} nomi duplicati sul remote, ignorati durante la sincronizzazione — vedi Cronologia",
+    "duplicateNamesFound": "{count} nomi duplicati trovati sul remote (rclone ne usa uno e ignora gli altri):",
     "deleteTitle": "Eliminare {remote}?",
     "deleteConfirmQuestion": "Vuoi davvero eliminare questo remote?",
     "irreversible": "L'operazione non è reversibile.",
