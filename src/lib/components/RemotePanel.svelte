@@ -13,6 +13,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import { untrack } from "svelte";
+  import { SvelteSet } from "svelte/reactivity";
   import Icon from "./Icon.svelte";
   import LogView from "./LogView.svelte";
   import TrashView from "./TrashView.svelte";
@@ -422,7 +423,12 @@
   // sessione — non tolti dall'elenco (l'utente vuole ancora vedere quanti
   // ne restano), solo marcati con una spunta. Non persistito: al prossimo
   // giro di bisync la voce sparisce da sé dall'elenco se davvero risolta.
-  let resolvedDuplicateNames = $state<Set<string>>(new Set());
+  // `SvelteSet`, non un `Set` semplice dentro `$state`: le mutazioni come
+  // `.add()` su un `Set` nativo non passano dai trap del proxy di `$state`
+  // (che intercetta assegnazioni di proprietà, non chiamate di metodo sugli
+  // slot interni di Set/Map) — la spunta comparirebbe solo al prossimo giro
+  // di rendering innescato da qualcos'altro (es. cambiando tab), non subito.
+  let resolvedDuplicateNames = new SvelteSet<string>();
 
   function examineDuplicate(name: string) {
     examiningDuplicateName = name;
