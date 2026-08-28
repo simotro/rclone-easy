@@ -49,6 +49,9 @@ use update_state::{report_update_available, UpdateState};
 #[cfg(target_os = "linux")]
 mod background_portal;
 
+#[cfg(target_os = "linux")]
+mod desktop_integration;
+
 mod remote_lock;
 
 mod trash;
@@ -245,6 +248,8 @@ pub fn run() {
             }
             #[cfg(target_os = "linux")]
             background_portal::request_background();
+            #[cfg(target_os = "linux")]
+            desktop_integration::ensure_installed();
             // In background, non bloccante: montare subito i mount con
             // auto_mount potrebbe richiedere secondi (connessione a un
             // remote cloud), non deve ritardare la comparsa della finestra.
