@@ -55,7 +55,7 @@ mod trash;
 use trash::{list_trash, restore_trash_entry};
 
 mod duplicates;
-use duplicates::{delete_duplicate, delete_review_entry, list_duplicate_group, list_review_entries, move_duplicate_for_review, open_local_duplicate};
+use duplicates::{delete_duplicate, delete_review_entry, keep_all_duplicates, list_duplicate_group, list_review_entries, move_duplicate_for_review, open_local_duplicate};
 
 mod path_safety;
 use path_safety::check_dangerous_path;
@@ -318,6 +318,7 @@ pub fn run() {
             open_local_duplicate,
             list_review_entries,
             delete_review_entry,
+            keep_all_duplicates,
             check_dangerous_path,
             export_backup,
             import_backup,

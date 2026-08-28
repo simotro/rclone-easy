@@ -112,7 +112,9 @@
     "openRemote": "Apri remoto",
     "moveForReview": "Sposta per revisione",
     "delete": "Elimina",
-    "deleteConfirm": "Eliminare questo oggetto? Se il remote usa il cestino nativo (predefinito per Google Drive), resta recuperabile da lì, non sparisce all'istante."
+    "deleteConfirm": "Eliminare questo oggetto? Se il remote usa il cestino nativo (predefinito per Google Drive), resta recuperabile da lì, non sparisce all'istante.",
+    "keepAll": "Mantieni tutti",
+    "keepAllHint": "La versione più vecchia resta col nome originale, le altre vengono rinominate con un suffisso numerico (1), (2)…"
   },
   "review": {
     "title": "Attesa revisione",

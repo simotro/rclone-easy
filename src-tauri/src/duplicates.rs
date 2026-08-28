@@ -1,5 +1,6 @@
 use crate::rcd::{self, RcdState};
 use serde::Serialize;
+use std::path::Path;
 
 /// Cartella dedicata dove "Sposta per revisione" mette da parte un
 /// duplicato specifico (per ID, univoco anche quando il nome è ambiguo) —
@@ -29,7 +30,7 @@ pub struct DuplicateObject {
 /// stessa logica di `trash::split_fs`, duplicata qui apposta (vedi il
 /// commento su quella funzione sul perché non è condivisa tra i moduli).
 fn split_remote_and_path(fs: &str) -> (String, String) {
-    if std::path::Path::new(fs).is_absolute() {
+    if Path::new(fs).is_absolute() {
         (String::new(), fs.trim_end_matches('/').to_string())
     } else if let Some((name, rest)) = fs.split_once(':') {
         (format!("{name}:"), rest.trim_end_matches('/').to_string())
@@ -155,38 +156,6 @@ async fn moveid(info: &rcd::ConnectionInfo, fs: &str, id: &str, dest_path: &str)
     Ok(())
 }
 
-/// Cancella un oggetto dentro `REVIEW_FOLDER`, con tentativi ripetuti su
-/// "object not found" — bug reale verificato dal vivo su oggetti rimasti
-/// nella cartella di revisione per un po' (non su quelli spostati e
-/// cancellati nella stessa sessione, sempre riusciti al primo colpo):
-/// `operations/deletefile` sul processo `rcd` di lunga durata può fallire
-/// con "object not found" pur risolvendo correttamente lo stesso percorso
-/// un istante prima con `operations/list` — lo stesso identico oggetto,
-/// cancellato subito dopo da un processo `rclone` a sé (niente stato
-/// condiviso con `rcd`) o da `rcd` stesso dopo aver riprovato con un breve
-/// ritardo, riesce sempre. `fscache/clear` da solo (svuota la cache degli
-/// `Fs`, che dovrebbe ricreare da zero la connessione al backend Drive) NON
-/// basta da solo, verificato: il ritardo prima del nuovo tentativo è la
-/// parte che conta davvero — coerente con un'inconsistenza temporanea
-/// lato Drive/dircache che si risolve da sola in pochi secondi, non con
-/// una cache bloccata in modo permanente. Meccanismo esatto non identificato
-/// con certezza, ma il workaround è verificato empiricamente più volte.
-async fn delete_review_object(info: &rcd::ConnectionInfo, fs: &str, remote: &str) -> Result<(), String> {
-    const RETRY_DELAYS_MS: [u64; 3] = [0, 1000, 3000];
-    let mut last_error = String::new();
-    for (attempt, delay_ms) in RETRY_DELAYS_MS.iter().enumerate() {
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
-            let _ = info.call("fscache/clear", serde_json::json!({})).await;
-        }
-        match info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": remote })).await {
-            Ok(_) => return Ok(()),
-            Err(e) => last_error = e,
-        }
-    }
-    Err(last_error)
-}
-
 /// Sposta un oggetto specifico (per ID, senza ambiguità di nome) in
 /// `REVIEW_FOLDER` sullo stesso remote — non cancella nulla, risolve solo
 /// la collisione di nome nella cartella originale: dal giro successivo
@@ -213,11 +182,18 @@ pub async fn move_duplicate_for_review(state: tauri::State<'_, RcdState>, fs: St
 /// da quella giusta. Il remote resta comunque quello che decide se
 /// l'eliminazione è recuperabile (`use_trash`, di norma attivo per Google
 /// Drive: finisce nel Cestino nativo del servizio, non sparisce all'istante).
+/// Spostamento e cancellazione in rapida sequenza tramite `rcd` (non un
+/// sottoprocesso a sé come `delete_review_entry_in`): verificato dal vivo
+/// più volte che questa sequenza specifica riesce sempre — il problema
+/// osservato con "object not found" (vedi `delete_review_entry_in`) si
+/// manifesta solo su un oggetto rimasto per un po' nella cartella di
+/// revisione, mai su uno appena spostato lì.
 pub(crate) async fn delete_in(state: &RcdState, fs: &str, id: &str, name: &str) -> Result<(), String> {
     let info = rcd::connection_info(state).await?;
     let dest = review_destination(id, name.trim_start_matches('/'));
     moveid(&info, fs, id, &dest).await?;
-    delete_review_object(&info, fs, &dest).await
+    info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": dest })).await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -236,7 +212,7 @@ pub async fn delete_duplicate(state: tauri::State<'_, RcdState>, fs: String, id:
 /// un eventuale file mancante.
 #[tauri::command]
 pub fn open_local_duplicate(local_root: String, name: String) {
-    let path = std::path::Path::new(&local_root).join(name.trim_start_matches('/'));
+    let path = Path::new(&local_root).join(name.trim_start_matches('/'));
     crate::open_external::open_path(&path.to_string_lossy());
 }
 
@@ -277,6 +253,17 @@ fn parse_review_name(id: &str, name: &str) -> Option<String> {
     name.strip_prefix(&format!("{id}__")).map(str::to_string)
 }
 
+/// `listing_path` è il campo `Path` di una voce elencata con `fs` già dentro
+/// `REVIEW_FOLDER` (vedi `list_review_entries_in`, che lista
+/// `qualify(root, REVIEW_FOLDER)`) — quindi NON contiene il prefisso di
+/// `REVIEW_FOLDER`. `ReviewEntry.fs`, però, è la radice NUDA (`root`, senza
+/// `REVIEW_FOLDER`): per restare sulla stessa base quando i due campi
+/// vengono ricombinati altrove (`delete_review_entry_in`), va riaggiunto
+/// qui il prefisso mancante.
+fn review_path_relative_to_fs(listing_path: &str) -> String {
+    format!("{REVIEW_FOLDER}/{listing_path}")
+}
+
 /// Elenca il contenuto di `REVIEW_FOLDER` su entrambi i lati del job (un
 /// nome duplicato può essere stato trovato su uno dei due, vedi
 /// `list_group_in`) — lista vuota, non un errore, se quel lato è locale o se
@@ -310,7 +297,18 @@ pub(crate) async fn list_review_entries_in(state: &RcdState, path1: &str, path2:
                 size: item.get("Size").and_then(|v| v.as_i64()).unwrap_or(-1),
                 mod_time: item.get("ModTime").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                 fs: root.to_string(),
-                review_path: path.to_string(),
+                // `path` è relativo a `list_fs` (già dentro REVIEW_FOLDER),
+                // ma `fs` sopra è la radice NUDA (`root`) — per restare sulla
+                // stessa base dei due campi insieme (necessario a
+                // `delete_review_entry_in`, che li combina), va riportato
+                // relativo a `fs` riaggiungendo il prefisso di REVIEW_FOLDER.
+                // Bug reale trovato dal vivo: senza questo, "Elimina
+                // definitivamente" costruiva un percorso che puntava
+                // all'ALBERO VERO (fuori da REVIEW_FOLDER) invece che dentro
+                // la cartella di revisione, fallendo con "object not found"
+                // in modo del tutto deterministico — non un problema di
+                // demone/cache come inizialmente sospettato.
+                review_path: review_path_relative_to_fs(path),
             });
         }
     }
@@ -325,10 +323,12 @@ pub async fn list_review_entries(state: tauri::State<'_, RcdState>, path1: Strin
 
 /// Cancella per sempre una voce già in `REVIEW_FOLDER` — a differenza di
 /// `delete_in`, nessuno spostamento preliminare: il nome lì dentro è già
-/// univoco (prefisso ID), niente ambiguità da risolvere.
+/// univoco (prefisso ID), niente ambiguità da risolvere. `review_path` è
+/// già relativo a `fs` (vedi il commento su `ReviewEntry::review_path`).
 pub(crate) async fn delete_review_entry_in(state: &RcdState, fs: &str, review_path: &str) -> Result<(), String> {
     let info = rcd::connection_info(state).await?;
-    delete_review_object(&info, fs, review_path).await
+    info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": review_path })).await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -336,9 +336,100 @@ pub async fn delete_review_entry(state: tauri::State<'_, RcdState>, fs: String, 
     delete_review_entry_in(&state, &fs, &review_path).await
 }
 
+/// Inserisce un suffisso numerico progressivo prima dell'estensione (o in
+/// fondo al nome se non ne ha una) — stessa convenzione "nome (1).ext" già
+/// familiare da file manager/browser per "mantieni entrambi".
+fn suffixed_name(name: &str, index: usize) -> String {
+    let basename = name.rsplit('/').next().unwrap_or(name);
+    let dir = &name[..name.len() - basename.len()];
+    match basename.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => format!("{dir}{stem} ({index}).{ext}"),
+        _ => format!("{dir}{basename} ({index})"),
+    }
+}
+
+/// Nomi (basename, non percorso intero) già presenti nella cartella padre di
+/// `name` su `root` — usata da `keep_all_in` per non scegliere un suffisso
+/// che collide con qualcos'altro già lì.
+async fn existing_names_in_parent(info: &rcd::ConnectionInfo, root: &str, name: &str) -> Vec<String> {
+    let (remote_prefix, combined) = resolve_relative_path(root, name);
+    let basename = combined.rsplit('/').next().unwrap_or(&combined);
+    let parent = &combined[..combined.len() - basename.len()];
+    let parent = parent.trim_end_matches('/');
+    let list_fs = format!("{remote_prefix}{parent}");
+    let Ok(body) = info.call("operations/list", serde_json::json!({ "fs": list_fs, "remote": "", "opt": { "filesOnly": true, "noModTime": true } })).await else {
+        return Vec::new();
+    };
+    body.get("list")
+        .and_then(|l| l.as_array())
+        .map(|list| list.iter().filter_map(|item| item.get("Name").and_then(|n| n.as_str()).map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// Risolve un intero gruppo di duplicati tenendoli TUTTI, invece di
+/// scegliere quale sacrificare: il più vecchio (per `ModTime`) resta col
+/// nome originale, gli altri vengono rinominati sul posto (stessa cartella,
+/// solo il nome cambia — mai spostati altrove) con un suffisso numerico
+/// progressivo, saltando eventuali nomi già occupati. Da quel momento non
+/// c'è più ambiguità di nome: bisync smette di segnalarli come duplicati
+/// dal giro successivo.
+pub(crate) async fn keep_all_in(state: &RcdState, path1: &str, path2: &str, name: &str) -> Result<(), String> {
+    let mut objects = list_group_in(state, path1, path2, name).await?;
+    if objects.len() < 2 {
+        return Ok(());
+    }
+    objects.sort_by(|a, b| a.mod_time.cmp(&b.mod_time));
+
+    let info = rcd::connection_info(state).await?;
+    let root = objects[0].fs.clone();
+    let mut used: std::collections::HashSet<String> = existing_names_in_parent(&info, &root, name).await.into_iter().collect();
+
+    let mut next_index = 1usize;
+    for obj in objects.iter().skip(1) {
+        let mut candidate = suffixed_name(name, next_index);
+        let mut candidate_basename = candidate.rsplit('/').next().unwrap_or(&candidate).to_string();
+        while used.contains(&candidate_basename) {
+            next_index += 1;
+            candidate = suffixed_name(name, next_index);
+            candidate_basename = candidate.rsplit('/').next().unwrap_or(&candidate).to_string();
+        }
+        used.insert(candidate_basename);
+        next_index += 1;
+        moveid(&info, &obj.fs, &obj.id, &candidate).await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn keep_all_duplicates(state: tauri::State<'_, RcdState>, path1: String, path2: String, name: String) -> Result<(), String> {
+    keep_all_in(&state, &path1, &path2, &name).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suffixed_name_inserts_the_index_before_the_extension() {
+        assert_eq!(suffixed_name("Elenco.xlsx", 1), "Elenco (1).xlsx");
+    }
+
+    #[test]
+    fn suffixed_name_appends_the_index_when_there_is_no_extension() {
+        assert_eq!(suffixed_name("README", 2), "README (2)");
+    }
+
+    #[test]
+    fn suffixed_name_preserves_a_subfolder_prefix() {
+        assert_eq!(suffixed_name("cartella/Elenco (2).xlsx", 1), "cartella/Elenco (2) (1).xlsx");
+    }
+
+    #[test]
+    fn suffixed_name_treats_a_leading_dot_as_no_extension() {
+        // Es. ".gitignore": rsplit_once('.') darebbe stem vuoto — trattato
+        // come "senza estensione" invece di produrre " (1).gitignore".
+        assert_eq!(suffixed_name(".gitignore", 1), ".gitignore (1)");
+    }
 
     #[test]
     fn qualify_joins_a_bare_remote_root_without_an_extra_slash() {
@@ -372,6 +463,19 @@ mod tests {
         let (prefix, combined) = resolve_relative_path("/home/simone/Drive Copass", "doc.odt");
         assert_eq!(prefix, "");
         assert_eq!(combined, "/home/simone/Drive Copass/doc.odt");
+    }
+
+    /// Bug reale trovato dal vivo: senza il prefisso di `REVIEW_FOLDER`
+    /// riaggiunto qui, "Elimina definitivamente" costruiva un percorso che
+    /// puntava all'albero vero (fuori dalla cartella di revisione) invece
+    /// che dentro, fallendo sempre con "object not found" — non un
+    /// problema di demone/cache come inizialmente sospettato.
+    #[test]
+    fn review_path_relative_to_fs_reattaches_the_review_folder_prefix() {
+        assert_eq!(
+            review_path_relative_to_fs("PRESENZE e PAGHE/BONUS NATALE 2024/1abc__nota.pdf"),
+            ".rclone-easy-duplicates-review/PRESENZE e PAGHE/BONUS NATALE 2024/1abc__nota.pdf"
+        );
     }
 
     #[test]

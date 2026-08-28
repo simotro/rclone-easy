@@ -112,7 +112,9 @@
     "openRemote": "Open remote",
     "moveForReview": "Move for review",
     "delete": "Delete",
-    "deleteConfirm": "Delete this object? If the remote uses its native trash (the default for Google Drive), it stays recoverable from there, it doesn't disappear instantly."
+    "deleteConfirm": "Delete this object? If the remote uses its native trash (the default for Google Drive), it stays recoverable from there, it doesn't disappear instantly.",
+    "keepAll": "Keep all",
+    "keepAllHint": "The oldest version keeps its original name, the others get renamed with a numeric suffix (1), (2)…"
   },
   "review": {
     "title": "Pending review",

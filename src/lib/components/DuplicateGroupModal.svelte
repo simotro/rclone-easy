@@ -43,6 +43,7 @@
   let error = $state<string | null>(null);
   let busyId = $state<string | null>(null);
   let pendingDeleteId = $state<string | null>(null);
+  let keepAllBusy = $state(false);
 
   // Solo Drive ha una sintassi di apertura per ID nota — "Apri" resta
   // nascosto per qualunque altro tipo di remote invece di mostrare un link
@@ -120,6 +121,25 @@
     }
   }
 
+  // Rinomina sul posto tutte le versioni tranne una (la più vecchia resta
+  // col nome originale) con un suffisso numerico — risolve l'intero gruppo
+  // in un colpo solo, nessuna scelta di quale sacrificare. Sempre chiude:
+  // dopo, nessuna delle versioni condivide più il nome con un'altra.
+  async function keepAll() {
+    keepAllBusy = true;
+    error = null;
+    try {
+      await invoke("keep_all_duplicates", { path1, path2, name });
+      await onRefresh?.();
+      open = false;
+      onResolved?.(name);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      keepAllBusy = false;
+    }
+  }
+
   async function confirmDelete(obj: DuplicateObject) {
     busyId = obj.id;
     error = null;
@@ -163,6 +183,14 @@
   {:else if objects.length === 0}
     <p class="hint">{$t("duplicates.resolved")}</p>
   {:else}
+    {#if objects.length > 1}
+      <div class="keep-all-row">
+        <button type="button" onclick={keepAll} disabled={busyId !== null || keepAllBusy}>
+          {keepAllBusy ? $t("common.inProgress") : $t("duplicates.keepAll")}
+        </button>
+        <span class="hint">{$t("duplicates.keepAllHint")}</span>
+      </div>
+    {/if}
     <ul class="objects">
       {#each objects as obj (obj.id)}
         <li class="object-row">
@@ -175,21 +203,21 @@
               <p>{$t("duplicates.deleteConfirm")}</p>
               <div class="row-actions modal-actions">
                 <button type="button" onclick={() => (pendingDeleteId = null)} disabled={busyId === obj.id}>{$t("common.cancel")}</button>
-                <button type="button" class="btn-danger" onclick={() => confirmDelete(obj)} disabled={busyId === obj.id}>
+                <button type="button" class="btn-danger" onclick={() => confirmDelete(obj)} disabled={busyId === obj.id || keepAllBusy}>
                   {busyId === obj.id ? $t("remoteRow.deleting") : $t("common.confirm")}
                 </button>
               </div>
             </div>
           {:else}
             <div class="object-actions">
-              <button type="button" onclick={openLocal} disabled={busyId !== null}>{$t("duplicates.openLocal")}</button>
+              <button type="button" onclick={openLocal} disabled={busyId !== null || keepAllBusy}>{$t("duplicates.openLocal")}</button>
               {#if canOpenInBrowser}
-                <button type="button" onclick={() => openRemote(obj)} disabled={busyId !== null}>{$t("duplicates.openRemote")}</button>
+                <button type="button" onclick={() => openRemote(obj)} disabled={busyId !== null || keepAllBusy}>{$t("duplicates.openRemote")}</button>
               {/if}
-              <button type="button" onclick={() => moveForReview(obj)} disabled={busyId !== null}>
+              <button type="button" onclick={() => moveForReview(obj)} disabled={busyId !== null || keepAllBusy}>
                 {busyId === obj.id ? $t("common.inProgress") : $t("duplicates.moveForReview")}
               </button>
-              <button type="button" class="btn-danger" onclick={() => (pendingDeleteId = obj.id)} disabled={busyId !== null}>
+              <button type="button" class="btn-danger" onclick={() => (pendingDeleteId = obj.id)} disabled={busyId !== null || keepAllBusy}>
                 {$t("duplicates.delete")}
               </button>
             </div>
@@ -241,5 +269,15 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.4em;
+}
+
+.keep-all-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6em;
+  padding: 0.6em 0.8em;
+  border-radius: 8px;
+  background-color: var(--surface-tint);
 }
 </style>
