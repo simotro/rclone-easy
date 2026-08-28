@@ -69,3 +69,12 @@ pub(crate) fn open_url(url: &str) {
 pub fn open_url_in_browser(url: String) {
     open_url(&url);
 }
+
+/// Apre nel file manager di sistema la cartella locale di un backup/bisync
+/// — a differenza di `mounts::open_mount_folder`, disponibile a prescindere
+/// dallo stato dell'ultima esecuzione: la cartella locale di un job esiste
+/// sempre per costruzione, non richiede prima un'azione come "monta".
+#[tauri::command]
+pub fn open_local_folder(path: String) {
+    open_path(&path);
+}

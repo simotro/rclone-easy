@@ -110,6 +110,25 @@
     await invoke("open_mount_folder", { mountPoint });
   }
 
+  // Lato locale di backup/bisync (sempre esattamente uno, a differenza del
+  // mount che può anche non essere montato) — per "Apri cartella locale",
+  // disponibile a prescindere dallo stato dell'ultima esecuzione, stessa
+  // logica di RemotePanel.svelte::bisyncLocalPathOf ma qui serve anche per
+  // il backup, non solo per bisync.
+  let localFolderPath = $derived.by<string | null>(() => {
+    if (displayService === "backup" && syncJob) {
+      return syncJob.source.startsWith(prefix) ? syncJob.destination : syncJob.source;
+    }
+    if (displayService === "bisync" && bisyncJob) {
+      return bisyncJob.path1.startsWith(prefix) ? bisyncJob.path2 : bisyncJob.path1;
+    }
+    return null;
+  });
+
+  async function openLocalFolder(path: string) {
+    await invoke("open_local_folder", { path });
+  }
+
   // "Esegui ora"/"Monta"/"Smonta" — spostati qui dal tab "Esegui e stato"
   // del pannello, eliminato perché ridondante con quello che questa riga
   // già mostra (stato) e con la Cronologia (esito, log, recupero da
@@ -293,6 +312,11 @@
         <span class="last-op countdown">
           {countdownText}
           {@render quickActionLink()}
+        </span>
+      {/if}
+      {#if localFolderPath}
+        <span class="last-op">
+          <button type="button" class="path-link" onclick={() => openLocalFolder(localFolderPath)}>{$t("remoteRow.openLocalFolder")}</button>
         </span>
       {/if}
       {#if duplicateNamesCount > 0}

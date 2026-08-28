@@ -32,7 +32,7 @@ mod app_settings;
 use app_settings::{get_app_settings, set_start_minimized};
 
 mod open_external;
-use open_external::open_url_in_browser;
+use open_external::{open_local_folder, open_url_in_browser};
 
 mod installation;
 use installation::installation_kind;
@@ -331,6 +331,7 @@ pub fn run() {
             get_app_settings,
             set_start_minimized,
             open_url_in_browser,
+            open_local_folder,
             installation_kind,
             report_update_available
         ])

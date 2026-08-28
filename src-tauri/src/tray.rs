@@ -16,6 +16,10 @@ const MOUNT_PREFIX: &str = "mount:";
 const UNMOUNT_PREFIX: &str = "unmount:";
 const BACKUP_PREFIX: &str = "backup:";
 const BISYNC_PREFIX: &str = "bisync:";
+/// Il payload dopo il prefisso è il percorso locale stesso (non un nome da
+/// ricercare) — l'unica cosa che serve per aprirlo, niente lookup asincrono
+/// come per le altre azioni. Vedi `build_remote_submenu`.
+const OPEN_LOCAL_PREFIX: &str = "open_local:";
 /// Voce mostrata per un remote senza alcun mount/job/bisync configurato —
 /// porta l'utente alla riga di quel remote in home invece di offrire azioni
 /// che non esistono ancora, vedi `build_remote_submenu`.
@@ -155,6 +159,10 @@ fn try_build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             if let Some(remote) = id.strip_prefix(WARNING_PREFIX) {
                 focus_remote(app, remote, true);
+                return;
+            }
+            if let Some(path) = id.strip_prefix(OPEN_LOCAL_PREFIX) {
+                crate::open_external::open_path(path);
                 return;
             }
             match id {
@@ -314,6 +322,9 @@ struct JobStatus {
     name: String,
     auto_active: bool,
     last_failed: bool,
+    /// Lato locale del job (source/destination per backup, path1/path2 per
+    /// bisync) — per la voce "Apri cartella locale" del sottomenu.
+    local_path: String,
 }
 
 /// Azioni rapide disponibili per un remote nel menu — al più un mount, un
@@ -323,7 +334,11 @@ struct JobStatus {
 /// `build_remote_submenu` gli mostra "Configura" al posto delle azioni.
 #[derive(Default)]
 struct RemoteActions {
-    mount: Option<(String, bool)>,
+    /// `(nome, montato ora, punto di mount)` — il punto di mount serve alla
+    /// voce "Apri cartella", mostrata solo quando `montato ora` è vero
+    /// (aprirlo da smontato mostrerebbe una cartella vuota, non il
+    /// contenuto del remote).
+    mount: Option<(String, bool, String)>,
     backup: Option<JobStatus>,
     bisync: Option<JobStatus>,
 }
@@ -378,7 +393,7 @@ async fn collect_remote_actions(app: &AppHandle, config_dir: &Path) -> Vec<(Stri
         for m in mounts {
             if let Some(remote) = remote_name_of(&m.remote) {
                 let mounted = crate::mounts::is_mounted(&active, &m.mount_point);
-                map.entry(remote.to_string()).or_default().mount = Some((m.name, mounted));
+                map.entry(remote.to_string()).or_default().mount = Some((m.name, mounted, m.mount_point));
             }
         }
     }
@@ -388,7 +403,8 @@ async fn collect_remote_actions(app: &AppHandle, config_dir: &Path) -> Vec<(Stri
             if let Some(remote) = remote_name_of(&j.source).or_else(|| remote_name_of(&j.destination)) {
                 let auto_active = j.auto_interval_minutes.is_some();
                 let last_failed = j.history.first().is_some_and(|h| !h.success);
-                map.entry(remote.to_string()).or_default().backup = Some(JobStatus { name: j.name, auto_active, last_failed });
+                let local_path = if remote_name_of(&j.source).is_none() { j.source.clone() } else { j.destination.clone() };
+                map.entry(remote.to_string()).or_default().backup = Some(JobStatus { name: j.name, auto_active, last_failed, local_path });
             }
         }
     }
@@ -398,7 +414,8 @@ async fn collect_remote_actions(app: &AppHandle, config_dir: &Path) -> Vec<(Stri
             if let Some(remote) = remote_name_of(&j.path1).or_else(|| remote_name_of(&j.path2)) {
                 let auto_active = j.auto_interval_minutes.is_some();
                 let last_failed = j.history.first().is_some_and(|h| !h.success);
-                map.entry(remote.to_string()).or_default().bisync = Some(JobStatus { name: j.name, auto_active, last_failed });
+                let local_path = if remote_name_of(&j.path1).is_none() { j.path1.clone() } else { j.path2.clone() };
+                map.entry(remote.to_string()).or_default().bisync = Some(JobStatus { name: j.name, auto_active, last_failed, local_path });
             }
         }
     }
@@ -428,18 +445,20 @@ fn build_remote_submenu(app: &AppHandle, remote_name: &str, actions: &RemoteActi
     // vincolo: è sempre disponibile quando il remote è montato.
     let remote_job_active = actions.backup.as_ref().is_some_and(|j| j.auto_active) || actions.bisync.as_ref().is_some_and(|j| j.auto_active);
 
-    if let Some((mount_name, mounted)) = &actions.mount {
-        let (label, id, enabled) = if *mounted {
-            ("Smonta".to_string(), format!("{UNMOUNT_PREFIX}{mount_name}"), true)
+    if let Some((mount_name, mounted, mount_point)) = &actions.mount {
+        if *mounted {
+            submenu.append(&MenuItem::with_id(app, format!("{OPEN_LOCAL_PREFIX}{mount_point}"), "Apri cartella", true, None::<&str>)?)?;
+            submenu.append(&MenuItem::with_id(app, format!("{UNMOUNT_PREFIX}{mount_name}"), "Smonta", true, None::<&str>)?)?;
         } else {
-            ("Monta e apri".to_string(), format!("{MOUNT_PREFIX}{mount_name}"), !remote_job_active)
-        };
-        submenu.append(&MenuItem::with_id(app, id, label, enabled, None::<&str>)?)?;
+            submenu.append(&MenuItem::with_id(app, format!("{MOUNT_PREFIX}{mount_name}"), "Monta e apri", !remote_job_active, None::<&str>)?)?;
+        }
     }
     if let Some(job) = &actions.backup {
+        submenu.append(&MenuItem::with_id(app, format!("{OPEN_LOCAL_PREFIX}{}", job.local_path), "Apri cartella locale", true, None::<&str>)?)?;
         submenu.append(&MenuItem::with_id(app, format!("{BACKUP_PREFIX}{}", job.name), "Backup ora", true, None::<&str>)?)?;
     }
     if let Some(job) = &actions.bisync {
+        submenu.append(&MenuItem::with_id(app, format!("{OPEN_LOCAL_PREFIX}{}", job.local_path), "Apri cartella locale", true, None::<&str>)?)?;
         submenu.append(&MenuItem::with_id(app, format!("{BISYNC_PREFIX}{}", job.name), "Sincronizza ora", true, None::<&str>)?)?;
     }
 

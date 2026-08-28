@@ -147,6 +147,7 @@
     "lastOpConflict": "Riuscita alle {when}, con conflitti da rivedere",
     "noOpYet": "Nessuna operazione ancora eseguita",
     "mountedOn": "Montato su",
+    "openLocalFolder": "Apri cartella locale",
     "configure": "Configura",
     "mountAction": "Collega questo remote come cartella locale",
     "backupAction": "Sincronizzazione in una sola direzione",

@@ -147,6 +147,7 @@
     "lastOpConflict": "Succeeded at {when}, with conflicts to review",
     "noOpYet": "No operation performed yet",
     "mountedOn": "Mounted on",
+    "openLocalFolder": "Open local folder",
     "configure": "Configure",
     "mountAction": "Connect this remote as a local folder",
     "backupAction": "One-way sync",
