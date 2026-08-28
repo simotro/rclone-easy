@@ -66,6 +66,18 @@ pub struct BisyncRunResult {
     /// salvate su disco prima di questo campo.
     #[serde(default)]
     pub duplicate_names: Vec<String>,
+    /// `true` se questo run ha dovuto rilanciare da sé `rclone bisync` con
+    /// `--resync` dopo un primo tentativo abortito da rclone stesso per
+    /// quel motivo (vedi `error_requires_resync`) — capita quando la
+    /// cartella di lavoro locale (`workdir_for`) non ha più un confronto
+    /// valido pur avendo `needs_resync: false` in `bisync.toml` (es. dopo
+    /// una reinstallazione che riparte da una cartella di lavoro vuota).
+    /// Puramente informativo: il resync è già avvenuto, serve solo per
+    /// spiegare all'utente perché questo run è durato più del solito.
+    /// `#[serde(default)]` per compatibilità con le voci di history già
+    /// salvate su disco prima di questo campo.
+    #[serde(default)]
+    pub auto_resynced: bool,
 }
 
 /// `BisyncJob` unito allo stato live "in esecuzione ora" — stesso principio
@@ -675,6 +687,30 @@ async fn execute_bisync(
 ) -> Result<BisyncRunResult, String> {
     let (status, stderr) = run_bisync_subprocess(config_path, workdir, path1, path2, resync, force, false, config_password).await?;
 
+    // `needs_resync` persistito può essere `false` (l'ultimo run risultava
+    // riuscito) mentre rclone rifiuta comunque di procedere perché la
+    // cartella di lavoro locale ha perso il confronto di riferimento — capita
+    // tipicamente dopo una reinstallazione che riparte da un `workdir` vuoto
+    // pur avendo `bisync.toml` con lo storico precedente ancora intatto.
+    // Senza questo, l'utente vedrebbe un errore grezzo di rclone e dovrebbe
+    // capire da solo che un secondo "Esegui ora" risolverebbe da sé (il
+    // `needs_resync` persistito verrebbe comunque aggiornato a `true` dopo
+    // questo fallimento) — qui lo facciamo direttamente, in un solo click.
+    // Un solo tentativo di retry: se anche il resync fallisse, l'errore
+    // (qualunque esso sia a quel punto) va comunque mostrato per intero.
+    let (status, stderr, auto_resynced) = if !status.success() && !resync {
+        let message = extract_error_message(&stderr).unwrap_or_default();
+        if error_requires_resync(&message) {
+            let (retry_status, retry_stderr) =
+                run_bisync_subprocess(config_path, workdir, path1, path2, true, force, false, config_password).await?;
+            (retry_status, retry_stderr, true)
+        } else {
+            (status, stderr, false)
+        }
+    } else {
+        (status, stderr, false)
+    };
+
     let conflict_paths = extract_conflict_paths(&stderr);
     let duplicate_names = extract_duplicate_names(&stderr);
     let log = readable_log(&stderr);
@@ -688,7 +724,7 @@ async fn execute_bisync(
         (false, message, needs_force)
     };
 
-    Ok(BisyncRunResult { success, message, when_unix: now_unix(), conflict_paths, duplicate_names, log, needs_force })
+    Ok(BisyncRunResult { success, message, when_unix: now_unix(), conflict_paths, duplicate_names, log, needs_force, auto_resynced })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1652,6 +1688,52 @@ mod tests {
             .unwrap_or_else(|e| panic!("il cestino dovrebbe esistere in '{}': {e}", trash_dir.display()))
             .collect();
         assert_eq!(entries.len(), 1, "il file cancellato dovrebbe essere finito nel cestino invece di sparire per sempre");
+    }
+
+    /// Riproduce lo scenario in cui `bisync.toml` dice `needs_resync: false`
+    /// (l'ultimo run risultava riuscito) ma la cartella di lavoro locale non
+    /// ha più un confronto di riferimento valido — es. dopo una
+    /// reinstallazione che riparte da un `workdir` vuoto. Senza il retry
+    /// automatico in `execute_bisync`, questo run fallirebbe direttamente con
+    /// l'errore grezzo di rclone ("Must run --resync to recover"); con il
+    /// retry deve invece riuscire nello stesso click, segnalando
+    /// `auto_resynced: true`.
+    #[tokio::test]
+    async fn run_bisync_job_recovers_by_itself_when_the_local_workdir_cache_is_gone() {
+        let jobs_dir = TempDir::new("bisync-auto-resync-jobs");
+        let path1_dir = TempDir::new("bisync-auto-resync-path1");
+        let path2_dir = TempDir::new("bisync-auto-resync-path2");
+        std::fs::create_dir_all(&path1_dir.path).unwrap();
+        std::fs::create_dir_all(&path2_dir.path).unwrap();
+        std::fs::write(path1_dir.path.join("documento.txt"), "contenuto").unwrap();
+
+        create_bisync_job_in(
+            &jobs_dir.path,
+            "prova-cache-persa",
+            &path1_dir.path.to_string_lossy(),
+            &path2_dir.path.to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&jobs_dir.path).unwrap();
+
+        let state = crate::rcd::build_state(jobs_dir.config_path()).await;
+        let baseline = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova-cache-persa").await.unwrap();
+        assert!(baseline.success, "il resync iniziale dovrebbe riuscire: {baseline:?}");
+        assert!(!load_from_dir(&jobs_dir.path).unwrap()[0].needs_resync, "dopo un run riuscito non deve restare in sospeso");
+
+        // Simula la reinstallazione: la cartella di lavoro locale sparisce,
+        // ma `bisync.toml` (già ricaricato sopra) resta con `needs_resync:
+        // false`, esattamente come lo storico persistito di un'installazione
+        // precedente.
+        std::fs::remove_dir_all(workdir_for(&jobs_dir.path, "prova-cache-persa")).unwrap();
+
+        let result = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova-cache-persa").await.unwrap();
+        assert!(result.success, "il resync automatico dovrebbe far riuscire comunque il run: {result:?}");
+        assert!(result.auto_resynced, "il run dovrebbe segnalare che è stato necessario un resync automatico");
+
+        let jobs = load_from_dir(&jobs_dir.path).unwrap();
+        assert!(!jobs[0].needs_resync, "dopo il resync automatico riuscito non deve restare in sospeso per il prossimo run");
     }
 
     /// Prova un bisync reale end-to-end: baseline, poi un conflitto genuino

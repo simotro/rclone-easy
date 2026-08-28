@@ -56,6 +56,7 @@
     "checkFailed": "Check failed.",
     "neverChecked": "Not checked yet.",
     "checkNow": "Check now",
+    "updateNow": "Update now",
     "skipVersion": "Skip this version",
     "versionSkipped": "You skipped version {version}. It will only show up again after a manual check."
   },
@@ -183,6 +184,7 @@
     "dangerousPathHomeConfirm": "Got it, use this folder anyway",
     "bisyncFirstRunHint": "On the very first run, if a file with the same name but different content already exists on both sides, the more recently modified version is taken as the reference.",
     "needsResyncHint": "The next run will include a new resync (baseline).",
+    "autoResyncedHint": "An automatic resync was needed (rclone required it) — that's why this run took longer than usual.",
     "noVersionLost": "No version was lost: both were saved with a conflict suffix.",
     "hideDetailedLog": "Hide detailed log",
     "showTransfersCount": "Show {count} files involved",

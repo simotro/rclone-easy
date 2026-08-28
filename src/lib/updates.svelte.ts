@@ -17,6 +17,22 @@ export type UpdateCheckState =
 
 let state = $state<UpdateCheckState>({ status: "idle" });
 
+// Stato del modal di download/installazione (UpdateButton.svelte), sollevato
+// qui invece che come variabile locale del componente: così anche
+// SettingsButton.svelte può aprirlo direttamente ("Aggiorna adesso" al posto
+// di "Controlla ora" quando un aggiornamento è già stato trovato) senza
+// dover passare per l'evento Tauri "rclone-easy://open-update" (pensato per
+// la tray, un processo separato che non ha altro modo di raggiungere la UI).
+let modalOpen = $state(false);
+
+export function isUpdateModalOpen(): boolean {
+  return modalOpen;
+}
+
+export function setUpdateModalOpen(value: boolean): void {
+  modalOpen = value;
+}
+
 // Non reattivo apposta (solo per un confronto interno, non per la UI): la
 // tray non ha altro modo di sapere se c'è un aggiornamento se non tramite
 // report_update_available (vedi update_state.rs) — richiamato ogni volta

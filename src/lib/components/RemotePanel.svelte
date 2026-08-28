@@ -883,6 +883,9 @@
                     {/each}
                   </ul>
                 {/if}
+                {#if entry.autoResynced}
+                  <p class="hint">{$t("remoteRow.autoResyncedHint")}</p>
+                {/if}
                 {#if !entry.success}
                   <LogView text={entry.log || entry.message} />
                   {#if entry.needsForce && index === 0}

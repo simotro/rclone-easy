@@ -3,13 +3,12 @@
   import { listen } from "@tauri-apps/api/event";
   import Modal from "./Modal.svelte";
   import { t } from "$lib/i18n";
-  import { updateState, checkForUpdates, skipUpdate } from "$lib/updates.svelte";
+  import { updateState, checkForUpdates, skipUpdate, isUpdateModalOpen, setUpdateModalOpen } from "$lib/updates.svelte";
 
   const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 21h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
   const RELEASES_URL = "https://github.com/simotro/rclone-easy/releases/latest";
 
-  let open = $state(false);
   let installing = $state(false);
   let installError = $state<string | null>(null);
   // Percentuale di avanzamento del download: nota solo se il server manda
@@ -43,7 +42,7 @@
   $effect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-    listen("rclone-easy://open-update", () => (open = true)).then((fn) => {
+    listen("rclone-easy://open-update", () => setUpdateModalOpen(true)).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
     });
@@ -98,11 +97,11 @@
 </script>
 
 {#if updateState().status === "available"}
-  <button type="button" class="update-trigger" title={$t("update.available")} aria-label={$t("update.available")} onclick={() => (open = true)}>
+  <button type="button" class="update-trigger" title={$t("update.available")} aria-label={$t("update.available")} onclick={() => setUpdateModalOpen(true)}>
     {@html DOWNLOAD_ICON}
   </button>
 
-  <Modal bind:open title={$t("update.title")}>
+  <Modal bind:open={isUpdateModalOpen, setUpdateModalOpen} title={$t("update.title")}>
     {@const s = updateState()}
     {#if s.status === "available"}
       <div class="update-content">
@@ -116,7 +115,7 @@
         {#if readyToRestart}
           <p class="ready-hint">{$t("update.readyToRestart")}</p>
           <div class="actions">
-            <button type="button" class="link-button" onclick={() => (open = false)} disabled={restarting}>{$t("update.later")}</button>
+            <button type="button" class="link-button" onclick={() => setUpdateModalOpen(false)} disabled={restarting}>{$t("update.later")}</button>
             <button type="button" onclick={restartNow} disabled={restarting}>
               {restarting ? $t("update.restarting") : $t("update.restartNow")}
             </button>

@@ -56,6 +56,7 @@
     "checkFailed": "Controllo non riuscito.",
     "neverChecked": "Non ancora controllato.",
     "checkNow": "Controlla ora",
+    "updateNow": "Aggiorna adesso",
     "skipVersion": "Salta questa versione",
     "versionSkipped": "Hai saltato la versione {version}. Torna a comparire solo con un controllo manuale."
   },
@@ -183,6 +184,7 @@
     "dangerousPathHomeConfirm": "Ho capito, usa comunque questa cartella",
     "bisyncFirstRunHint": "Alla primissima esecuzione, se esiste già un file con lo stesso nome ma contenuto diverso su entrambi i lati, viene presa come riferimento la versione modificata più di recente.",
     "needsResyncHint": "La prossima esecuzione includerà un nuovo resync (baseline).",
+    "autoResyncedHint": "È stato necessario un resync automatico (rclone lo richiedeva) — per questo l'esecuzione ha impiegato più tempo del solito.",
     "noVersionLost": "Nessuna versione è stata persa: entrambe salvate con un suffisso di conflitto.",
     "hideDetailedLog": "Nascondi log dettagliato",
     "showTransfersCount": "Mostra {count} file coinvolti",

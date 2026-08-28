@@ -43,6 +43,7 @@ export type BisyncRunEntry = {
   duplicateNames: string[];
   log: string;
   needsForce: boolean;
+  autoResynced: boolean;
 };
 
 export type BisyncDryRunReport = {

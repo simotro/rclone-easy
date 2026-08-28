@@ -7,7 +7,7 @@
   import ImportRemotesPanel from "./ImportRemotesPanel.svelte";
   import PasswordField from "./PasswordField.svelte";
   import { t } from "$lib/i18n";
-  import { updateState, checkForUpdates } from "$lib/updates.svelte";
+  import { updateState, checkForUpdates, setUpdateModalOpen } from "$lib/updates.svelte";
 
   let { onRemotesChanged }: { onRemotesChanged: () => void } = $props();
 
@@ -338,14 +338,27 @@
           {$t("update.neverChecked")}
         {/if}
       </span>
-      <button
-        type="button"
-        class="link-button"
-        onclick={() => checkForUpdates({ manual: true })}
-        disabled={updateState().status === "checking"}
-      >
-        {$t("update.checkNow")}
-      </button>
+      {#if updateState().status === "available"}
+        <button
+          type="button"
+          class="link-button"
+          onclick={() => {
+            open = false;
+            setUpdateModalOpen(true);
+          }}
+        >
+          {$t("update.updateNow")}
+        </button>
+      {:else}
+        <button
+          type="button"
+          class="link-button"
+          onclick={() => checkForUpdates({ manual: true })}
+          disabled={updateState().status === "checking"}
+        >
+          {$t("update.checkNow")}
+        </button>
+      {/if}
     </div>
   </div>
 </Modal>
