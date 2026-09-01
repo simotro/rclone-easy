@@ -21,7 +21,7 @@ use remotes::{
 };
 
 mod interactive_remote;
-use interactive_remote::{answer_oauth_question, cancel_oauth, create_remote_interactive, PendingOAuthAnswer};
+use interactive_remote::{answer_oauth_question, cancel_oauth, create_remote_interactive, create_shared_drive_remote, PendingOAuthAnswer};
 
 mod onedrive_recovery;
 
@@ -291,6 +291,7 @@ pub fn run() {
             own_config_path,
             import_remote,
             create_remote_interactive,
+            create_shared_drive_remote,
             cancel_oauth,
             answer_oauth_question,
             list_jobs,

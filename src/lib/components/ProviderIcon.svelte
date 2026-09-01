@@ -8,6 +8,7 @@
     b2: { bg: "#dc2626", label: "B2" },
     dropbox: { bg: "#0061fe", label: "DB" },
     drive: { bg: "#16a34a", label: "GD" },
+    "drive-shared": { bg: "#16a34a", label: "SD" },
     mega: { bg: "#db2777", label: "MG" },
     nextcloud: { bg: "#0082c9", label: "NC" },
     onedrive: { bg: "#0078d4", label: "OD" },

@@ -5,7 +5,18 @@
   import { t } from "$lib/i18n";
   import ProviderIcon from "$lib/components/ProviderIcon.svelte";
 
-  type ProviderKind = "s3" | "b2" | "mega" | "drive" | "dropbox" | "onedrive" | "nextcloud" | "owncloud" | "webdav" | "sftp";
+  type ProviderKind =
+    | "s3"
+    | "b2"
+    | "mega"
+    | "drive"
+    | "drive-shared"
+    | "dropbox"
+    | "onedrive"
+    | "nextcloud"
+    | "owncloud"
+    | "webdav"
+    | "sftp";
   type S3ProviderOption = { value: string; help: string };
   type S3RegionOption = { value: string; help: string; providers: string[] };
   type S3EndpointOption = { value: string; help: string; providers: string[] };
@@ -81,6 +92,30 @@
   // condivisa funziona ancora), ma consigliato esplicitamente.
   let driveClientId = $state("");
   let driveClientSecret = $state("");
+
+  // Google Drive — Drive condiviso: riusa client_id/client_secret/token di
+  // un remote Drive già configurato (niente nuova autorizzazione nel
+  // browser) — vedi interactive_remote.rs::create_shared_drive_remote. Il
+  // Drive condiviso da collegare si sceglie con lo stesso meccanismo delle
+  // domande OAuth generiche (oauthQuestion sotto): rclone stessa restituisce
+  // l'elenco reale di quelli visibili per l'account.
+  let existingDriveRemotes = $state<string[]>([]);
+  let existingDriveRemotesLoaded = $state(false);
+  let sharedDriveSourceRemote = $state("");
+
+  async function loadExistingDriveRemotes() {
+    existingDriveRemotesLoaded = false;
+    try {
+      const names = await invoke<string[]>("list_own_remotes");
+      const kinds = await Promise.all(
+        names.map((n) => invoke<{ kind: string }>("get_remote_for_edit", { name: n }).then((r) => r.kind).catch(() => "")),
+      );
+      existingDriveRemotes = names.filter((_, i) => kinds[i] === "drive");
+      if (existingDriveRemotes.length > 0 && !sharedDriveSourceRemote) sharedDriveSourceRemote = existingDriveRemotes[0];
+    } finally {
+      existingDriveRemotesLoaded = true;
+    }
+  }
 
   let submitting = $state(false);
   let errorMessage = $state<string | null>(null);
@@ -193,6 +228,7 @@
     step = 2;
     fieldIndex = 0;
     errorMessage = null;
+    if (k === "drive-shared") loadExistingDriveRemotes();
   }
 
   function backToStep1() {
@@ -287,6 +323,7 @@
     if (kind === "b2") return b2Account.trim() !== "" && b2Key.trim() !== "";
     if (kind === "mega") return megaUser.trim() !== "" && megaPass.trim() !== "";
     if (kind === "drive") return (driveClientId.trim() === "") === (driveClientSecret.trim() === "");
+    if (kind === "drive-shared") return sharedDriveSourceRemote.trim() !== "";
     // Solo il campo che rclone stesso segna come obbligatorio per questi
     // backend (url/host) — utente/password restano facoltativi, alcuni
     // WebDAV pubblici o server SFTP con ssh-agent non li richiedono.
@@ -400,6 +437,35 @@
     }
   }
 
+  async function submitSharedDrive() {
+    if (!canSubmit || submitting) return;
+    submitting = true;
+    errorMessage = null;
+    oauthQuestion = null;
+    oauthWaiting = true;
+
+    // Nessun evento oauth-url qui: non c'è nessuna autorizzazione nel
+    // browser da aspettare, solo l'eventuale domanda "quale Drive
+    // condiviso" (vedi il commento su create_shared_drive_remote lato
+    // backend).
+    const unlistenQuestion = await listen<OAuthQuestion>("rclone-easy://oauth-question", (event) => {
+      oauthQuestion = event.payload;
+      oauthFreeTextAnswer = event.payload.defaultValue;
+    });
+
+    try {
+      await invoke("create_shared_drive_remote", { newName: name.trim(), sourceRemoteName: sharedDriveSourceRemote });
+      step = 3;
+    } catch (error) {
+      errorMessage = String(error);
+    } finally {
+      submitting = false;
+      oauthWaiting = false;
+      oauthQuestion = null;
+      unlistenQuestion();
+    }
+  }
+
   async function answerOAuthQuestion(answer: string) {
     oauthQuestion = null;
     await invoke("answer_oauth_question", { answer });
@@ -431,6 +497,7 @@
       { kind: "b2", label: "Backblaze B2", desc: $t("newRemote.b2CardDesc") },
       { kind: "mega", label: "MEGA", desc: $t("newRemote.megaCardDesc") },
       { kind: "drive", label: "Google Drive", desc: $t("newRemote.driveCardDesc") },
+      { kind: "drive-shared", label: $t("newRemote.driveSharedCardLabel"), desc: $t("newRemote.driveSharedCardDesc") },
       { kind: "dropbox", label: "Dropbox", desc: $t("newRemote.oauthCardDesc") },
       { kind: "onedrive", label: "OneDrive", desc: $t("newRemote.oauthCardDesc") },
       { kind: "nextcloud", label: "Nextcloud", desc: $t("newRemote.nextcloudCardDesc") },
@@ -593,6 +660,69 @@
           <button type="button" onclick={backToStep1} disabled={submitting}>{$t("newRemote.back")}</button>
           <button type="submit" disabled={!canSubmit || submitting}>
             {$t("newRemote.authorizeWith", { values: { provider: OAUTH_LABELS[kind ?? ""] } })}
+          </button>
+        {/if}
+      </div>
+    </form>
+  {:else if step === 2 && kind === "drive-shared"}
+    <form onsubmit={(e) => { e.preventDefault(); submitSharedDrive(); }}>
+      <label>
+        {$t("newRemote.remoteNameLabel")}
+        <input type="text" bind:value={name} placeholder={$t("newRemote.remoteNamePlaceholder")} disabled={oauthWaiting} />
+      </label>
+
+      {#if !existingDriveRemotesLoaded}
+        <p class="hint">{$t("common.loading")}</p>
+      {:else if existingDriveRemotes.length === 0}
+        <p class="hint">{$t("newRemote.driveSharedNoSourceHint")}</p>
+      {:else}
+        <label>
+          {$t("newRemote.driveSharedSourceLabel")}
+          <select bind:value={sharedDriveSourceRemote} disabled={oauthWaiting}>
+            {#each existingDriveRemotes as remoteName (remoteName)}
+              <option value={remoteName}>{remoteName}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+
+      {#if oauthWaiting && !oauthQuestion}
+        <div class="oauth-wait">
+          <p>{$t("newRemote.driveSharedListing")}</p>
+        </div>
+      {/if}
+
+      {#if oauthQuestion}
+        <div class="oauth-wait">
+          <p>{oauthQuestion.help}</p>
+          {#if oauthQuestion.examples.length > 0}
+            <div class="oauth-question-choices">
+              {#each oauthQuestion.examples as example (example.value)}
+                <button type="button" onclick={() => answerOAuthQuestion(example.value)}>
+                  {example.help}
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <div class="oauth-question-choices">
+              <input type="text" bind:value={oauthFreeTextAnswer} />
+              <button type="button" onclick={() => answerOAuthQuestion(oauthFreeTextAnswer)}>{$t("common.confirm")}</button>
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      {#if errorMessage}
+        <p class="error">✗ {errorMessage}</p>
+      {/if}
+
+      <div class="actions">
+        {#if oauthWaiting}
+          <button type="button" onclick={cancelOAuth}>{$t("common.cancel")}</button>
+        {:else}
+          <button type="button" onclick={backToStep1} disabled={submitting}>{$t("newRemote.back")}</button>
+          <button type="submit" disabled={!canSubmit || submitting || existingDriveRemotes.length === 0}>
+            {$t("newRemote.driveSharedSubmit")}
           </button>
         {/if}
       </div>

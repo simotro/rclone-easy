@@ -52,11 +52,19 @@ pub struct PendingOAuthAnswer(tokio::sync::Mutex<Option<tokio::sync::oneshot::Se
 /// implementazione). Le domande non previste qui (es. `choose_type` di
 /// OneDrive) non ricevono un default silenzioso: vengono chieste
 /// all'utente, vedi `ask_user_for_answer`.
-fn scripted_answer(option_name: &str, has_own_client_id: bool) -> Option<&'static str> {
+///
+/// `default_to_my_drive`: `false` solo per il flusso "Drive condiviso"
+/// (`create_shared_drive_remote`) — lascia passare `config_team_drive`
+/// invece di rispondere sempre "false", così arriva fino a
+/// `ask_user_for_answer` con l'elenco reale degli Shared Drive
+/// dell'account (rclone lo popola da sé in `Examples`, verificato dal
+/// vivo) mostrato come scelta, esattamente come già succede oggi per
+/// `choose_type` di OneDrive — nessuna UI nuova serve per quella parte.
+fn scripted_answer(option_name: &str, has_own_client_id: bool, default_to_my_drive: bool) -> Option<&'static str> {
     match option_name {
         "config_is_local" => Some("true"),
         "config_shared_client_id" if !has_own_client_id => Some("true"),
-        "config_team_drive" => Some("false"),
+        "config_team_drive" if default_to_my_drive => Some("false"),
         _ => None,
     }
 }
@@ -185,6 +193,24 @@ async fn ask_user_for_answer<R: tauri::Runtime>(
     rx.await.map_err(|_| "autorizzazione annullata dall'utente".to_string())
 }
 
+/// Comportamenti del ciclo che dipendono da CHI sta chiamando, non dal tipo
+/// di backend — raggruppati qui invece che come parametri booleani separati
+/// (facili da scambiare d'ordine man mano che se ne aggiungono).
+#[derive(Clone, Copy)]
+struct FlowOptions {
+    /// `true` solo nel percorso guidato (provider curati) — vedi
+    /// `guided_answer`, mai nella "Configurazione avanzata" né nel riuso
+    /// credenziali per uno Shared Drive.
+    guided: bool,
+    /// Vedi il commento su `scripted_answer`.
+    default_to_my_drive: bool,
+    /// `true` se `parameters` contiene valori già offuscati, riusati da un
+    /// remote esistente (`create_shared_drive_remote`) — evita di
+    /// offuscarli una seconda volta, corromperebbe il segreto (stesso
+    /// principio di `remotes::create_remote_in`).
+    already_obscured: bool,
+}
+
 /// Guida il flusso multi-passo di `config/create` per un backend qualsiasi
 /// fino al completamento, gestendo anche l'eventuale passo di autorizzazione
 /// nel browser se il backend lo richiede. Vedi `remotes.rs::create_remote_in`
@@ -207,11 +233,11 @@ async fn run_oauth_flow<R: tauri::Runtime>(
     kind: &str,
     extra_answers: &HashMap<String, String>,
     parameters: &HashMap<String, String>,
-    guided: bool,
+    options: FlowOptions,
 ) -> Result<(), String> {
     remotes::ensure_name_available(state, name).await?;
 
-    let result = run_oauth_flow_after_name_check(app, state, pending, name, kind, extra_answers, parameters, guided).await;
+    let result = run_oauth_flow_after_name_check(app, state, pending, name, kind, extra_answers, parameters, options).await;
 
     if result.is_err() {
         let _ = rcd::call(state, "config/delete", serde_json::json!({ "name": name })).await;
@@ -228,7 +254,7 @@ async fn run_oauth_flow_after_name_check<R: tauri::Runtime>(
     kind: &str,
     extra_answers: &HashMap<String, String>,
     parameters: &HashMap<String, String>,
-    guided: bool,
+    options: FlowOptions,
 ) -> Result<(), String> {
     let has_own_client_id = has_own_client_id(parameters);
 
@@ -239,7 +265,7 @@ async fn run_oauth_flow_after_name_check<R: tauri::Runtime>(
             "name": name,
             "type": kind,
             "parameters": parameters,
-            "opt": { "nonInteractive": true },
+            "opt": { "nonInteractive": true, "obscure": !options.already_obscured, "noObscure": options.already_obscured },
         }),
     )
     .await?;
@@ -252,7 +278,7 @@ async fn run_oauth_flow_after_name_check<R: tauri::Runtime>(
                 // flusso, non è un'altra domanda a cui rispondere
                 // diversamente) — vedi `onedrive_recovery` per il perché
                 // serve parlare direttamente con Microsoft Graph.
-                if guided && kind == "onedrive" && crate::onedrive_recovery::is_drive_listing_failure(error) {
+                if options.guided && kind == "onedrive" && crate::onedrive_recovery::is_drive_listing_failure(error) {
                     match crate::onedrive_recovery::try_recover_drive_id(state, name).await {
                         Ok(()) => break,
                         Err(recovery_error) => {
@@ -272,11 +298,11 @@ async fn run_oauth_flow_after_name_check<R: tauri::Runtime>(
         let option = response.get("Option");
         let option_name = option.and_then(|o| o.get("Name")).and_then(|v| v.as_str()).unwrap_or("");
 
-        let answer = if let Some(scripted) = scripted_answer(option_name, has_own_client_id) {
+        let answer = if let Some(scripted) = scripted_answer(option_name, has_own_client_id, options.default_to_my_drive) {
             scripted.to_string()
         } else if let Some(provided) = extra_answers.get(option_name) {
             provided.clone()
-        } else if guided {
+        } else if options.guided {
             if let Some(guided) = guided_answer(option_name, kind, &examples_from_option(option)) {
                 guided
             } else {
@@ -335,7 +361,65 @@ pub async fn create_remote_interactive(
     parameters: HashMap<String, String>,
     guided: bool,
 ) -> Result<(), String> {
-    run_oauth_flow(&app, &state, &pending, &name, &kind, &extra_answers, &parameters, guided).await
+    let options = FlowOptions { guided, default_to_my_drive: true, already_obscured: false };
+    run_oauth_flow(&app, &state, &pending, &name, &kind, &extra_answers, &parameters, options).await
+}
+
+/// Crea un remote Google Drive puntato su uno Shared Drive (Team Drive)
+/// invece che su "Il mio Drive", riusando client_id/client_secret/token di
+/// un remote Drive già configurato — nessuna nuova autorizzazione nel
+/// browser. `source_remote_name` deve essere un remote esistente di tipo
+/// `drive`; i suoi parametri (comprese le credenziali, già offuscate così
+/// come salvate) sono letti qui e mai esposti al frontend, stesso principio
+/// di `remotes::rename_remote_in`.
+///
+/// La scelta di QUALE Shared Drive passa dal ciclo standard sopra:
+/// `extra_answers` risponde "no" a "sostituire il token?" (lo si vuole
+/// riusare, non rinnovare) e "sì" a "configuralo come Shared Drive?" —
+/// dopodiché rclone stessa restituisce l'elenco reale degli Shared Drive
+/// visibili per l'account come domanda a scelta multipla (`config_team_drive`,
+/// verificato dal vivo), che arriva alla UI attraverso lo stesso meccanismo
+/// generico già usato per `choose_type` di OneDrive: nessuna lista
+/// costruita a mano qui.
+#[tauri::command]
+pub async fn create_shared_drive_remote(
+    app: AppHandle,
+    state: tauri::State<'_, RcdState>,
+    pending: tauri::State<'_, PendingOAuthAnswer>,
+    new_name: String,
+    source_remote_name: String,
+) -> Result<(), String> {
+    create_shared_drive_remote_for(&app, &state, &pending, &new_name, &source_remote_name).await
+}
+
+/// Corpo di `create_shared_drive_remote`, generico su `R: tauri::Runtime`
+/// come `run_oauth_flow` — separato dal comando Tauri (che vuole
+/// `AppHandle` concreto, non testabile con `tauri::test::mock_app()`) solo
+/// per poterlo chiamare direttamente nei test.
+async fn create_shared_drive_remote_for<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &RcdState,
+    pending: &PendingOAuthAnswer,
+    new_name: &str,
+    source_remote_name: &str,
+) -> Result<(), String> {
+    let dump = rcd::call(state, "config/dump", serde_json::json!({})).await?;
+    let (kind, source_parameters) = crate::existing_config::extract_remote_parameters(&dump, source_remote_name)?;
+    if kind != "drive" {
+        return Err(format!("'{source_remote_name}' non è un remote Google Drive"));
+    }
+
+    let parameters: HashMap<String, String> = ["client_id", "client_secret", "token"]
+        .into_iter()
+        .filter_map(|key| source_parameters.get(key).map(|value| (key.to_string(), value.clone())))
+        .collect();
+    let extra_answers = HashMap::from([
+        ("config_refresh_token".to_string(), "false".to_string()),
+        ("config_change_team_drive".to_string(), "true".to_string()),
+    ]);
+    let options = FlowOptions { guided: false, default_to_my_drive: false, already_obscured: true };
+
+    run_oauth_flow(app, state, pending, new_name, "drive", &extra_answers, &parameters, options).await
 }
 
 /// Risposta dell'utente a una domanda del flusso OAuth messa in pausa da
@@ -382,25 +466,34 @@ mod tests {
 
     #[test]
     fn scripted_answer_always_says_yes_to_local_browser() {
-        assert_eq!(scripted_answer("config_is_local", false), Some("true"));
-        assert_eq!(scripted_answer("config_is_local", true), Some("true"));
+        assert_eq!(scripted_answer("config_is_local", false, true), Some("true"));
+        assert_eq!(scripted_answer("config_is_local", true, true), Some("true"));
     }
 
     #[test]
     fn scripted_answer_accepts_shared_client_id_only_without_a_custom_one() {
-        assert_eq!(scripted_answer("config_shared_client_id", false), Some("true"));
-        assert_eq!(scripted_answer("config_shared_client_id", true), None);
+        assert_eq!(scripted_answer("config_shared_client_id", false, true), Some("true"));
+        assert_eq!(scripted_answer("config_shared_client_id", true, true), None);
     }
 
     #[test]
-    fn scripted_answer_declines_team_drive() {
-        assert_eq!(scripted_answer("config_team_drive", false), Some("false"));
+    fn scripted_answer_declines_team_drive_by_default() {
+        assert_eq!(scripted_answer("config_team_drive", false, true), Some("false"));
+    }
+
+    /// Il flusso "Drive condiviso" (`create_shared_drive_remote`) passa
+    /// `default_to_my_drive: false` apposta per NON rispondere qui — la
+    /// domanda deve arrivare all'utente con l'elenco reale degli Shared
+    /// Drive, vedi il commento su `scripted_answer`.
+    #[test]
+    fn scripted_answer_lets_team_drive_through_when_not_defaulting_to_my_drive() {
+        assert_eq!(scripted_answer("config_team_drive", false, false), None);
     }
 
     #[test]
     fn scripted_answer_is_none_for_unknown_questions() {
-        assert_eq!(scripted_answer("config_type", false), None);
-        assert_eq!(scripted_answer("qualcosa_di_mai_visto", false), None);
+        assert_eq!(scripted_answer("config_type", false, true), None);
+        assert_eq!(scripted_answer("qualcosa_di_mai_visto", false, true), None);
     }
 
     #[test]
@@ -465,8 +558,9 @@ mod tests {
         let app = mock.handle().clone();
 
         let pending = PendingOAuthAnswer::default();
+        let options = FlowOptions { guided: false, default_to_my_drive: true, already_obscured: false };
         let result =
-            run_oauth_flow(&app, &state, &pending, "oauth-test", "tipo-che-non-esiste", &HashMap::new(), &HashMap::new(), false).await;
+            run_oauth_flow(&app, &state, &pending, "oauth-test", "tipo-che-non-esiste", &HashMap::new(), &HashMap::new(), options).await;
         assert!(result.is_err());
     }
 
@@ -487,7 +581,8 @@ mod tests {
         let flow_state = state.clone();
         let pending = PendingOAuthAnswer::default();
         let flow_task = tokio::spawn(async move {
-            run_oauth_flow(&app, &flow_state, &pending, "dbx-cancel-test", "dropbox", &HashMap::new(), &HashMap::new(), false).await
+            let options = FlowOptions { guided: false, default_to_my_drive: true, already_obscured: false };
+            run_oauth_flow(&app, &flow_state, &pending, "dbx-cancel-test", "dropbox", &HashMap::new(), &HashMap::new(), options).await
         });
 
         let mut auth_url_seen = false;
@@ -518,6 +613,26 @@ mod tests {
             !remaining.contains(&"dbx-cancel-test"),
             "il remote non deve restare salvato dopo un annullamento a metà flusso: {remaining:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn create_shared_drive_remote_rejects_a_source_that_is_not_a_drive_remote() {
+        let dir = crate::rcd::tests::TempDir::new("shared-drive-wrong-kind");
+        let state = rcd::build_state(dir.config_path()).await;
+        let mock = tauri::test::mock_app();
+        let app = mock.handle().clone();
+        let pending = PendingOAuthAnswer::default();
+
+        // Un remote locale, tipo qualunque tranne "drive": nessuna
+        // autorizzazione OAuth necessaria per crearlo nel test.
+        let options = FlowOptions { guided: false, default_to_my_drive: true, already_obscured: false };
+        run_oauth_flow(&app, &state, &pending, "non-drive", "local", &HashMap::new(), &HashMap::new(), options).await.unwrap();
+
+        let new_pending = PendingOAuthAnswer::default();
+        let result = create_shared_drive_remote_for(&app, &state, &new_pending, "nuovo", "non-drive").await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("non è un remote Google Drive"));
     }
 
     #[test]
