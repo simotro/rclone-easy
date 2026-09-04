@@ -888,15 +888,36 @@ async fn run_bisync_job_by_name_with_force(
     result
 }
 
+/// Costruisce e salva in Cronologia un esito fallito quando il lock
+/// condiviso non si riesce ad acquisire (conflitto genuino con un'altra
+/// macchina, o il timeout di `remote_lock::ACQUIRE_TIMEOUT` su un remote
+/// irraggiungibile). Un click manuale mostra comunque il messaggio d'errore
+/// nella UI, ma un'esecuzione schedulata scarta l'errore con `let _ =` in
+/// `scheduler.rs`: senza salvarlo qui il job risulterebbe "mai eseguito" in
+/// Cronologia, senza alcuna traccia del perché.
+fn record_lock_failure(config_dir: &Path, name: &str, message: String) -> Result<BisyncRunResult, String> {
+    let result = BisyncRunResult {
+        success: false,
+        message,
+        when_unix: now_unix(),
+        conflict_paths: Vec::new(),
+        duplicate_names: Vec::new(),
+        log: String::new(),
+        needs_force: false,
+        auto_resynced: false,
+    };
+    let mut jobs = load_from_dir(config_dir)?;
+    if let Some(stored) = jobs.iter_mut().find(|j| j.name == name) {
+        crate::jobs::push_history(&mut stored.history, result.clone());
+    }
+    save_to_dir(config_dir, &jobs)?;
+    Ok(result)
+}
+
 /// Acquisisce il lock condiviso sul/sui remote coinvolti (vedi
 /// `remote_lock.rs`: più macchine diverse possono avere Rclone Easy
 /// configurato sullo stesso remote condiviso, es. un Google Drive di lavoro
-/// tenuto disponibile offline su più PC) prima di eseguire per davvero — un
-/// conflitto restituisce subito `Err` senza toccare `history`, stesso
-/// principio già in vigore un rigo sopra per "il job è già in esecuzione su
-/// questa macchina": un'esecuzione automatica (scheduler/watcher, che
-/// scartano l'errore con `let _ =`) si limita a saltare questo giro e
-/// riprovare al prossimo, un click manuale mostra il messaggio all'utente.
+/// tenuto disponibile offline su più PC) prima di eseguire per davvero.
 async fn run_bisync_job_by_name_with_remote_lock(
     config_dir: &Path,
     state: &RcdState,
@@ -908,7 +929,10 @@ async fn run_bisync_job_by_name_with_remote_lock(
     let job = jobs.iter().find(|j| j.name == name).ok_or_else(|| format!("nessun job bisync chiamato '{name}'"))?;
     let remotes: Vec<&str> = job_remote_names(job).into_iter().flatten().collect();
 
-    let locks = crate::remote_lock::acquire_all(state, &remotes).await?;
+    let locks = match crate::remote_lock::acquire_all(state, &remotes).await {
+        Ok(locks) => locks,
+        Err(message) => return record_lock_failure(config_dir, name, message),
+    };
     let result = run_bisync_job_by_name_inner(config_dir, config_password, name, force).await;
     if matches!(&result, Ok(r) if r.success) {
         // Best effort, un lato alla volta: vedi il commento su
@@ -1802,6 +1826,32 @@ mod tests {
         let state = crate::rcd::build_state(dir.config_path()).await;
         let result = run_bisync_job_by_name(&dir.path, &state, None, "non-esiste").await;
         assert!(result.is_err());
+    }
+
+    /// Verifica che un fallimento nell'acquisizione del lock condiviso (qui
+    /// un remote non configurato nel rclone.conf di test, che fa fallire
+    /// subito la prima chiamata RC di `remote_lock.rs`) comparisca in
+    /// Cronologia invece di sparire in silenzio, lasciando il job "mai
+    /// eseguito" per sempre agli occhi dell'utente senza alcuna traccia del
+    /// perché.
+    #[tokio::test]
+    async fn run_bisync_job_records_a_lock_acquisition_failure_in_history() {
+        let jobs_dir = TempDir::new("bisync-lock-failure-jobs");
+        let path1_dir = TempDir::new("bisync-lock-failure-path1");
+        std::fs::create_dir_all(&path1_dir.path).unwrap();
+
+        create_bisync_job_in(&jobs_dir.path, "prova-lock", &path1_dir.path.to_string_lossy(), "remoto-inesistente:qualcosa", None).unwrap();
+        std::fs::create_dir_all(&jobs_dir.path).unwrap();
+
+        let state = crate::rcd::build_state(jobs_dir.config_path()).await;
+        let result = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova-lock").await.unwrap();
+
+        assert!(!result.success, "un remote non configurato deve far fallire il run: {result:?}");
+        assert!(!result.message.is_empty(), "il messaggio d'errore non deve restare vuoto");
+
+        let jobs = load_from_dir(&jobs_dir.path).unwrap();
+        assert_eq!(jobs[0].history.len(), 1, "il fallimento del lock deve comparire in Cronologia, non sparire in silenzio");
+        assert!(!jobs[0].history[0].success);
     }
 
     /// Stesso schema deterministico usato in `jobs::run_job_by_name_rejects_

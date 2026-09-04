@@ -21,3 +21,7 @@ vite.config.ts.timestamp-*
 # Symlink creati da `nix build`
 /result
 /result-*
+
+# Anteprime PNG delle icone tray generate da scripts/generate_tray_icons.py,
+# solo per ispezione visiva locale — non consumate dal codice Rust
+/src-tauri/icons/tray/*.preview.png

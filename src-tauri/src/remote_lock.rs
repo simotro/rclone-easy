@@ -183,7 +183,30 @@ fn spawn_renewal(info: ConnectionInfo, remote: String, lock_path: String, nonce:
 /// un'attesa lunga, il chiamante riprova al giro successivo.
 const MAX_ACQUIRE_ATTEMPTS: u32 = 8;
 
+/// Tetto massimo per l'intera `try_acquire_one_retrying` (tutti i tentativi
+/// insieme), non per la singola chiamata RC — senza un limite qui, un
+/// remote irraggiungibile (es. server spento) lascia un job bisync
+/// bloccato per sempre in attesa del lock, MOLTO prima di arrivare a
+/// lanciare il sottoprocesso `rclone bisync` vero — quello sì fallisce in
+/// fretta con un errore di rete pulito, ma non verrebbe mai raggiunto.
+/// Ampio apposta rispetto al caso normale (un conflitto di lock genuino si
+/// risolve in meno di un secondo, vedi il commento su
+/// `MAX_ACQUIRE_ATTEMPTS`): non deve scattare per una rete solo lenta, solo
+/// per una davvero morta. Senza questo limite, un remote irraggiungibile
+/// lascia la chiamata bloccata indefinitamente, non solo per qualche
+/// secondo in più.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn try_acquire_one(info: &ConnectionInfo, remote: &str) -> Result<RemoteLockGuard, String> {
+    match tokio::time::timeout(ACQUIRE_TIMEOUT, try_acquire_one_retrying(info, remote)).await {
+        Ok(result) => result,
+        Err(_) => {
+            Err(format!("'{remote}' non risponde (timeout dopo {}s) — controlla che il remote sia raggiungibile", ACQUIRE_TIMEOUT.as_secs()))
+        }
+    }
+}
+
+async fn try_acquire_one_retrying(info: &ConnectionInfo, remote: &str) -> Result<RemoteLockGuard, String> {
     let mut last_err = None;
     for attempt in 0..MAX_ACQUIRE_ATTEMPTS {
         if attempt > 0 {
@@ -299,14 +322,20 @@ pub(crate) async fn acquire_all(state: &RcdState, remotes: &[&str]) -> Result<Ve
 /// fallimento (es. rete caduta proprio ora) non deve far fallire l'esito
 /// del run che l'ha appena completato — il lock resta comunque protetto
 /// dalla scadenza in `try_acquire_one`, che prima o poi lo considererà
-/// abbandonato (i rinnovi si sono fermati insieme al task).
+/// abbandonato (i rinnovi si sono fermati insieme al task). Anche questa
+/// chiamata ha un tetto (`RELEASE_TIMEOUT`, più corto di `ACQUIRE_TIMEOUT`:
+/// un solo colpo, nessun tentativo da ripetere) — stesso motivo di
+/// `try_acquire_one`: un remote diventato irraggiungibile PROPRIO ora (a
+/// run appena finito) non deve bloccare per sempre anche il rilascio.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub(crate) async fn release_all(state: &RcdState, guards: Vec<RemoteLockGuard>) {
     let Ok(info) = rcd::connection_info(state).await else { return };
     for guard in guards {
         guard.renew_handle.abort();
         let fs = format!("{}:", guard.remote);
         let lock_path = lock_path_for(&guard.remote);
-        let _ = info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": lock_path })).await;
+        let _ = tokio::time::timeout(RELEASE_TIMEOUT, info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": lock_path }))).await;
     }
 }
 

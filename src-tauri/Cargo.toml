@@ -1,6 +1,6 @@
 [package]
 name = "rclone-easy"
-version = "0.21.0"
+version = "0.22.0"
 description = "Un'interfaccia grafica semplice per rclone"
 authors = ["simotro"]
 license = "MIT"
@@ -40,4 +40,7 @@ gethostname = "0.5"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+
+[target."cfg(windows)".dependencies]
+winreg = "0.56.0"
 

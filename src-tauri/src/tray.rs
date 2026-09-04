@@ -52,62 +52,38 @@ const UPDATE_ID: &str = "update_available";
 /// non lo specifica).
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 
-/// Icona unica colorata (non una coppia chiaro/scuro): niente rilevamento a
-/// runtime del tema del pannello, che su Linux non ha un'API affidabile e
-/// uniforme tra desktop environment diversi — scelta esplicita dell'utente.
-///
 /// Pixel RGBA grezzi (non PNG): `tauri::image::Image` in questa versione
 /// non decodifica PNG da sé (`Image::new` vuole già RGBA piano), quindi i
-/// file sono pre-decodificati una volta con Pillow da `icons/tray/tray-*.png`
-/// a `icons/tray/tray-*.rgba`, 64×64. Se le sorgenti PNG cambiano vanno
-/// rigenerati allo stesso modo.
+/// file sono pre-decodificati con `scripts/generate_tray_icons.py` (Pillow)
+/// da `icons/tray/tray-idle.png`, 64×64. Se la sorgente PNG cambia va
+/// rilanciato quello script, non rigenerati a mano.
 const TRAY_ICON_SIZE: u32 = 64;
-const TRAY_FRAME_BYTE_LEN: usize = (TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usize;
-const IDLE_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-idle.rgba");
-/// Sequenza di fotogrammi del logo che ruota su se stesso di 360°, mostrata
-/// in loop mentre almeno un job di backup o bisync è in esecuzione — vedi
-/// `watch_activity`. Preferita a una dissolvenza di colore teal→ambra: un
-/// cambio di colore a colpo d'occhio in una tray si nota meno di un
-/// movimento. Usa la stessa API multipiattaforma di
-/// Tauri per l'icona della tray (nessun trucco specifico per Linux), quindi
-/// la stessa affidabilità vale anche per Windows/macOS in futuro. 24
-/// fotogrammi (rotazione di 15° l'uno) generati una volta con Pillow da
-/// `icons/tray/tray-idle.png`, ruotando su un canvas allargato a
-/// dimensione-diagonale per non tagliare gli angoli del logo, poi
-/// ridotti a 64×64.
-const SPIN_FRAME_BYTES: &[u8] = include_bytes!("../icons/tray/tray-spin.rgba");
-/// Dissolvenza morbida ambra→rosso acceso ("respiro", stessa formula di
-/// easing a coseno per una transizione più naturale agli estremi che a
-/// metà) — mostrata in loop al posto dell'icona idle statica quando
-/// l'ultima esecuzione registrata di un job di backup o bisync (qualunque
-/// remote) è fallita, finché non ne va a buon fine una successiva. Un
-/// badge statico era troppo poco visibile nella tray a dimensione reale;
-/// un cambio di colore persistente si nota molto di più. A differenza
-/// dello stato "in esecuzione" sopra, qui resta un cambio di colore e non
-/// una rotazione: è uno stato persistente (può durare ore), non un'attesa
-/// attiva, quindi non deve sembrare "in corso qualcosa adesso".
-const ERROR_BREATHE_FRAME_BYTES: &[u8] = include_bytes!("../icons/tray/tray-error-breathe.rgba");
-/// Dissolvenza morbida teal→ambra→teal (mai fino al rosso, a differenza
-/// dell'animazione di errore sopra: un aggiornamento disponibile non è un
-/// problema, non deve sembrare allarmante) — mostrata in loop quando c'è un
-/// aggiornamento in sospeso non ancora saltato dall'utente (vedi
-/// `update_state::UpdateState`), finché non lo installa o lo salta. Stessa
-/// tecnica ("respiro" a easing di coseno) e stessi 24 fotogrammi generati
-/// una volta con Pillow da `icons/tray/tray-idle.png`, colore di partenza
-/// idle (42,148,174) e di picco ambra (245,158,11) — lo stesso ambra usato
-/// come primo fotogramma dell'animazione di errore sopra.
-const UPDATE_BREATHE_FRAME_BYTES: &[u8] = include_bytes!("../icons/tray/tray-update-breathe.rgba");
-/// Conteggio fotogrammi condiviso da entrambe le animazioni sopra (rotazione
-/// e respiro), stesso valore per costruzione.
-const ANIMATION_FRAME_COUNT: usize = 24;
-/// Intervallo tra un fotogramma e il successivo, condiviso dalle due
-/// animazioni: abbastanza fitto da sembrare fluido, abbastanza largo da
-/// restare affidabile su qualunque implementazione di tray/menu bar. Per la
-/// rotazione, un giro completo dura quindi 24 × 120ms ≈ 2,9s.
-const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(120);
-/// Intervallo di controllo quando non c'è nulla in esecuzione — nessuna
-/// icona da aggiornare in quella finestra, un controllo più rado va bene.
-const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Icona "a maschera" (un solo colore, chiaro o scuro), non a tinta piena
+/// teal/arancio/rosso: si adatta allo sfondo della tray rilevato da
+/// `detect_tray_base` — un'icona chiara su una tray scura (o viceversa)
+/// resta leggibile a prescindere da desktop/tema, invece di assumere sempre
+/// lo stesso sfondo. Un solo badge in basso a destra comunica lo stato
+/// (problema > aggiornamento, la più importante sostituisce l'altra — vedi
+/// `badge_for`), tranne "in corso": un badge con le due frecce circolari non
+/// è leggibile alla dimensione reale della tray (~16-24px), quindi per
+/// quello stato l'icona intera diventa il pittogramma di sync a piena
+/// grandezza (`SYNC_*_ICON_BYTES`), come fanno altri client di
+/// sincronizzazione (Nextcloud Desktop, Insync) invece di un overlay
+/// minuscolo.
+const BASE_LIGHT_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-light.rgba");
+const BASE_LIGHT_UPDATE_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-light-update.rgba");
+const BASE_LIGHT_PROBLEM_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-light-problem.rgba");
+const BASE_DARK_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-dark.rgba");
+const BASE_DARK_UPDATE_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-dark-update.rgba");
+const BASE_DARK_PROBLEM_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-dark-problem.rgba");
+const SYNC_LIGHT_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-sync-light.rgba");
+const SYNC_DARK_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-sync-dark.rgba");
+
+/// Intervallo di controllo dello stato — nessuna animazione da scandire più
+/// velocemente: un solo ritmo, l'icona/il tooltip vengono aggiornati solo
+/// quando lo stato cambia davvero (vedi `watch_activity`), non ad ogni giro.
+const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 /// Intervallo di ricostruzione del menu — vedi `watch_menu`.
 const MENU_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -144,7 +120,7 @@ fn try_build_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, QUIT_ID, "Esci", true, None::<&str>)?;
     let placeholder_menu = Menu::with_items(app, &[&show_hide, &settings, &separator, &quit])?;
 
-    let idle_icon = Image::new(IDLE_ICON_BYTES, TRAY_ICON_SIZE, TRAY_ICON_SIZE);
+    let idle_icon = Image::new(BASE_LIGHT_ICON_BYTES, TRAY_ICON_SIZE, TRAY_ICON_SIZE);
 
     let tray = TrayIconBuilder::new()
         .icon(idle_icon)
@@ -197,11 +173,6 @@ fn set_tray_tooltip(app: &AppHandle, text: &str) {
     let _ = tray.0.set_tooltip(Some(text));
 }
 
-fn animation_frame(frames: &[u8], frame: usize) -> &[u8] {
-    let start = frame * TRAY_FRAME_BYTE_LEN;
-    &frames[start..start + TRAY_FRAME_BYTE_LEN]
-}
-
 fn any_job_running() -> bool {
     crate::jobs::any_job_running() || crate::bisync::any_job_running()
 }
@@ -224,17 +195,27 @@ fn last_run_failed(app: &AppHandle) -> bool {
     jobs_failed || bisync_failed
 }
 
-#[derive(PartialEq, Clone, Copy)]
-enum ActivityState {
+/// Sfondo su cui l'icona deve restare leggibile — chiede al sistema quale
+/// sia il colore preferito della tray/taskbar, vedi `detect_tray_base`.
+#[derive(PartialEq, Debug, Clone, Copy)]
+enum TrayBase {
+    /// Icona chiara (bianca), per una tray scura.
+    Light,
+    /// Icona scura, per una tray chiara.
+    Dark,
+}
+
+/// Unico badge mostrato in basso a destra — non più due badge indipendenti,
+/// vedi `badge_for` per la priorità.
+#[derive(PartialEq, Debug, Clone, Copy)]
+enum Badge {
+    None,
     Running,
-    Error,
-    UpdateAvailable,
-    Ok,
+    Update,
+    Problem,
 }
 
 const TOOLTIP_RUNNING: &str = "Rclone Easy - Sincronizzazione in corso";
-/// Testo del tooltip usato anche per capire, a colpo d'occhio nel codice,
-/// cosa comunica l'animazione ambra→rosso di `ERROR_BREATHE_FRAME_BYTES`.
 const TOOLTIP_ERROR: &str = "Rclone Easy - Uno o più lavori hanno avuto un problema";
 const TOOLTIP_UPDATE: &str = "Rclone Easy - È disponibile un aggiornamento";
 const TOOLTIP_OK: &str = "Rclone Easy - Ultimi lavori eseguiti con successo";
@@ -245,68 +226,145 @@ fn pending_update(app: &AppHandle) -> Option<String> {
     app.try_state::<crate::update_state::UpdateState>().and_then(|s| s.pending_version())
 }
 
-/// Ogni ~120ms, mentre almeno un job è in esecuzione, mentre l'ultima
-/// esecuzione registrata di un job è fallita, o mentre c'è un aggiornamento
-/// in sospeso, mostra il fotogramma successivo della relativa animazione
-/// (rotazione per "in corso", respiro ambra→rosso per "problema", respiro
-/// teal→ambra per "aggiornamento disponibile"); appena torna tutto normale
-/// mostra l'icona statica idle, controllato ogni ~500ms. Ordine di priorità
-/// quando più condizioni sono vere insieme: un job in corso o un errore
-/// contano più di un semplice avviso di aggiornamento, che può aspettare.
-/// Il tooltip riflette lo stesso stato, aggiornato solo al cambio di stato
-/// (non ad ogni fotogramma) per non chiamare l'API della tray decine di
-/// volte al secondo inutilmente. Un polling semplice invece di un canale di
-/// notifica: evita di dover far conoscere un `AppHandle` a
+/// Un solo badge alla volta: il problema vince sull'aggiornamento, che vince
+/// sul "job in corso" — la più importante sostituisce le altre invece di
+/// comparire insieme (due badge indipendenti nello stesso angolo sono meno
+/// chiari di uno solo con priorità).
+fn badge_for(last_run_failed: bool, update_pending: bool, running: bool) -> Badge {
+    if last_run_failed {
+        Badge::Problem
+    } else if update_pending {
+        Badge::Update
+    } else if running {
+        Badge::Running
+    } else {
+        Badge::None
+    }
+}
+
+fn icon_bytes_for(base: TrayBase, badge: Badge) -> &'static [u8] {
+    match (base, badge) {
+        (TrayBase::Light, Badge::None) => BASE_LIGHT_ICON_BYTES,
+        (TrayBase::Light, Badge::Running) => SYNC_LIGHT_ICON_BYTES,
+        (TrayBase::Light, Badge::Update) => BASE_LIGHT_UPDATE_ICON_BYTES,
+        (TrayBase::Light, Badge::Problem) => BASE_LIGHT_PROBLEM_ICON_BYTES,
+        (TrayBase::Dark, Badge::None) => BASE_DARK_ICON_BYTES,
+        (TrayBase::Dark, Badge::Running) => SYNC_DARK_ICON_BYTES,
+        (TrayBase::Dark, Badge::Update) => BASE_DARK_UPDATE_ICON_BYTES,
+        (TrayBase::Dark, Badge::Problem) => BASE_DARK_PROBLEM_ICON_BYTES,
+    }
+}
+
+fn tooltip_for(badge: Badge) -> &'static str {
+    match badge {
+        Badge::None => TOOLTIP_OK,
+        Badge::Running => TOOLTIP_RUNNING,
+        Badge::Update => TOOLTIP_UPDATE,
+        Badge::Problem => TOOLTIP_ERROR,
+    }
+}
+
+/// Interroga il sistema per sapere se la tray/taskbar è chiara o scura, così
+/// l'icona può restare leggibile a prescindere dal desktop/tema
+/// dell'utente. Best-effort: se il meccanismo non è disponibile (desktop
+/// senza xdg-desktop-portal, o piattaforme diverse da Linux/Windows) resta
+/// sull'assunzione più comune — tray scura, icona chiara — invece di far
+/// fallire l'avvio della tray per questo.
+#[cfg(target_os = "linux")]
+async fn detect_tray_base() -> TrayBase {
+    match linux_color_scheme().await {
+        // 1 = il sistema preferisce il tema scuro → tray scura → icona chiara.
+        Ok(1) => TrayBase::Light,
+        // 2 = preferenza chiara → tray chiara → icona scura.
+        Ok(2) => TrayBase::Dark,
+        _ => TrayBase::Light,
+    }
+}
+
+/// Connessione D-Bus riusata tra un poll e l'altro invece di aprirne una
+/// nuova ogni ~1s: oltre a essere inutile lavoro ripetuto, aprirne una ad
+/// ogni giro fa andare in panic il runtime tokio ("Cannot start a runtime
+/// from within a runtime") — sintomo di un meccanismo interno di `zbus` non
+/// pensato per essere invocato così di frequente. `Connection` è economico
+/// da clonare (handle condiviso), quindi la cache è semplicemente l'ultima
+/// connessione riuscita.
+#[cfg(target_os = "linux")]
+static PORTAL_CONNECTION: std::sync::OnceLock<zbus::Connection> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+async fn portal_connection() -> zbus::Result<zbus::Connection> {
+    if let Some(c) = PORTAL_CONNECTION.get() {
+        return Ok(c.clone());
+    }
+    let connection = zbus::Connection::session().await?;
+    Ok(PORTAL_CONNECTION.get_or_init(|| connection).clone())
+}
+
+/// Legge `org.freedesktop.appearance` → `color-scheme` dal portale
+/// `org.freedesktop.portal.Settings` (implementato da GNOME, KDE e dalla
+/// maggior parte degli altri desktop tramite xdg-desktop-portal): 0 = nessuna
+/// preferenza, 1 = preferenza scura, 2 = preferenza chiara. Alcuni backend
+/// incapsulano il valore in un `Variant` annidato — `downcast_ref` lo
+/// despacchetta da sé in entrambi i casi, vedi la sua implementazione.
+#[cfg(target_os = "linux")]
+async fn linux_color_scheme() -> zbus::Result<u32> {
+    let connection = portal_connection().await?;
+    let reply = connection
+        .call_method(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            Some("org.freedesktop.portal.Settings"),
+            "Read",
+            &("org.freedesktop.appearance", "color-scheme"),
+        )
+        .await?;
+    let body = reply.body();
+    let value: zbus::zvariant::Value = body.deserialize()?;
+    value.downcast_ref::<u32>().map_err(Into::into)
+}
+
+/// Su Windows la tray/taskbar segue `SystemUsesLightTheme` (distinta da
+/// `AppsUseLightTheme`, che riguarda solo il tema delle finestre delle app):
+/// 0 = taskbar scura, 1 = taskbar chiara.
+#[cfg(target_os = "windows")]
+async fn detect_tray_base() -> TrayBase {
+    let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+    match key.and_then(|k| k.get_value::<u32, _>("SystemUsesLightTheme")) {
+        // 1 = taskbar chiara → icona scura.
+        Ok(1) => TrayBase::Dark,
+        // 0 = taskbar scura → icona chiara.
+        Ok(_) => TrayBase::Light,
+        Err(_) => TrayBase::Light,
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+async fn detect_tray_base() -> TrayBase {
+    TrayBase::Light
+}
+
+/// Ogni ~1s rileva lo sfondo della tray e calcola il badge (problema >
+/// aggiornamento > in corso > nessuno), aggiornando icona/tooltip solo al
+/// cambio di stato — evita di richiamare l'API della tray e il portale
+/// D-Bus/registro ad ogni giro inutilmente. Un polling semplice invece di un
+/// canale di notifica: evita di dover far conoscere un `AppHandle` a
 /// `jobs.rs`/`bisync.rs`, che oggi restano testabili senza una vera app
 /// Tauri.
 async fn watch_activity(app: AppHandle) {
-    let mut current_state: Option<ActivityState> = None;
-    let mut frame = 0usize;
+    let mut current: Option<(TrayBase, Badge)> = None;
 
     loop {
-        let state = if any_job_running() {
-            ActivityState::Running
-        } else if last_run_failed(&app) {
-            ActivityState::Error
-        } else if pending_update(&app).is_some() {
-            ActivityState::UpdateAvailable
-        } else {
-            ActivityState::Ok
-        };
+        let base = detect_tray_base().await;
+        let badge = badge_for(last_run_failed(&app), pending_update(&app).is_some(), any_job_running());
 
-        if current_state != Some(state) {
-            let tooltip = match state {
-                ActivityState::Running => TOOLTIP_RUNNING,
-                ActivityState::Error => TOOLTIP_ERROR,
-                ActivityState::UpdateAvailable => TOOLTIP_UPDATE,
-                ActivityState::Ok => TOOLTIP_OK,
-            };
-            set_tray_tooltip(&app, tooltip);
-            current_state = Some(state);
-            frame = 0;
+        if current != Some((base, badge)) {
+            set_tray_icon(&app, icon_bytes_for(base, badge));
+            set_tray_tooltip(&app, tooltip_for(badge));
+            current = Some((base, badge));
         }
 
-        match state {
-            ActivityState::Running => {
-                set_tray_icon(&app, animation_frame(SPIN_FRAME_BYTES, frame));
-                frame = (frame + 1) % ANIMATION_FRAME_COUNT;
-                tokio::time::sleep(ANIMATION_FRAME_INTERVAL).await;
-            }
-            ActivityState::Error => {
-                set_tray_icon(&app, animation_frame(ERROR_BREATHE_FRAME_BYTES, frame));
-                frame = (frame + 1) % ANIMATION_FRAME_COUNT;
-                tokio::time::sleep(ANIMATION_FRAME_INTERVAL).await;
-            }
-            ActivityState::UpdateAvailable => {
-                set_tray_icon(&app, animation_frame(UPDATE_BREATHE_FRAME_BYTES, frame));
-                frame = (frame + 1) % ANIMATION_FRAME_COUNT;
-                tokio::time::sleep(ANIMATION_FRAME_INTERVAL).await;
-            }
-            ActivityState::Ok => {
-                set_tray_icon(&app, IDLE_ICON_BYTES);
-                tokio::time::sleep(IDLE_POLL_INTERVAL).await;
-            }
-        }
+        tokio::time::sleep(ACTIVITY_POLL_INTERVAL).await;
     }
 }
 
@@ -733,4 +791,56 @@ fn open_settings(app: &AppHandle) {
 fn open_update(app: &AppHandle) {
     show_main_window(app);
     let _ = app.emit(OPEN_UPDATE_EVENT, ());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn badge_for_gives_problem_priority_over_everything() {
+        assert_eq!(badge_for(true, true, true), Badge::Problem);
+    }
+
+    #[test]
+    fn badge_for_gives_update_priority_over_running() {
+        assert_eq!(badge_for(false, true, true), Badge::Update);
+    }
+
+    #[test]
+    fn badge_for_falls_back_to_running_then_none() {
+        assert_eq!(badge_for(false, false, true), Badge::Running);
+        assert_eq!(badge_for(false, false, false), Badge::None);
+    }
+
+    #[test]
+    fn icon_bytes_for_covers_all_eight_combinations_with_distinct_bytes() {
+        let combos = [
+            (TrayBase::Light, Badge::None),
+            (TrayBase::Light, Badge::Running),
+            (TrayBase::Light, Badge::Update),
+            (TrayBase::Light, Badge::Problem),
+            (TrayBase::Dark, Badge::None),
+            (TrayBase::Dark, Badge::Running),
+            (TrayBase::Dark, Badge::Update),
+            (TrayBase::Dark, Badge::Problem),
+        ];
+        let bytes: Vec<&[u8]> = combos.iter().map(|&(base, badge)| icon_bytes_for(base, badge)).collect();
+        for b in &bytes {
+            assert_eq!(b.len(), (TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usize);
+        }
+        for i in 0..bytes.len() {
+            for j in (i + 1)..bytes.len() {
+                assert_ne!(bytes[i], bytes[j], "le icone per {:?} devono avere pixel diversi", (combos[i], combos[j]));
+            }
+        }
+    }
+
+    #[test]
+    fn tooltip_for_reflects_the_badge() {
+        assert_eq!(tooltip_for(Badge::None), TOOLTIP_OK);
+        assert_eq!(tooltip_for(Badge::Running), TOOLTIP_RUNNING);
+        assert_eq!(tooltip_for(Badge::Update), TOOLTIP_UPDATE);
+        assert_eq!(tooltip_for(Badge::Problem), TOOLTIP_ERROR);
+    }
 }
