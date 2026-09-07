@@ -17,6 +17,18 @@ use zbus::zvariant::Value;
 /// comunque bisogno perché la tray "classica" già funziona lì). Non gestito
 /// l'esito dell'eventuale prompt di conferma mostrato all'utente (non
 /// servono permessi speciali nell'app per la sola comparsa nell'elenco).
+///
+/// Nessuna opzione `autostart` nella richiesta: l'avvio automatico è già
+/// gestito direttamente da `tauri-plugin-autostart` (voce XDG scritta di
+/// suo in `~/.config/autostart/`, vedi `heal_autostart_entry` in `lib.rs`),
+/// non ha bisogno che sia anche il portale a occuparsene. Passare
+/// esplicitamente `false` rischia di far interpretare a un backend del
+/// portale (es. `xdg-desktop-portal-kde`, che sembra gestire "in
+/// background"/"avvio automatico" come permessi legati alla stessa voce)
+/// questa richiesta come "disattiva l'autostart esistente", non solo come
+/// "non chiedermelo tu" — rischio concreto specialmente quando il portale
+/// rivaluta l'identità dell'app (es. dopo un aggiornamento che sostituisce
+/// il binario).
 pub fn request_background() {
     tauri::async_runtime::spawn(async {
         if let Err(e) = try_request_background().await {
@@ -30,7 +42,6 @@ async fn try_request_background() -> zbus::Result<()> {
 
     let mut options: HashMap<&str, Value> = HashMap::new();
     options.insert("reason", Value::from("Rclone Easy continua a funzionare per gestire i tuoi remote in background"));
-    options.insert("autostart", Value::from(false));
 
     connection
         .call_method(

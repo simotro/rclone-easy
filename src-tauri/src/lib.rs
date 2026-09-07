@@ -142,6 +142,21 @@ fn hide_instead_of_close(app: &tauri::AppHandle) {
     });
 }
 
+/// Riscrive la voce di autostart del sistema operativo ad ogni avvio, ma
+/// solo se già attiva — stesso principio di autoriparazione di
+/// `desktop_integration::ensure_installed()` per la voce nel menu
+/// applicazioni: copre il caso in cui il percorso registrato in precedenza
+/// non sia più quello corrente (es. AppImage spostata a mano, o cambio di
+/// canale d'installazione), senza dover accendere l'autostart per un
+/// utente che non l'ha mai attivato.
+fn heal_autostart_entry(app: &tauri::AppHandle) {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    if manager.is_enabled().unwrap_or(false) {
+        let _ = manager.enable();
+    }
+}
+
 /// `RunEvent::Exit` (agganciato più sotto) scatta solo quando l'app si
 /// chiude "normalmente" attraverso il ciclo di eventi della finestra. Un
 /// segnale diretto al processo — verificato durante lo sviluppo: capita ad
@@ -250,6 +265,7 @@ pub fn run() {
             background_portal::request_background();
             #[cfg(target_os = "linux")]
             desktop_integration::ensure_installed();
+            heal_autostart_entry(app.handle());
             // In background, non bloccante: montare subito i mount con
             // auto_mount potrebbe richiedere secondi (connessione a un
             // remote cloud), non deve ritardare la comparsa della finestra.
