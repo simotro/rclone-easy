@@ -170,6 +170,25 @@ fn spawn_renewal(info: ConnectionInfo, remote: String, lock_path: String, nonce:
     })
 }
 
+/// Distingue un conflitto genuino (qualcun altro tiene il lock, non
+/// scaduto — vale la pena aspettare che si liberi, vedi
+/// `acquire_one_with_patience`) da un problema di rete/RC (il remote non
+/// risponde affatto — non ha senso restare in attesa in quel caso, l'errore
+/// va restituito subito, stessa cautela già presa per un remote
+/// irraggiungibile). `From<String>` converte un errore di chiamata RC
+/// (`?` su `info.call(...)`) automaticamente in `Io`, così il resto del
+/// codice non deve distinguere esplicitamente ad ogni chiamata.
+enum LockError {
+    Conflict(String),
+    Io(String),
+}
+
+impl From<String> for LockError {
+    fn from(e: String) -> Self {
+        LockError::Io(e)
+    }
+}
+
 /// Quanti tentativi ravvicinati fare prima di arrendersi — assorbe sia una
 /// corsa genuina tra due macchine che scrivono nella stessa finestra di
 /// pochi millisecondi (vedi il commento sulla rilettura di conferma sotto)
@@ -179,8 +198,9 @@ fn spawn_renewal(info: ConnectionInfo, remote: String, lock_path: String, nonce:
 /// disallinea i due contendenti, così a uno dei tentativi uno dei due
 /// arriva chiaramente prima dell'altro. Se invece il lock è genuinamente in
 /// uso da minuti (un run vero in corso altrove), questi tentativi falliscono
-/// tutti allo stesso modo in meno di un secondo in totale — non c'è
-/// un'attesa lunga, il chiamante riprova al giro successivo.
+/// tutti allo stesso modo in meno di un secondo in totale — a quel punto
+/// subentra l'attesa paziente di `acquire_one_with_patience`, pensata
+/// apposta per quel caso.
 const MAX_ACQUIRE_ATTEMPTS: u32 = 8;
 
 /// Tetto massimo per l'intera `try_acquire_one_retrying` (tutti i tentativi
@@ -197,16 +217,17 @@ const MAX_ACQUIRE_ATTEMPTS: u32 = 8;
 /// secondo in più.
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
-async fn try_acquire_one(info: &ConnectionInfo, remote: &str) -> Result<RemoteLockGuard, String> {
+async fn try_acquire_one(info: &ConnectionInfo, remote: &str) -> Result<RemoteLockGuard, LockError> {
     match tokio::time::timeout(ACQUIRE_TIMEOUT, try_acquire_one_retrying(info, remote)).await {
         Ok(result) => result,
-        Err(_) => {
-            Err(format!("'{remote}' non risponde (timeout dopo {}s) — controlla che il remote sia raggiungibile", ACQUIRE_TIMEOUT.as_secs()))
-        }
+        Err(_) => Err(LockError::Io(format!(
+            "'{remote}' non risponde (timeout dopo {}s) — controlla che il remote sia raggiungibile",
+            ACQUIRE_TIMEOUT.as_secs()
+        ))),
     }
 }
 
-async fn try_acquire_one_retrying(info: &ConnectionInfo, remote: &str) -> Result<RemoteLockGuard, String> {
+async fn try_acquire_one_retrying(info: &ConnectionInfo, remote: &str) -> Result<RemoteLockGuard, LockError> {
     let mut last_err = None;
     for attempt in 0..MAX_ACQUIRE_ATTEMPTS {
         if attempt > 0 {
@@ -222,10 +243,10 @@ async fn try_acquire_one_retrying(info: &ConnectionInfo, remote: &str) -> Result
             Err(e) => last_err = Some(e),
         }
     }
-    Err(last_err.unwrap_or_else(|| conflict_message(remote, None)))
+    Err(last_err.unwrap_or_else(|| LockError::Conflict(conflict_message(remote, None))))
 }
 
-async fn try_acquire_once(info: &ConnectionInfo, remote: &str) -> Result<RemoteLockGuard, String> {
+async fn try_acquire_once(info: &ConnectionInfo, remote: &str) -> Result<RemoteLockGuard, LockError> {
     let lock_path = lock_path_for(remote);
     let fs = format!("{remote}:");
 
@@ -243,7 +264,7 @@ async fn try_acquire_once(info: &ConnectionInfo, remote: &str) -> Result<RemoteL
             Some(c) => now_unix().saturating_sub(c.acquired_at_unix) > STALE_AFTER_SECS,
         };
         if !is_stale {
-            return Err(conflict_message(remote, content.as_ref()));
+            return Err(LockError::Conflict(conflict_message(remote, content.as_ref())));
         }
     }
 
@@ -281,21 +302,95 @@ async fn try_acquire_once(info: &ConnectionInfo, remote: &str) -> Result<RemoteL
             let renew_handle = spawn_renewal(info.clone(), remote.to_string(), lock_path, nonce);
             Ok(RemoteLockGuard { remote: remote.to_string(), renew_handle })
         }
-        other => Err(conflict_message(remote, other.as_ref())),
+        other => Err(LockError::Conflict(conflict_message(remote, other.as_ref()))),
+    }
+}
+
+/// Quanto aspettare, ripetendo il tentativo, quando il lock è tenuto da
+/// un'altra macchina che lo sta ancora rinnovando (conflitto genuino, non
+/// una gara di partenza tra due avvii ravvicinati — quella la risolve già
+/// `try_acquire_one` sopra in pochi secondi). Il caso reale da coprire: una
+/// macchina sta già sincronizzando un remote condiviso, un'altra prova ad
+/// avviare la stessa sincronizzazione nel frattempo (es. un utente chiede
+/// esplicitamente a un collega di forzare un aggiornamento) — prima
+/// falliva subito con un errore invece di aspettare che la prima
+/// finisse, molto diverso da come si comportano client come Insync o
+/// Dropbox (che però non hanno questo problema alla radice: sincronizzano
+/// in modo continuo e incrementale contro un server che gestisce lui
+/// stesso le scritture concorrenti, mentre bisync fa un confronto puntuale
+/// contro un'istantanea locale — da cui il lock). Più lungo di
+/// `STALE_AFTER_SECS`: così, anche nel caso limite in cui l'altra macchina
+/// si sia bloccata/spenta senza rilasciare il lock, l'attesa arriva
+/// comunque fino al punto in cui quel lock viene considerato abbandonato e
+/// un tentativo successivo lo vince, invece di arrendersi un attimo prima.
+const CONFLICT_WAIT_TIMEOUT: Duration = Duration::from_secs(STALE_AFTER_SECS + 5 * 60);
+/// Intervallo tra un controllo e l'altro durante l'attesa paziente sopra —
+/// abbastanza rado da non intasare il remote di chiamate RC per minuti,
+/// abbastanza fitto da accorgersi ragionevolmente in fretta quando l'altra
+/// macchina rilascia il lock.
+const CONFLICT_POLL_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Prova subito (`try_acquire_one`, gestisce già le corse di partenza e i
+/// problemi di rete); se il risultato è un conflitto genuino con un lock
+/// ancora vivo, ritenta pazientemente per `max_wait` invece di arrendersi.
+/// Un errore di rete (`LockError::Io`), in qualunque momento, esce sempre
+/// subito: non ha senso restare in attesa se il remote non risponde
+/// affatto, stessa cautela di `ACQUIRE_TIMEOUT`. `max_wait`/`poll_interval`
+/// parametrizzati (non le costanti dirette) per poter testare il
+/// comportamento in millisecondi invece che in minuti — vedi `acquire_all`
+/// per i valori reali usati in produzione.
+async fn acquire_one_with_patience(
+    info: &ConnectionInfo,
+    remote: &str,
+    max_wait: Duration,
+    poll_interval: Duration,
+) -> Result<RemoteLockGuard, String> {
+    let mut last_conflict = match try_acquire_one(info, remote).await {
+        Ok(guard) => return Ok(guard),
+        Err(LockError::Io(msg)) => return Err(msg),
+        Err(LockError::Conflict(msg)) => msg,
+    };
+
+    let deadline = tokio::time::Instant::now() + max_wait;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(last_conflict);
+        }
+        tokio::time::sleep(poll_interval).await;
+        match try_acquire_once(info, remote).await {
+            Ok(guard) => return Ok(guard),
+            Err(LockError::Io(msg)) => return Err(msg),
+            Err(LockError::Conflict(msg)) => last_conflict = msg,
+        }
     }
 }
 
 /// Acquisisce il lock su ogni remote in `remotes` (deduplicati: path1/path2
 /// possono riferirsi allo stesso remote in teoria, anche se i vincoli
 /// esistenti "un solo bisync/backup per remote" lo rendono raro in
-/// pratica). Se una qualunque acquisizione fallisce dopo che le precedenti
-/// sono riuscite, quelle già ottenute vengono rilasciate prima di
-/// restituire l'errore — nessun lock lasciato "a metà". Usa
-/// `rcd::connection_info` (non `rcd::call` diretto): il lock resta
-/// acquisito per tutta la durata del run, che può essere lunga — tenere il
-/// lock su `RcdState` per tutto quel tempo congelerebbe ogni altro comando
-/// dell'app, stessa cautela già presa per l'attesa OAuth.
+/// pratica) — aspettando pazientemente, non fallendo subito, se un'altra
+/// macchina lo tiene già occupato con un run ancora attivo (vedi
+/// `acquire_one_with_patience`). Se una qualunque acquisizione fallisce
+/// dopo che le precedenti sono riuscite, quelle già ottenute vengono
+/// rilasciate prima di restituire l'errore — nessun lock lasciato "a
+/// metà". Usa `rcd::connection_info` (non `rcd::call` diretto): il lock
+/// resta acquisito per tutta la durata del run, che può essere lunga —
+/// tenere il lock su `RcdState` per tutto quel tempo congelerebbe ogni
+/// altro comando dell'app, stessa cautela già presa per l'attesa OAuth.
 pub(crate) async fn acquire_all(state: &RcdState, remotes: &[&str]) -> Result<Vec<RemoteLockGuard>, String> {
+    acquire_all_with_patience(state, remotes, CONFLICT_WAIT_TIMEOUT, CONFLICT_POLL_INTERVAL).await
+}
+
+/// Corpo vero di `acquire_all`, con l'attesa paziente parametrizzata invece
+/// delle costanti di produzione dirette — permette ai test di verificare il
+/// comportamento (attesa + successo, attesa + resa) in millisecondi invece
+/// che nei minuti reali di `CONFLICT_WAIT_TIMEOUT`.
+async fn acquire_all_with_patience(
+    state: &RcdState,
+    remotes: &[&str],
+    max_wait: Duration,
+    poll_interval: Duration,
+) -> Result<Vec<RemoteLockGuard>, String> {
     let mut unique: Vec<&str> = Vec::new();
     for r in remotes {
         if !unique.contains(r) {
@@ -306,7 +401,7 @@ pub(crate) async fn acquire_all(state: &RcdState, remotes: &[&str]) -> Result<Ve
     let info = rcd::connection_info(state).await?;
     let mut acquired = Vec::new();
     for remote in unique {
-        match try_acquire_one(&info, remote).await {
+        match acquire_one_with_patience(&info, remote, max_wait, poll_interval).await {
             Ok(guard) => acquired.push(guard),
             Err(e) => {
                 release_all(state, acquired).await;
@@ -381,7 +476,10 @@ mod tests {
 
         let _guards = acquire_all(&state, &[&remote]).await.unwrap();
 
-        let result = acquire_all(&state, &[&remote]).await;
+        // Nessuna attesa paziente qui: questo test verifica il conflitto in
+        // sé (il messaggio), non il comportamento di attesa — quello ha i
+        // suoi test dedicati più sotto.
+        let result = acquire_all_with_patience(&state, &[&remote], Duration::ZERO, Duration::from_millis(1)).await;
         let err = result.expect_err("un lock fresco deve bloccare una seconda acquisizione");
         assert!(err.contains(&remote), "il messaggio deve nominare il remote in conflitto");
         assert!(err.contains(&this_host()), "il messaggio deve nominare chi tiene il lock");
@@ -426,8 +524,9 @@ mod tests {
 
         // Il lock è "fresco" (appena scritto): un secondo tentativo, come
         // farebbe un'altra macchina in qualunque momento durante un run
-        // ancora attivo, deve continuare a vedersi rifiutato.
-        let result = acquire_all(&state, &[&remote]).await;
+        // ancora attivo, deve continuare a vedersi rifiutato (senza attesa
+        // paziente qui: quella ha i suoi test dedicati più sotto).
+        let result = acquire_all_with_patience(&state, &[&remote], Duration::ZERO, Duration::from_millis(1)).await;
         assert!(result.is_err(), "un lock ancora attivo (rinnovato o appena acquisito) deve continuare a bloccare");
 
         release_all(&state, guards).await;
@@ -462,8 +561,13 @@ mod tests {
         let state_b = state.clone();
         let remote_b = remote.clone();
 
-        let (result_a, result_b) =
-            tokio::join!(async move { acquire_all(&state_a, &[&remote_a]).await }, async move { acquire_all(&state_b, &[&remote_b]).await });
+        // Nessuna attesa paziente: qui si vuole l'esito della gara vera e
+        // propria (chi vince tra i due tentativi ravvicinati), non
+        // l'attesa che il perdente farebbe in produzione.
+        let (result_a, result_b) = tokio::join!(
+            async move { acquire_all_with_patience(&state_a, &[&remote_a], Duration::ZERO, Duration::from_millis(1)).await },
+            async move { acquire_all_with_patience(&state_b, &[&remote_b], Duration::ZERO, Duration::from_millis(1)).await }
+        );
 
         let successes = [&result_a, &result_b].into_iter().filter(|r| r.is_ok()).count();
         assert!(successes <= 1, "due acquisizioni concorrenti non devono MAI riuscire entrambe: {result_a:?} / {result_b:?}");
@@ -480,10 +584,12 @@ mod tests {
         let remote_a = fake_remote_path(&remote_a_dir);
         let remote_b = fake_remote_path(&remote_b_dir);
 
-        // Il secondo remote è già occupato da un altro dispositivo.
+        // Il secondo remote è già occupato da un altro dispositivo. Nessuna
+        // attesa paziente qui: si vuole verificare il rollback, non
+        // aspettare che il conflitto si liberi.
         let _held = acquire_all(&state, &[&remote_b]).await.unwrap();
 
-        let result = acquire_all(&state, &[&remote_a, &remote_b]).await;
+        let result = acquire_all_with_patience(&state, &[&remote_a, &remote_b], Duration::ZERO, Duration::from_millis(1)).await;
         assert!(result.is_err(), "l'acquisizione complessiva deve fallire se anche solo un remote è occupato");
 
         // Il primo remote, acquisito con successo prima del fallimento sul
@@ -491,5 +597,46 @@ mod tests {
         // "a metà").
         let retry = acquire_all(&state, &[&remote_a]).await;
         assert!(retry.is_ok(), "il primo remote non deve restare bloccato dopo il rollback: {retry:?}");
+    }
+
+    /// Una macchina sta già sincronizzando (tiene il lock), un'altra prova
+    /// ad avviare la stessa sincronizzazione nel frattempo — invece di
+    /// fallire subito, deve aspettare e riuscire da sola appena la prima
+    /// macchina rilascia.
+    #[tokio::test]
+    async fn acquire_all_with_patience_succeeds_once_the_conflicting_lock_clears() {
+        let config_dir = TempDir::new("remote-lock-patience-config");
+        let remote_dir = TempDir::new("remote-lock-patience-remote");
+        std::fs::create_dir_all(&remote_dir.path).unwrap();
+        let state = std::sync::Arc::new(crate::rcd::build_state(config_dir.config_path()).await);
+        let remote = fake_remote_path(&remote_dir);
+
+        let guards = acquire_all(&state, &[&remote]).await.unwrap();
+
+        let release_state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            release_all(&release_state, guards).await;
+        });
+
+        let result = acquire_all_with_patience(&state, &[&remote], Duration::from_secs(2), Duration::from_millis(20)).await;
+        assert!(result.is_ok(), "deve riuscire una volta che l'altro dispositivo rilascia il lock: {result:?}");
+    }
+
+    /// Simmetrico al test sopra: se il conflitto non si libera mai entro
+    /// `max_wait`, l'attesa deve comunque arrendersi invece di restare
+    /// bloccata per sempre.
+    #[tokio::test]
+    async fn acquire_all_with_patience_gives_up_after_max_wait_if_the_conflict_never_clears() {
+        let config_dir = TempDir::new("remote-lock-patience-timeout-config");
+        let remote_dir = TempDir::new("remote-lock-patience-timeout-remote");
+        std::fs::create_dir_all(&remote_dir.path).unwrap();
+        let state = crate::rcd::build_state(config_dir.config_path()).await;
+        let remote = fake_remote_path(&remote_dir);
+
+        let _guards = acquire_all(&state, &[&remote]).await.unwrap();
+
+        let result = acquire_all_with_patience(&state, &[&remote], Duration::from_millis(150), Duration::from_millis(30)).await;
+        assert!(result.is_err(), "deve arrendersi se il conflitto non si libera mai entro max_wait");
     }
 }
