@@ -149,6 +149,17 @@ fn hide_instead_of_close(app: &tauri::AppHandle) {
 /// non sia più quello corrente (es. AppImage spostata a mano, o cambio di
 /// canale d'installazione), senza dover accendere l'autostart per un
 /// utente che non l'ha mai attivato.
+///
+/// Solo su build di rilascio (`not(debug_assertions)`, non solo AppImage:
+/// copre anche .deb/.rpm, a differenza del semplice controllo su
+/// `$APPIMAGE` di `desktop_integration.rs`, che qui non basterebbe). Una
+/// build di sviluppo (`cargo`/`npm run tauri dev`) condivide lo stesso
+/// identificatore, quindi la stessa voce di autostart, dell'installazione
+/// reale sulla stessa macchina — senza questa guardia, avviare l'app in
+/// sviluppo mentre l'autostart reale è già attivo la riscriverebbe con il
+/// percorso del build di debug (es. `target/debug/rclone-easy`), rompendo
+/// l'avvio automatico dell'installazione vera.
+#[cfg(not(debug_assertions))]
 fn heal_autostart_entry(app: &tauri::AppHandle) {
     use tauri_plugin_autostart::ManagerExt;
     let manager = app.autolaunch();
@@ -156,6 +167,9 @@ fn heal_autostart_entry(app: &tauri::AppHandle) {
         let _ = manager.enable();
     }
 }
+
+#[cfg(debug_assertions)]
+fn heal_autostart_entry(_app: &tauri::AppHandle) {}
 
 /// `RunEvent::Exit` (agganciato più sotto) scatta solo quando l'app si
 /// chiude "normalmente" attraverso il ciclo di eventi della finestra. Un
