@@ -532,6 +532,24 @@ async fn download_and_launch_winfsp_installer_windows() -> Result<(), String> {
     Ok(())
 }
 
+/// Opzioni VFS passate ad ogni mount: cache locale completa
+/// (`vfs-cache-mode full`) invece del default di rclone (nessuna cache).
+/// Senza cache ogni lettura va diretta al remote, il che supporta bene solo
+/// l'accesso sequenziale ai file — applicazioni come Word/Excel/LibreOffice
+/// aprono i propri formati (basati su ZIP) facendo seek avanti e indietro
+/// nel file, un accesso casuale che senza cache locale inizia a fallire con
+/// un errore di lettura dopo un po' (riprodotto su più remote, Google
+/// Drive e Mega, quindi non specifico di un singolo backend). Con la cache
+/// piena il file è scaricato per intero al primo accesso e le letture
+/// successive, incluso l'accesso casuale, vengono servite da disco. Il nome
+/// del campo (`CacheMode`, maiuscole/minuscole indifferenti) deve però
+/// essere esatto: `mount/mount` ignora in silenzio un campo sconosciuto
+/// invece di segnalare un errore, quindi un refuso qui non fallirebbe in
+/// modo visibile — resterebbe semplicemente senza cache.
+fn mount_vfs_options() -> serde_json::Value {
+    serde_json::json!({ "CacheMode": "full" })
+}
+
 #[tauri::command]
 pub async fn mount_now(app: AppHandle, state: tauri::State<'_, RcdState>, name: String) -> Result<(), String> {
     let config_dir = app_config_dir(&app)?;
@@ -542,10 +560,14 @@ pub async fn mount_now(app: AppHandle, state: tauri::State<'_, RcdState>, name: 
             .await?;
     }
     let result = match prepare_windows_mount_point(&mount.mount_point) {
-        Ok(()) => rcd::call(&state, "mount/mount", serde_json::json!({ "fs": mount.remote, "mountPoint": mount.mount_point }))
-            .await
-            .map(|_| ())
-            .map_err(friendly_mount_error),
+        Ok(()) => rcd::call(
+            &state,
+            "mount/mount",
+            serde_json::json!({ "fs": mount.remote, "mountPoint": mount.mount_point, "vfsOpt": mount_vfs_options() }),
+        )
+        .await
+        .map(|_| ())
+        .map_err(friendly_mount_error),
         Err(e) => Err(e),
     };
     record_mount_event(&config_dir, &name, "mount", &result);
@@ -608,9 +630,12 @@ pub(crate) async fn auto_mount_all(state: &RcdState, config_dir: &Path) {
         if prepare_windows_mount_point(&mount.mount_point).is_err() {
             continue;
         }
-        let _ =
-            rcd::call(state, "mount/mount", serde_json::json!({ "fs": mount.remote, "mountPoint": mount.mount_point }))
-                .await;
+        let _ = rcd::call(
+            state,
+            "mount/mount",
+            serde_json::json!({ "fs": mount.remote, "mountPoint": mount.mount_point, "vfsOpt": mount_vfs_options() }),
+        )
+        .await;
     }
 }
 
@@ -618,6 +643,11 @@ pub(crate) async fn auto_mount_all(state: &RcdState, config_dir: &Path) {
 mod tests {
     use super::*;
     use crate::rcd::tests::TempDir;
+
+    #[test]
+    fn mount_vfs_options_enables_full_cache_mode() {
+        assert_eq!(mount_vfs_options(), serde_json::json!({ "CacheMode": "full" }));
+    }
 
     #[test]
     fn load_from_missing_file_returns_empty() {

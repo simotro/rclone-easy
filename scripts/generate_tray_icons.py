@@ -6,9 +6,16 @@ decodificati, non PNG — questo script produce sia i .rgba consumati da
 include_bytes! sia dei .png accanto, solo per un'ispezione visiva comoda
 (non letti dal codice Rust).
 
-L'icona principale è "a maschera" (un solo colore, chiaro o scuro) e si
-adatta allo sfondo della tray in base a `tray.rs::detect_tray_base` — niente
-più tinte teal/arancio/rosso sull'icona intera. Priorità degli stati:
+L'icona principale è a tinta piena (teal, lo stesso colore d'accento
+dell'app) su qualunque sistema operativo o tema — niente rilevazione
+chiaro/scuro dello sfondo della tray: non esiste un'API cross-desktop
+affidabile per quello (ogni desktop environment tematizza il pannello a
+modo suo), e un colore di luminosità media ha di per sé un contrasto
+discreto sia su sfondi chiari che scuri, stesso principio di client come
+Nextcloud Desktop o Insync. Nessun bordo attorno al logo o ai badge: un
+doppio bordo chiaro/scuro (provato e scartato) rende l'icona sfocata alla
+dimensione reale della tray, peggio del semplice colore pieno che doveva
+migliorare. Priorità degli stati:
 
 - problema: icona col logo + badge rosso (punto esclamativo) in basso a
   destra.
@@ -37,23 +44,16 @@ OUT_DIR = ROOT / "src-tauri" / "icons" / "tray"
 WORK_SIZE = 512  # dimensione del PNG sorgente, lavora qui per bordi puliti
 FINAL_SIZE = 64  # dimensione consumata da Image::new in tray.rs
 
-# Icona "a maschera": bianca per sedere su una tray scura, quasi nera per
-# sederne su una chiara — nessuna sfumatura intermedia, stesso principio
-# delle "template image" di macOS.
-ICON_LIGHT = (255, 255, 255)
-ICON_DARK = (20, 20, 20)
+TEAL = (42, 148, 174)  # colore d'accento dell'app, coincide con --accent del frontend
 
 BADGE_YELLOW = (240, 196, 25)  # "aggiornamento disponibile"
 BADGE_RED = (207, 34, 46)  # "problema" — coincide con --error del frontend
 
 # Diametro badge relativo a WORK_SIZE: abbastanza grande da restare
-# leggibile anche schiacciato alla dimensione reale della tray, ma non tanto
-# da far sforare l'anello di contrasto oltre il bordo del canvas dato
-# BADGE_CENTER (un diametro di 0.52 lo sfora).
+# leggibile anche schiacciato alla dimensione reale della tray.
 BADGE_DIAMETER = round(WORK_SIZE * 0.46)
 BADGE_RADIUS = BADGE_DIAMETER // 2
 BADGE_CENTER = (round(WORK_SIZE * 0.74), round(WORK_SIZE * 0.74))
-RING_WIDTH = round(WORK_SIZE * 0.012)
 
 
 def recolor(base: Image.Image, rgb: tuple[int, int, int]) -> Image.Image:
@@ -65,16 +65,12 @@ def recolor(base: Image.Image, rgb: tuple[int, int, int]) -> Image.Image:
     return solid
 
 
-def draw_badge_circle(canvas: Image.Image, fill: tuple[int, int, int], ring: tuple[int, int, int]) -> ImageDraw.ImageDraw:
-    """Cerchio pieno con un anello dello stesso colore dell'icona base
-    (chiaro o scuro a seconda del tema della tray, non un bianco fisso —
-    così il badge resta "attaccato" visivamente all'icona invece di
-    introdurre un terzo colore), ritorna il ImageDraw pronto per il glifo
-    sopra."""
+def draw_badge_circle(canvas: Image.Image, fill: tuple[int, int, int]) -> ImageDraw.ImageDraw:
+    """Cerchio pieno, senza alcun bordo attorno — ritorna il ImageDraw
+    pronto per il glifo sopra."""
     draw = ImageDraw.Draw(canvas)
     cx, cy = BADGE_CENTER
     r = BADGE_RADIUS
-    draw.ellipse([cx - r - RING_WIDTH, cy - r - RING_WIDTH, cx + r + RING_WIDTH, cy + r + RING_WIDTH], fill=ring + (255,))
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=fill + (255,))
     return draw
 
@@ -134,12 +130,11 @@ BADGES: dict[str, tuple] = {
 }
 
 
-def compose(base_name: str, base_recolored: Image.Image, badge_name: str | None) -> Image.Image:
+def compose(base_recolored: Image.Image, badge_name: str | None) -> Image.Image:
     canvas = base_recolored.copy()
     if badge_name is not None:
         fill, glyph_fn = BADGES[badge_name]
-        ring = ICON_LIGHT if base_name == "light" else ICON_DARK
-        draw = draw_badge_circle(canvas, fill, ring)
+        draw = draw_badge_circle(canvas, fill)
         glyph_fn(draw)
     return canvas.resize((FINAL_SIZE, FINAL_SIZE), Image.LANCZOS)
 
@@ -173,18 +168,13 @@ def main() -> None:
     if source.size != (WORK_SIZE, WORK_SIZE):
         source = source.resize((WORK_SIZE, WORK_SIZE), Image.LANCZOS)
 
-    bases = {
-        "light": recolor(source, ICON_LIGHT),
-        "dark": recolor(source, ICON_DARK),
-    }
+    base = recolor(source, TEAL)
 
-    for base_name, base_image in bases.items():
-        for badge_name in (None, "update", "problem"):
-            suffix = f"-{badge_name}" if badge_name else ""
-            save(compose(base_name, base_image, badge_name), f"tray-{base_name}{suffix}")
+    for badge_name in (None, "update", "problem"):
+        suffix = f"-{badge_name}" if badge_name else ""
+        save(compose(base, badge_name), f"tray-ok{suffix}")
 
-    save(render_sync_icon(ICON_LIGHT), "tray-sync-light")
-    save(render_sync_icon(ICON_DARK), "tray-sync-dark")
+    save(render_sync_icon(TEAL), "tray-sync")
 
 
 if __name__ == "__main__":
