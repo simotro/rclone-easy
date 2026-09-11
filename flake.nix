@@ -28,7 +28,7 @@
           inherit version;
           src = ./.;
 
-          npmDepsHash = "sha256-l3CbIj5EitRIVUrv0WuV3weOLlstPuuONHw5j252KFI=";
+          npmDepsHash = "sha256-yPIefUGLyTiW7QRg3I+5Db2T9aoYkAxRIPsHx14VUi8=";
 
           # SvelteKit gira `svelte-kit sync` come parte della build: serve
           # scrivere in .svelte-kit/, quindi niente `dontNpmBuild`/sandbox
@@ -72,6 +72,12 @@
           postPatch = ''
             mkdir -p ../build
             cp -r ${frontend}/. ../build/
+
+            # `tauri.conf.json` ("version": "../package.json") chiede a
+            # tauri-build di leggere la versione da lì, ma qui `src` è solo
+            # `src-tauri` — `../package.json` non esiste. Basta il campo che
+            # serve, non l'intero file del repo.
+            echo '{"version": "${version}"}' > ../package.json
 
             # `tauri-build` (compilato dentro `build.rs`) verifica che il
             # sidecar dichiarato in `externalBin` esista SEMPRE a compile
