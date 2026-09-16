@@ -276,7 +276,7 @@ pub fn run() {
                 tray::show_main_window(app.handle());
             }
             #[cfg(target_os = "linux")]
-            background_portal::request_background();
+            background_portal::request_background(app.handle());
             #[cfg(target_os = "linux")]
             desktop_integration::ensure_installed();
             heal_autostart_entry(app.handle());
