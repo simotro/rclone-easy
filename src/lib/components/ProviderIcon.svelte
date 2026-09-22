@@ -30,7 +30,7 @@
   justify-content: center;
   width: 2.3em;
   height: 2.3em;
-  border-radius: 8px;
+  border-radius: 10px;
   color: #ffffff;
   font-size: 0.72em;
   font-weight: 700;

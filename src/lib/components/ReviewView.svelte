@@ -163,7 +163,7 @@
   flex-direction: column;
   gap: 0.5em;
   padding: 0.6em 0.8em;
-  border-radius: 8px;
+  border-radius: 10px;
   background-color: var(--surface-tint);
 }
 

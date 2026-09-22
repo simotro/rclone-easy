@@ -190,7 +190,7 @@ select {
   font-family: inherit;
   font-size: 1em;
   padding: 0.5em 0.7em;
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid var(--border-color);
   background-color: var(--bg-surface);
   color: var(--text-color);
@@ -214,7 +214,7 @@ select {
 }
 
 button {
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid transparent;
   padding: 0.5em 1em;
   font-size: 0.9em;
@@ -338,7 +338,7 @@ button:disabled {
    componenti, non ha senso tenerla scoped a uno solo. */
 .inline-warning {
   padding: 0.8em 1em;
-  border-radius: 8px;
+  border-radius: 10px;
   background-color: var(--warning-bg);
   color: var(--warning-text);
   font-size: 0.9em;
@@ -364,7 +364,7 @@ button:disabled {
   align-items: center;
   gap: 0.4em;
   padding: 0.4em 0.6em;
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid var(--border-color);
   font-size: 0.9em;
 }
@@ -380,7 +380,7 @@ button:disabled {
 
 .conflict-box {
   padding: 0.6em 0.8em;
-  border-radius: 6px;
+  border-radius: 8px;
   background-color: var(--warning-bg);
   color: var(--warning-text);
   font-size: 0.85em;

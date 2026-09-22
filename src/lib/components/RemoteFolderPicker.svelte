@@ -94,7 +94,7 @@
   border: none;
   box-shadow: none;
   padding: 0.5em 0.6em;
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--text-color);
   font-weight: 400;
 }

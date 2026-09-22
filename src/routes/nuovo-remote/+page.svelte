@@ -942,7 +942,7 @@
   width: 100%;
   text-align: left;
   padding: 0.9em 1.1em;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid transparent;
   background-color: var(--bg-surface);
   box-shadow: var(--shadow-md);
@@ -990,7 +990,7 @@
   justify-content: center;
   gap: 0.5em;
   padding: 1em 0.6em;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid transparent;
   background-color: var(--bg-surface);
   box-shadow: var(--shadow-md);
@@ -1017,7 +1017,7 @@
   flex-direction: column;
   gap: 0.7em;
   padding: 0.9em 1.1em;
-  border-radius: 8px;
+  border-radius: 10px;
   background-color: var(--accent-bg);
 }
 
@@ -1051,7 +1051,7 @@
   font-family: "Cascadia Code", "Fira Code", monospace;
   background-color: var(--code-bg);
   padding: 0.1em 0.4em;
-  border-radius: 4px;
+  border-radius: 6px;
 }
 
 .link-button.inline {
@@ -1062,7 +1062,7 @@
 
 .oauth-wait {
   padding: 0.9em 1.1em;
-  border-radius: 8px;
+  border-radius: 10px;
   background-color: var(--accent-bg);
 }
 

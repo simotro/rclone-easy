@@ -192,7 +192,7 @@
 .startup-warning {
   margin-top: 1em;
   padding: 0.7em 1em;
-  border-radius: 8px;
+  border-radius: 10px;
   background-color: var(--warning-bg);
   color: var(--warning-text);
   font-size: 0.9em;

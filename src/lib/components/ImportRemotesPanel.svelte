@@ -204,7 +204,7 @@ code {
   font-family: "Cascadia Code", "Fira Code", monospace;
   background-color: var(--code-bg);
   padding: 0.1em 0.4em;
-  border-radius: 4px;
+  border-radius: 6px;
 }
 
 .select-all {
@@ -227,7 +227,7 @@ code {
   align-items: center;
   gap: 0.75em;
   padding: 0.5em 0.7em;
-  border-radius: 6px;
+  border-radius: 8px;
   background-color: var(--bg-surface);
   box-shadow: var(--shadow-sm);
 }

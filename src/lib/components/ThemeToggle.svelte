@@ -69,7 +69,7 @@
   align-items: center;
   gap: 0.5em;
   padding: 0.5em 0.9em;
-  border-radius: 0.6em;
+  border-radius: 0.7em;
   border: 1px solid transparent;
   background-color: var(--accent-bg);
   color: var(--accent);
@@ -106,7 +106,7 @@
   flex-direction: column;
   min-width: 11em;
   padding: 0.4em;
-  border-radius: 0.7em;
+  border-radius: 0.8em;
   border: 1px solid var(--border-color-subtle);
   background-color: var(--bg-surface);
   box-shadow: var(--shadow-md);
@@ -117,7 +117,7 @@
   align-items: center;
   gap: 0.7em;
   padding: 0.5em 0.7em;
-  border-radius: 0.5em;
+  border-radius: 0.6em;
   border: none;
   box-shadow: none;
   background: transparent;

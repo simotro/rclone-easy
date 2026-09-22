@@ -395,7 +395,7 @@
   width: 100%;
   text-align: left;
   padding: 0.9em 1.1em;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid transparent;
   background-color: var(--bg-surface);
   box-shadow: var(--shadow-md);
@@ -451,7 +451,7 @@
 
 .oauth-wait {
   padding: 0.9em 1.1em;
-  border-radius: 8px;
+  border-radius: 10px;
   background-color: var(--accent-bg);
   margin-top: 1.5em;
 }

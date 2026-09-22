@@ -415,7 +415,7 @@
 
 <style>
 .remote-row {
-  border-radius: 8px;
+  border-radius: 10px;
   background-color: var(--bg-surface);
   box-shadow: var(--shadow-md);
   padding: 0.8em 1em;
@@ -595,7 +595,7 @@
   flex-direction: column;
   min-width: 11em;
   padding: 0.35em;
-  border-radius: 10px;
+  border-radius: 12px;
   border: 1px solid var(--border-color-subtle);
   background-color: var(--bg-surface);
   box-shadow: var(--shadow-icon-hover);
@@ -608,7 +608,7 @@
   width: 100%;
   padding: 0.55em 0.7em;
   border: none;
-  border-radius: 7px;
+  border-radius: 9px;
   background: none;
   box-shadow: none;
   color: var(--text-color);

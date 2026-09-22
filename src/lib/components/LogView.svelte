@@ -47,7 +47,7 @@
   gap: 0.35em;
   padding: 0.3em 0.6em;
   font-size: 0.78em;
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid var(--border-color-subtle);
   background-color: var(--bg-surface);
   color: var(--text-color);
@@ -69,7 +69,7 @@
   font-family: monospace;
   font-size: 0.8em;
   background-color: var(--surface-tint);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 0.7em 0.9em;
   /* Spazio per il pulsante copia sovrapposto in alto a destra, non deve
      coprire la prima riga di log. */

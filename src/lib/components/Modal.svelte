@@ -67,7 +67,7 @@
 .dialog {
   display: flex;
   flex-direction: column;
-  border-radius: 10px;
+  border-radius: 12px;
   width: min(30em, 92vw);
   /* Alzato da 85vh: con la finestra di default (vedi tauri.conf.json,
      780px di altezza) lasciava troppo poco spazio verticale al contenuto

@@ -1044,7 +1044,7 @@
   align-items: center;
   gap: 0.5em;
   padding: 0.6em 1em;
-  border-radius: 10px;
+  border-radius: 12px;
   border: 1px solid var(--border-color-subtle);
   background-color: var(--surface-tint);
   color: var(--text-muted);
