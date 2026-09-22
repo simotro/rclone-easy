@@ -52,6 +52,13 @@ jobs:
       - name: Scarica il binario rclone incluso nell'app
         run: ./scripts/fetch-rclone-sidecar.sh
 
+      - name: Prepara l'hook GTK per l'AppImage senza GDK_BACKEND=x11
+        # tauri-bundler scarica linuxdeploy-plugin-gtk.sh da GitHub solo se
+        # non lo trova gia` in ~/.cache/tauri/ (crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy.rs).
+        # Mettendolo qui prima della build usa la nostra copia (scripts/linuxdeploy-plugin-gtk.sh)
+        # invece di quella originale, che forzerebbe GDK_BACKEND=x11 a ogni avvio.
+        run: mkdir -p ~/.cache/tauri && install -m 755 scripts/linuxdeploy-plugin-gtk.sh ~/.cache/tauri/linuxdeploy-plugin-gtk.sh
+
       - name: Build
         run: npm run tauri build
 

@@ -61,6 +61,13 @@ jobs:
       - name: Scrive la versione della release in tauri.conf.json
         run: jq --arg v "${{ inputs.version }}" '.version = $v' src-tauri/tauri.conf.json > /tmp/tauri.conf.json && mv /tmp/tauri.conf.json src-tauri/tauri.conf.json
 
+      - name: Prepara l'hook GTK per l'AppImage senza GDK_BACKEND=x11
+        # tauri-bundler scarica linuxdeploy-plugin-gtk.sh da GitHub solo se
+        # non lo trova gia` in ~/.cache/tauri/ (crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy.rs).
+        # Mettendolo qui prima della build usa la nostra copia (scripts/linuxdeploy-plugin-gtk.sh)
+        # invece di quella originale, che forzerebbe GDK_BACKEND=x11 a ogni avvio.
+        run: mkdir -p ~/.cache/tauri && install -m 755 scripts/linuxdeploy-plugin-gtk.sh ~/.cache/tauri/linuxdeploy-plugin-gtk.sh
+
       - name: Build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
