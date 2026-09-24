@@ -4,12 +4,8 @@ use std::sync::Mutex;
 /// controllo — il controllo vero e la vera installazione restano lato JS
 /// (plugin updater di Tauri, `updates.svelte.ts`), qui si rispecchia solo lo
 /// stato per la tray (`tray.rs`), che altrimenti non avrebbe modo di saperlo
-/// senza duplicare tutta la logica di controllo/salta versione già gestita
-/// lato frontend. `None` quando non c'è nulla da segnalare: nessun
-/// aggiornamento trovato, oppure la versione trovata è stata esplicitamente
-/// saltata dall'utente (il frontend segnala `null` in quel caso, vedi
-/// `updates.svelte.ts::skipUpdate`) — un controllo manuale successivo la
-/// rimanda comunque, indipendentemente da questo stato.
+/// senza duplicare tutta la logica lato frontend. `None` quando non c'è
+/// nulla da segnalare.
 #[derive(Default)]
 pub struct UpdateState(Mutex<Option<String>>);
 
@@ -23,6 +19,35 @@ impl UpdateState {
 pub fn report_update_available(state: tauri::State<'_, UpdateState>, version: Option<String>) {
     *state.0.lock().unwrap() = version;
 }
+
+const FIRST_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
+const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+/// Controlla gli aggiornamenti dal backend, anche a finestra chiusa: senza
+/// questo il badge nella tray comparirebbe solo dopo aver aperto la finestra
+/// (il controllo vero e proprio, con la possibilità di installare, resta nel
+/// frontend). Serve solo a far sapere alla tray che c'è una versione nuova.
+/// Solo nelle build di rilascio: in sviluppo la versione dell'app non è
+/// significativa e non si vuole toccare la rete.
+#[cfg(not(debug_assertions))]
+pub(crate) fn spawn_background_check(app: tauri::AppHandle) {
+    use tauri::Manager;
+    use tauri_plugin_updater::UpdaterExt;
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(FIRST_CHECK_DELAY).await;
+        loop {
+            if let Ok(updater) = app.updater() {
+                if let Ok(Some(update)) = updater.check().await {
+                    *app.state::<UpdateState>().0.lock().unwrap() = Some(update.version);
+                }
+            }
+            tokio::time::sleep(CHECK_EVERY).await;
+        }
+    });
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn spawn_background_check(_app: tauri::AppHandle) {}
 
 #[cfg(test)]
 mod tests {

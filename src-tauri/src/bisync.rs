@@ -118,6 +118,9 @@ pub(crate) fn load_from_dir(config_dir: &Path) -> Result<Vec<BisyncJob>, String>
 }
 
 fn save_to_dir(config_dir: &Path, jobs: &[BisyncJob]) -> Result<(), String> {
+    // Un job nuovo o modificato (es. intervallo automatico attivato) va
+    // osservato dal watcher subito, non al prossimo giro di rilettura.
+    crate::watcher::request_reconcile();
     std::fs::create_dir_all(config_dir)
         .map_err(|e| format!("impossibile creare '{}': {e}", config_dir.display()))?;
     let file = BisyncFile { jobs: jobs.to_vec() };

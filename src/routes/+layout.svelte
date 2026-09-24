@@ -27,6 +27,18 @@
       .catch(() => (unlockState = "unlocked"));
   });
 
+  // La finestra viene distrutta alla chiusura (libera la webview) e
+  // ricreata da tray.rs: gli eventi emessi subito dopo la creazione
+  // (Configura, Impostazioni, Aggiornamento) aspettano questo segnale, dato
+  // quando la pagina e i suoi ascoltatori sono attivi — vedi
+  // tray.rs::emit_to_ui. Il ritardo lascia il tempo ai componenti figli di
+  // registrare i loro `listen`, asincroni.
+  $effect(() => {
+    if (unlockState === "loading") return;
+    const id = setTimeout(() => invoke("frontend_ready").catch(() => {}), 400);
+    return () => clearTimeout(id);
+  });
+
   // Cliccando "Configura" o una voce di avviso nel menu della tray, il
   // backend porta la finestra in primo piano ed emette questo evento — a
   // livello di layout (non più per-riga in RemoteRow.svelte) perché ora

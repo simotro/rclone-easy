@@ -111,12 +111,15 @@ static TRAY_NOTICE_SHOWN: std::sync::Once = std::sync::Once::new();
 /// di client come Dropbox/Insync) — il demone rclone e i futuri job restano
 /// attivi, si esce davvero solo dalla voce "Esci" del menu della tray
 /// (`tray::build_tray`).
-fn hide_instead_of_close(app: &tauri::AppHandle) {
+pub(crate) fn hide_instead_of_close(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(tray::MAIN_WINDOW_LABEL) else { return };
     let app_handle = app.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
+            // Distrugge la finestra invece di nasconderla: libera il
+            // processo WebKit (oltre metà della memoria dell'app). Si
+            // ricrea alla prossima apertura da tray.
             tray::hide_main_window(&app_handle);
             TRAY_NOTICE_SHOWN.call_once(|| {
                 // Thread OS a parte, non il thread/task chiamante: stessa
@@ -263,15 +266,14 @@ pub fn run() {
             app.manage(rcd_state);
             app.manage(PendingOAuthAnswer::default());
             app.manage(UpdateState::default());
+            update_state::spawn_background_check(app.handle().clone());
             #[cfg(unix)]
             spawn_signal_shutdown_handler(app.handle().clone());
             tray::build_tray(app.handle());
-            hide_instead_of_close(app.handle());
-            // La finestra parte nascosta (`tauri.conf.json`, `visible:
-            // false`) per evitare un lampo "appare e poi sparisce subito"
-            // quando l'utente ha scelto di avviare ridotta a icona — la si
-            // mostra qui esplicitamente solo se quella preferenza non è
-            // attiva.
+            // La finestra non viene creata da Tauri all'avvio
+            // (`tauri.conf.json`, `create: false`): se l'utente ha scelto di
+            // avviare ridotta a icona non si carica proprio la webview, la si
+            // crea solo quando serve (`tray::create_main_window`).
             if !app_settings::load_from_dir(&config_dir).start_minimized {
                 tray::show_main_window(app.handle());
             }
@@ -365,6 +367,7 @@ pub fn run() {
             set_config_password,
             remove_config_password,
             hide_window,
+            tray::frontend_ready,
             get_app_settings,
             set_start_minimized,
             open_url_in_browser,
@@ -375,6 +378,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
+            // Senza finestre (webview distrutta alla chiusura) Tauri
+            // chiederebbe l'uscita: l'app deve restare in tray. L'uscita
+            // vera passa da `tray::perform_quit` (`process::exit`).
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            }
             // Terminazione esplicita del demone rclone rcd: kill_on_drop da
             // solo non è affidabile perché Tauri non garantisce che il Drop
             // dello stato giri alla chiusura normale dell'app (verificato

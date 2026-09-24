@@ -3,9 +3,11 @@
   import { listen } from "@tauri-apps/api/event";
   import Modal from "./Modal.svelte";
   import { t } from "$lib/i18n";
-  import { updateState, checkForUpdates, skipUpdate, isUpdateModalOpen, setUpdateModalOpen } from "$lib/updates.svelte";
+  import { updateState, checkForUpdates, isUpdateModalOpen, setUpdateModalOpen } from "$lib/updates.svelte";
 
-  const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 21h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  // Stesso badge della tray (`scripts/generate_tray_icons.py`): cerchio
+  // giallo con freccia in su scura.
+  const UPDATE_ICON = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10.5" fill="#f0c419"/><path d="M12 5.5 17.5 12H14v6.5h-4V12H6.5z" fill="#282200"/></svg>`;
 
   const RELEASES_URL = "https://github.com/simotro/rclone-easy/releases/latest";
 
@@ -98,7 +100,7 @@
 
 {#if updateState().status === "available"}
   <button type="button" class="update-trigger" title={$t("update.available")} aria-label={$t("update.available")} onclick={() => setUpdateModalOpen(true)}>
-    {@html DOWNLOAD_ICON}
+    {@html UPDATE_ICON}
   </button>
 
   <Modal bind:open={isUpdateModalOpen, setUpdateModalOpen} title={$t("update.title")}>
@@ -128,7 +130,6 @@
             <p class="hint">{downloadPercent !== null ? $t("update.downloadingPercent", { values: { percent: downloadPercent } }) : $t("update.installing")}</p>
           {/if}
           <div class="actions">
-            <button type="button" class="link-button" onclick={skipUpdate} disabled={installing}>{$t("update.skipVersion")}</button>
             {#if s.installKind === "appimage" || s.installKind === "windows"}
               <button type="button" onclick={installNow} disabled={installing}>
                 {installing ? $t("update.installing") : $t("update.installNow")}
@@ -146,17 +147,15 @@
 <style>
 .update-trigger {
   background: none;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--border-color);
   box-shadow: none;
   padding: 0.5em;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--accent);
 }
 
 .update-trigger:hover {
-  color: var(--text-color);
   border-color: var(--text-color);
 }
 
@@ -186,7 +185,7 @@
 .actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
 }
 
 .ready-hint {

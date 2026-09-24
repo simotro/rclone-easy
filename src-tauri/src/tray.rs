@@ -1,7 +1,9 @@
 use crate::rcd::RcdState;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::sync::Notify;
 use tauri::{
     image::Image,
     menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
@@ -85,7 +87,7 @@ const SYNC_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-sync.rgba");
 /// quando lo stato cambia davvero (vedi `watch_activity`), non ad ogni giro.
 const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 /// Intervallo di ricostruzione del menu — vedi `watch_menu`.
-const MENU_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+const MENU_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Handle salvato come stato gestito da Tauri per poterne cambiare icona e
 /// menu più avanti (`watch_activity`/`watch_menu`) — `TrayIconBuilder::build`
@@ -258,9 +260,25 @@ fn tooltip_for(badge: Badge) -> &'static str {
 /// una vera app Tauri.
 async fn watch_activity(app: AppHandle) {
     let mut current: Option<Badge> = None;
+    // `last_run_failed` legge e decodifica dal disco tutti i job: lo si
+    // ricalcola solo quando cambia lo stato "in esecuzione" (una corsa
+    // appena finita ha appena scritto la sua cronologia) e comunque ogni
+    // tanto, per coprire modifiche fatte da fuori.
+    const FAILED_RECHECK_EVERY: u32 = 30;
+    let mut was_running: Option<bool> = None;
+    let mut failed = false;
+    let mut ticks_since_check = 0u32;
 
     loop {
-        let badge = badge_for(last_run_failed(&app), pending_update(&app).is_some(), any_job_running());
+        let running = any_job_running();
+        ticks_since_check += 1;
+        if was_running != Some(running) || ticks_since_check >= FAILED_RECHECK_EVERY {
+            failed = last_run_failed(&app);
+            was_running = Some(running);
+            ticks_since_check = 0;
+        }
+
+        let badge = badge_for(failed, pending_update(&app).is_some(), running);
 
         if current != Some(badge) {
             set_tray_icon(&app, icon_bytes_for(badge));
@@ -280,6 +298,7 @@ async fn watch_activity(app: AppHandle) {
 /// prima di montare, quindi deve essere anche il gate per "Monta" qui, pena
 /// mostrarlo abilitato e farlo comunque fallire al click) e se la sua
 /// ultima esecuzione registrata è fallita (voce di avviso in cima al menu).
+#[derive(PartialEq)]
 struct JobStatus {
     name: String,
     auto_active: bool,
@@ -294,7 +313,7 @@ struct JobStatus {
 /// applicato altrove), quindi al più tre voci nel suo sottomenu. Un remote
 /// con tutti e tre i campi a `None` non ha ancora nulla di configurato:
 /// `build_remote_submenu` gli mostra "Configura" al posto delle azioni.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 struct RemoteActions {
     /// `(nome, montato ora, punto di mount)` — il punto di mount serve alla
     /// voce "Apri cartella", mostrata solo quando `montato ora` è vero
@@ -439,12 +458,11 @@ fn build_remote_submenu(app: &AppHandle, remote_name: &str, actions: &RemoteActi
 /// in una funzione tutta sincrona: non sono `Send`, non possono
 /// attraversare un punto di sospensione dentro il task spawnato da
 /// `watch_menu`.
-async fn build_dynamic_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
-    let remotes = match app.path().app_config_dir() {
+async fn collect_remotes(app: &AppHandle) -> Vec<(String, RemoteActions)> {
+    match app.path().app_config_dir() {
         Ok(config_dir) => collect_remote_actions(app, &config_dir).await,
         Err(_) => Vec::new(),
-    };
-    build_menu_from_remotes(app, &remotes)
+    }
 }
 
 /// Etichetta di una voce di avviso in cima al menu per un remote la cui
@@ -496,11 +514,19 @@ fn build_menu_from_remotes(app: &AppHandle, remotes: &[(String, RemoteActions)])
 }
 
 async fn watch_menu(app: AppHandle) {
+    // Il menu si ricostruisce e si reimposta (con relativo giro sul bus di
+    // sistema) solo quando qualcosa di ciò che mostra è cambiato.
+    let mut shown: Option<(Vec<(String, RemoteActions)>, Option<String>)> = None;
     loop {
-        if let Ok(menu) = build_dynamic_menu(&app).await {
-            if let Some(tray) = app.try_state::<TrayHandle>() {
-                let _ = tray.0.set_menu(Some(menu));
+        let remotes = collect_remotes(&app).await;
+        let snapshot = (remotes, pending_update(&app));
+        if shown.as_ref() != Some(&snapshot) {
+            if let Ok(menu) = build_menu_from_remotes(&app, &snapshot.0) {
+                if let Some(tray) = app.try_state::<TrayHandle>() {
+                    let _ = tray.0.set_menu(Some(menu));
+                }
             }
+            shown = Some(snapshot);
         }
         tokio::time::sleep(MENU_REFRESH_INTERVAL).await;
     }
@@ -645,31 +671,104 @@ pub fn hide_window(app: AppHandle) {
 /// sospeso quando la finestra passa da nascosta a visibile — richiesta
 /// esplicita di Simone (19/8/2026): non farlo scoprire solo aprendo
 /// l'app "a caso", visto che l'icona ambra nella tray già lo segnala.
-/// Nessun effetto se la finestra era già visibile (viene solo nascosta).
+/// Nessun effetto se la finestra era già visibile (viene solo chiusa).
 fn toggle_main_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else { return };
-    if window.is_visible().unwrap_or(false) {
+    if app.get_webview_window(MAIN_WINDOW_LABEL).is_some() {
         hide_main_window(app);
+    } else if pending_update(app).is_some() {
+        emit_to_ui(app, OPEN_UPDATE_EVENT, ());
     } else {
         show_main_window(app);
-        if pending_update(app).is_some() {
-            let _ = app.emit(OPEN_UPDATE_EVENT, ());
-        }
     }
 }
 
-pub(crate) fn show_main_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else { return };
-    let _ = window.show();
-    let _ = window.set_focus();
+/// `true` quando il frontend della finestra corrente ha registrato i suoi
+/// ascoltatori di eventi — vedi `frontend_ready`. Riportato a `false` ad
+/// ogni ricreazione della finestra.
+static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
+static FRONTEND_READY_NOTIFY: Notify = Notify::const_new();
+
+/// Chiamato da `+layout.svelte` quando la pagina è montata e gli
+/// ascoltatori di eventi sono attivi: sblocca gli eventi in attesa di una
+/// finestra appena ricreata (`emit_to_ui`).
+#[tauri::command]
+pub fn frontend_ready() {
+    FRONTEND_READY.store(true, Ordering::SeqCst);
+    FRONTEND_READY_NOTIFY.notify_waiters();
 }
 
-/// Nasconde la finestra principale. Punto unico usato sia dal toggle della
-/// tray sia dall'intercettazione della chiusura
+/// Crea la finestra principale dalla configurazione di `tauri.conf.json`
+/// (dove `create: false` impedisce che venga creata all'avvio) e la mostra.
+/// La finestra viene distrutta, non solo nascosta, quando si chiude — il
+/// processo WebKit da solo pesa oltre metà della memoria dell'app.
+///
+/// Da chiamare fuori dal thread degli eventi (vedi `show_main_window`):
+/// creare una finestra da un handler sincrono può bloccarsi su Windows.
+pub(crate) fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    let Some(config) = app.config().app.windows.first().cloned() else { return Ok(()) };
+    FRONTEND_READY.store(false, Ordering::SeqCst);
+    let window = tauri::WebviewWindowBuilder::from_config(app, &config)?.build()?;
+    crate::hide_instead_of_close(app);
+    let _ = window.show();
+    let _ = window.set_focus();
+    Ok(())
+}
+
+pub(crate) fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = create_main_window(&app) {
+            eprintln!("impossibile ricreare la finestra principale: {e}");
+        }
+    });
+}
+
+/// Chiude la finestra principale liberando la webview. Punto unico usato sia
+/// dal toggle della tray sia dall'intercettazione della chiusura
 /// (`lib.rs::hide_instead_of_close`).
 pub(crate) fn hide_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else { return };
-    let _ = window.hide();
+    let _ = window.destroy();
+}
+
+/// Porta la finestra in primo piano ed emette un evento verso il frontend.
+/// Se la finestra va ricreata, l'evento resta in attesa che il frontend
+/// segnali `frontend_ready` (altrimenti andrebbe perso), con un tetto di
+/// tempo per non restare appeso se la pagina non si carica.
+fn emit_to_ui<S: serde::Serialize + Clone + Send + 'static>(app: &AppHandle, event: &'static str, payload: S) {
+    if app.get_webview_window(MAIN_WINDOW_LABEL).is_some() {
+        show_main_window(app);
+        let _ = app.emit(event, payload);
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = create_main_window(&app) {
+            eprintln!("impossibile ricreare la finestra principale: {e}");
+            return;
+        }
+        let wait = async {
+            loop {
+                let notified = FRONTEND_READY_NOTIFY.notified();
+                if FRONTEND_READY.load(Ordering::SeqCst) {
+                    break;
+                }
+                notified.await;
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(10), wait).await;
+        let _ = app.emit(event, payload);
+    });
 }
 
 /// Porta la finestra in primo piano e notifica il frontend (`+layout.svelte`,
@@ -677,24 +776,21 @@ pub(crate) fn hide_main_window(app: &AppHandle) {
 /// indicato, aprendola sulla cronologia se si veniva da una voce di avviso —
 /// vedi `on_menu_event` per "Configura" e le voci di avviso.
 fn focus_remote(app: &AppHandle, remote: &str, open_history: bool) {
-    show_main_window(app);
-    let _ = app.emit(FOCUS_REMOTE_EVENT, serde_json::json!({ "remote": remote, "openHistory": open_history }));
+    emit_to_ui(app, FOCUS_REMOTE_EVENT, serde_json::json!({ "remote": remote, "openHistory": open_history }));
 }
 
 /// Porta la finestra in primo piano e chiede al frontend (`SettingsButton.svelte`,
 /// in ascolto su `OPEN_SETTINGS_EVENT`) di aprire il modal Impostazioni —
 /// voce "Impostazioni" del menu della tray.
 fn open_settings(app: &AppHandle) {
-    show_main_window(app);
-    let _ = app.emit(OPEN_SETTINGS_EVENT, ());
+    emit_to_ui(app, OPEN_SETTINGS_EVENT, ());
 }
 
 /// Porta la finestra in primo piano e chiede al frontend (`UpdateButton.svelte`,
 /// in ascolto su `OPEN_UPDATE_EVENT`) di aprire direttamente il modal di
 /// aggiornamento — voce "⬆ Aggiornamento disponibile" del menu della tray.
 fn open_update(app: &AppHandle) {
-    show_main_window(app);
-    let _ = app.emit(OPEN_UPDATE_EVENT, ());
+    emit_to_ui(app, OPEN_UPDATE_EVENT, ());
 }
 
 #[cfg(test)]

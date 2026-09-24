@@ -3,6 +3,7 @@ use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -18,7 +19,22 @@ const DEBOUNCE: Duration = Duration::from_secs(8);
 /// `bisync.toml` per aggiornare le cartelle osservate (job aggiunti,
 /// rimossi o modificati) e controlla se qualche cartella "calda" ha
 /// raggiunto il periodo di quiete.
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+/// Impostato quando i file dei job vengono riscritti (`request_reconcile`):
+/// il prossimo giro rilegge subito le cartelle da osservare invece di
+/// aspettare `RECONCILE_EVERY_TICKS`.
+static RECONCILE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Chiede al watcher di rileggere i job al prossimo giro (entro
+/// `TICK_INTERVAL`) — chiamato da `jobs.rs`/`bisync.rs` a ogni salvataggio,
+/// così un job nuovo o con l'intervallo automatico appena attivato viene
+/// osservato subito.
+pub(crate) fn request_reconcile() {
+    RECONCILE_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+const TICK_INTERVAL: Duration = Duration::from_secs(2);
+/// Ogni quanti giri di `TICK_INTERVAL` si rileggono i job dal disco.
+const RECONCILE_EVERY_TICKS: u32 = 5;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum WatchedJob {
@@ -273,10 +289,17 @@ pub(crate) fn spawn(app: AppHandle, config_dir: PathBuf) {
     }
 
     tauri::async_runtime::spawn(async move {
+        // `trigger_due` lavora solo in memoria, `reconcile` rilegge i file
+        // di configurazione dal disco: lo si fa più di rado.
+        let mut ticks = RECONCILE_EVERY_TICKS;
         loop {
-            tokio::time::sleep(RECONCILE_INTERVAL).await;
-            reconcile(&config_dir);
+            if ticks >= RECONCILE_EVERY_TICKS || RECONCILE_REQUESTED.swap(false, Ordering::SeqCst) {
+                reconcile(&config_dir);
+                ticks = 0;
+            }
+            ticks += 1;
             trigger_due(&app, &config_dir);
+            tokio::time::sleep(TICK_INTERVAL).await;
         }
     });
 }

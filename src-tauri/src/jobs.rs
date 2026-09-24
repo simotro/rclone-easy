@@ -128,6 +128,9 @@ pub(crate) fn load_from_dir(config_dir: &Path) -> Result<Vec<SyncJob>, String> {
 }
 
 fn save_to_dir(config_dir: &Path, jobs: &[SyncJob]) -> Result<(), String> {
+    // Un job nuovo o modificato (es. intervallo automatico attivato) va
+    // osservato dal watcher subito, non al prossimo giro di rilettura.
+    crate::watcher::request_reconcile();
     std::fs::create_dir_all(config_dir)
         .map_err(|e| format!("impossibile creare '{}': {e}", config_dir.display()))?;
     let file = JobsFile { jobs: jobs.to_vec() };
