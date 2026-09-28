@@ -396,13 +396,8 @@ fn command_exists_in_path(bin: &str) -> bool {
 /// robusto delle tante varianti/derivate (es. CachyOS è basata su Arch e usa
 /// pacman, ma il suo `/etc/os-release` non contiene "arch"), e funziona
 /// anche su distro non esplicitamente elencate purché usino uno dei gestori
-/// noti. NixOS è un caso a parte, controllato per primo: lì non esiste un
-/// concetto di "installa questo pacchetto adesso" a runtime, la dipendenza
-/// va dichiarata nella configurazione di sistema.
+/// noti.
 fn linux_fuse_install_hint() -> String {
-    if Path::new("/etc/NIXOS").exists() {
-        return "su NixOS aggiungi \"fuse3\" a environment.systemPackages nella configurazione di sistema (o prova subito con \"nix-shell -p fuse3\"), poi applica la configurazione".to_string();
-    }
     let managers: &[(&str, &str)] =
         &[("apt", "sudo apt install fuse3"), ("dnf", "sudo dnf install fuse3"), ("pacman", "sudo pacman -S fuse3"), ("zypper", "sudo zypper install fuse3")];
     for (bin, cmd) in managers {

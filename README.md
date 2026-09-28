@@ -33,22 +33,6 @@ Rclone Easy usa la configurazione nativa di rclone (`rclone.conf`), salvata in `
 
 Nessuna firma del codice per ora: Windows mostrerà l'avviso SmartScreen ("Windows ha protetto il tuo PC") al primo avvio — clicca "Ulteriori informazioni" poi "Esegui comunque". macOS non è ancora supportato.
 
-### Nix / home-manager
-
-Il repository espone un [flake](flake.nix) con un pacchetto Nix (Linux, x86_64/aarch64), non ancora presente in nixpkgs. Build/avvio diretto:
-
-```bash
-nix run github:simotro/rclone-easy
-```
-
-Per installarlo in modo permanente con home-manager, aggiungilo come input del tuo flake:
-
-```nix
-inputs.rclone-easy.url = "github:simotro/rclone-easy";
-```
-
-e poi `inputs.rclone-easy.packages.${system}.default` in `home.packages`.
-
 ### Compilare da sorgente
 
 ```bash
