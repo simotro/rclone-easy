@@ -20,9 +20,6 @@ pub fn report_update_available(state: tauri::State<'_, UpdateState>, version: Op
     *state.0.lock().unwrap() = version;
 }
 
-const FIRST_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
-const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
-
 /// Controlla gli aggiornamenti dal backend, anche a finestra chiusa: senza
 /// questo il badge nella tray comparirebbe solo dopo aver aperto la finestra
 /// (il controllo vero e proprio, con la possibilità di installare, resta nel
@@ -33,6 +30,8 @@ const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 *
 pub(crate) fn spawn_background_check(app: tauri::AppHandle) {
     use tauri::Manager;
     use tauri_plugin_updater::UpdaterExt;
+    const FIRST_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
+    const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_CHECK_DELAY).await;
         loop {

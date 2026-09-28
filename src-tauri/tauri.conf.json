@@ -15,7 +15,7 @@
         "title": "rclone-easy",
         "width": 800,
         "height": 780,
-        "decorations": false,
+        "decorations": true,
         "visible": false,
         "create": false
       }
