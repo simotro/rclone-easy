@@ -59,8 +59,11 @@ jobs:
         # invece di quella originale, che forzerebbe GDK_BACKEND=x11 a ogni avvio.
         run: mkdir -p ~/.cache/tauri && install -m 755 scripts/linuxdeploy-plugin-gtk.sh ~/.cache/tauri/linuxdeploy-plugin-gtk.sh
 
+      # Build di prova: nessun file .sig per l'updater. La chiave privata di
+      # firma è disponibile solo in release.yml, e questi installer non
+      # vengono mai offerti come aggiornamento (vedi tauri.test-build.conf.json).
       - name: Build
-        run: npm run tauri build
+        run: npm run tauri build -- --config src-tauri/tauri.test-build.conf.json
 
       # Tre artefatti separati e non uno solo con tutto dentro: chi scarica
       # per testare (es. su Arch/CachyOS, dove .deb/.rpm non si installano)

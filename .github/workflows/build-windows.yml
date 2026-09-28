@@ -41,8 +41,12 @@ jobs:
       # Policy, qui non necessario). Il download del runtime WebView2 se
       # mancante è già il comportamento di default di Tauri, nessuna
       # configurazione aggiuntiva richiesta.
+      #
+      # Build di prova: nessun file .sig per l'updater. La chiave privata di
+      # firma è disponibile solo in release.yml, e questi installer non
+      # vengono mai offerti come aggiornamento (vedi tauri.test-build.conf.json).
       - name: Build
-        run: npm run tauri build -- --bundles nsis
+        run: npm run tauri build -- --bundles nsis --config src-tauri/tauri.test-build.conf.json
 
       - name: Carica l'installer
         uses: actions/upload-artifact@v7
