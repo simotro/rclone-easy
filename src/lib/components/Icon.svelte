@@ -2,7 +2,7 @@
   let {
     kind,
   }: {
-    kind: "mount" | "backup" | "bisync" | "edit" | "delete" | "eye" | "eye-off" | "quit" | "copy" | "settings" | "add" | "trash" | "restore" | "more";
+    kind: "mount" | "backup" | "bisync" | "edit" | "delete" | "eye" | "eye-off" | "copy" | "settings" | "add" | "trash" | "restore" | "more";
   } = $props();
 </script>
 
@@ -83,11 +83,6 @@
     <circle cx="12" cy="5" r="1.9" />
     <circle cx="12" cy="12" r="1.9" />
     <circle cx="12" cy="19" r="1.9" />
-  </svg>
-{:else if kind === "quit"}
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-    <line x1="6" y1="6" x2="18" y2="18" />
-    <line x1="18" y1="6" x2="6" y2="18" />
   </svg>
 {/if}
 

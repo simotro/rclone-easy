@@ -47,7 +47,7 @@ async function reportToTray(version: string | null): Promise<void> {
 }
 
 // Solo in sviluppo: `VITE_FAKE_UPDATE=9.9.9 npm run tauri dev` simula un
-// aggiornamento disponibile (icona nella barra del titolo, badge e voce
+// aggiornamento disponibile (icona nella striscia in alto, badge e voce
 // nella tray, modal) senza toccare la rete. L'installazione vera fallisce
 // con un messaggio esplicito. Nelle build di rilascio `import.meta.env.DEV`
 // è falso e questo ramo sparisce.

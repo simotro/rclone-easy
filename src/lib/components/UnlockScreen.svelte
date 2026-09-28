@@ -49,9 +49,9 @@
   align-items: center;
   justify-content: center;
   /* 100% e non 100vh: questo elemento vive dentro `.app-body` di
-     +layout.svelte, che occupa già lo spazio rimasto sotto la striscia
-     trascinabile in alto — 100vh (l'intera finestra) trabocca di quella
-     striscia, causando uno scroll indesiderato. */
+     +layout.svelte, che è già alto quanto lo spazio disponibile: 100vh
+     non tiene conto di eventuali elementi sopra e causerebbe uno scroll
+     indesiderato. */
   min-height: 100%;
   padding: 1.5em;
 }

@@ -58,10 +58,6 @@
     "checkNow": "Check now",
     "updateNow": "Update now"
   },
-  "windowControls": {
-    "hideTitle": "Hide the window — Rclone Easy keeps running in the background, look for its icon in the system tray",
-    "hideAria": "Hide the window"
-  },
   "unlock": {
     "subtitle": "The configuration is password-protected. Enter it to continue.",
     "passwordLabel": "Password",

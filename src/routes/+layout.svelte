@@ -9,7 +9,6 @@
   import LanguageToggle from "$lib/components/LanguageToggle.svelte";
   import AboutButton from "$lib/components/AboutButton.svelte";
   import UpdateButton from "$lib/components/UpdateButton.svelte";
-  import WindowControls from "$lib/components/WindowControls.svelte";
   import UnlockScreen from "$lib/components/UnlockScreen.svelte";
 
   let { children } = $props();
@@ -64,34 +63,19 @@
 </script>
 
 <div class="app-shell">
-  <!-- Unica area trascinabile della finestra (niente più barra del titolo
-       nativa, vedi tauri.conf.json/tray.rs): una striscia dedicata invece
-       di marcare pezzi sparsi dell'interfaccia — tentativo precedente,
-       abbandonato perché su WebKitGTK marcare un antenato di un modal
-       (`.remote-list`) rompeva il posizionamento `position: fixed` dei
-       suoi discendenti (il modal si centrava sulla lista invece che sulla
-       finestra). Una striscia isolata, senza contenuto applicativo sotto,
-       non corre questo rischio. `WindowControls` (nascondi in tray) sempre
-       presente, indipendentemente dallo stato di sblocco — l'unico modo,
-       oltre alla tray, di agire sulla finestra (un secondo pulsante per
-       l'uscita vera creava confusione, tolto: resta solo in "Esci" nel
-       menu della tray). Lingua, tema e informazioni sull'app invece
-       restano disponibili solo a sblocco avvenuto, come già prima — e
-       vanno prima di `WindowControls` nel markup: `.title-bar` è
-       allineata a destra (`justify-content: flex-end`), quindi l'ordine
-       nel DOM è l'ordine visivo da sinistra a destra (lingua, poi tema,
-       poi informazioni sull'app, poi controlli finestra; il pulsante
-       Impostazioni vive invece sulla home, accanto ad "Aggiungi remote" —
-       vedi +page.svelte). -->
-  <div class="title-bar" data-tauri-drag-region>
-    {#if unlockState === "unlocked"}
+  <!-- Striscia dei controlli globali (lingua, tema, aggiornamenti,
+       informazioni sull'app), presente su ogni pagina ma solo a sblocco
+       avvenuto. L'ordine nel DOM è l'ordine visivo da sinistra a destra,
+       perché la striscia è allineata a destra. Il pulsante Impostazioni vive
+       invece sulla home, accanto ad "Aggiungi remote" (vedi +page.svelte). -->
+  {#if unlockState === "unlocked"}
+    <div class="toolbar">
       <LanguageToggle />
       <ThemeToggle />
       <UpdateButton />
       <AboutButton />
-    {/if}
-    <WindowControls />
-  </div>
+    </div>
+  {/if}
 
   <div class="app-body">
     {#if unlockState === "loading"}
@@ -112,30 +96,14 @@
   flex-direction: column;
   /* `height` (non `min-height`): con solo un minimo, una pagina più alta
      della finestra faceva crescere l'intero shell oltre i 100vh, ed era il
-     documento a scorrere — trascinando con sé `.title-bar` (bug segnalato
-     da Simone il 19/8/2026: finestra non più raggiungibile per spostarla o
-     chiuderla una volta scorsa via). Bloccando l'altezza qui e lasciando
-     scorrere solo `.app-body` sotto, la barra resta sempre visibile e
-     cliccabile. */
+     documento a scorrere, trascinando con sé `.toolbar`. Bloccando
+     l'altezza qui e lasciando scorrere solo `.app-body` sotto, la striscia
+     resta sempre visibile. */
   height: 100vh;
   overflow: hidden;
-  /* Senza barra del titolo nativa (`decorations: false` — scelta
-     definitiva: un bug di tao su KDE/Wayland rende il pulsante X non
-     cliccabile con le decorazioni native attive, fix upstream non ancora
-     disponibile nella versione di Tauri usata qui) la finestra non ha più
-     un bordo/ombra propri forniti dal window manager, e si confonde con lo
-     sfondo del desktop dietro di essa. Un bordo sottile disegnato da noi
-     risolve senza riaprire la questione delle decorazioni.
-     `box-sizing: border-box` tiene il bordo dentro il budget di
-     `height: 100vh` invece di sommarcisi sopra — stessa cautela già
-     presa per il margine di default di `body` (vedi shared-styles.css),
-     che causava una scrollbar ingiustificata per un motivo simile. */
-  box-sizing: border-box;
-  border: 1px solid var(--border-color);
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
 }
 
-.title-bar {
+.toolbar {
   flex-shrink: 0;
   display: flex;
   align-items: center;

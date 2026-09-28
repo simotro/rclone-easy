@@ -26,7 +26,6 @@ use interactive_remote::{answer_oauth_question, cancel_oauth, create_remote_inte
 mod onedrive_recovery;
 
 mod tray;
-use tray::hide_window;
 
 mod app_settings;
 use app_settings::{get_app_settings, set_start_minimized};
@@ -366,7 +365,6 @@ pub fn run() {
             config_password_status,
             set_config_password,
             remove_config_password,
-            hide_window,
             tray::frontend_ready,
             get_app_settings,
             set_start_minimized,

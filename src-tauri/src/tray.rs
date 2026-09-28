@@ -632,14 +632,10 @@ fn notify_done(app: &AppHandle, name: &str, prefix: &str) {
 }
 
 /// Non usa `app.exit(0)`: quello passa dal normale ciclo eventi di Tauri/
-/// tao, che sul bug Wayland/KDE con le decorazioni CSD (vedi il commento su
-/// `tauri.conf.json::decorations`) può restare bloccato se la finestra è
-/// nello stato "decorazioni non responsive" (osservato: "Esci" dal tray in
-/// quello stato lasciava l'app in uno stato inconsistente, serviva killarla
-/// a mano). Spegnere il demone e terminare direttamente il processo —
-/// stesso schema già usato per SIGTERM in `spawn_signal_shutdown_handler`
-/// (`lib.rs`) — garantisce l'uscita anche se il loop eventi della finestra
-/// è bloccato.
+/// tao, e se il loop eventi della finestra è bloccato l'app non esce.
+/// Spegnere il demone e terminare direttamente il processo, come per
+/// SIGTERM in `spawn_signal_shutdown_handler` (`lib.rs`), garantisce
+/// l'uscita in ogni caso.
 fn perform_quit(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -651,20 +647,6 @@ fn perform_quit(app: &AppHandle) {
         crate::rcd::shutdown(&state).await;
         std::process::exit(0);
     });
-}
-
-/// Nasconde la finestra dall'interfaccia stessa — da quando la finestra non
-/// ha più una barra del titolo nativa (bug Wayland/KDE aggirato eliminando
-/// del tutto le decorazioni CSD, vedi `tauri.conf.json`), la X non esiste
-/// più: questo bottone in `+layout.svelte` la sostituisce con lo stesso
-/// comportamento (nasconde in tray, l'app resta attiva) di `SHOW_HIDE_ID`.
-/// Niente equivalente in-app per l'uscita vera (era un secondo comando
-/// `quit_app`, tolto perché due pulsanti confondevano l'utente) — resta
-/// raggiungibile solo da "Esci" nel menu della tray (`QUIT_ID` sopra,
-/// tramite `perform_quit`).
-#[tauri::command]
-pub fn hide_window(app: AppHandle) {
-    hide_main_window(&app);
 }
 
 /// Mostra direttamente il modal di aggiornamento se c'è un aggiornamento in

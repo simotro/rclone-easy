@@ -58,10 +58,6 @@
     "checkNow": "Controlla ora",
     "updateNow": "Aggiorna adesso"
   },
-  "windowControls": {
-    "hideTitle": "Nascondi la finestra — Rclone Easy resta attivo in background, trovi l'icona nella tray di sistema",
-    "hideAria": "Nascondi la finestra"
-  },
   "unlock": {
     "subtitle": "La configurazione è protetta da una password. Inseriscila per continuare.",
     "passwordLabel": "Password",
