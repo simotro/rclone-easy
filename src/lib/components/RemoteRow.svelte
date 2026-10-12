@@ -216,6 +216,26 @@
   // che apre sta dentro lo stesso contenitore.
   let moreMenuOpen = $state(false);
   let moreMenuEl: HTMLDivElement | undefined = $state();
+  // Il pannello è posizionato in modo assoluto dentro un contenitore con
+  // `overflow-y: auto` (la lista dei remote): sull'ultima riga verrebbe
+  // tagliato. Se sotto non c'è spazio per l'altezza stimata del pannello,
+  // si apre verso l'alto.
+  const MORE_MENU_HEIGHT_PX = 110;
+  let moreMenuUp = $state(false);
+
+  function toggleMoreMenu() {
+    if (!moreMenuOpen && moreMenuEl) {
+      let bottom = window.innerHeight;
+      for (let el = moreMenuEl.parentElement; el; el = el.parentElement) {
+        const overflowY = getComputedStyle(el).overflowY;
+        if (overflowY === "auto" || overflowY === "scroll" || overflowY === "hidden") {
+          bottom = Math.min(bottom, el.getBoundingClientRect().bottom);
+        }
+      }
+      moreMenuUp = moreMenuEl.getBoundingClientRect().bottom + MORE_MENU_HEIGHT_PX > bottom;
+    }
+    moreMenuOpen = !moreMenuOpen;
+  }
 
   $effect(() => {
     function onDocClick(event: MouseEvent) {
@@ -362,12 +382,12 @@
           title={$t("remoteRow.moreActions")}
           aria-haspopup="menu"
           aria-expanded={moreMenuOpen}
-          onclick={() => (moreMenuOpen = !moreMenuOpen)}
+          onclick={toggleMoreMenu}
         >
           <Icon kind="more" />
         </button>
         {#if moreMenuOpen}
-          <div class="more-menu-panel" role="menu">
+          <div class="more-menu-panel" class:up={moreMenuUp} role="menu">
             <a
               class="more-menu-item"
               role="menuitem"
@@ -427,7 +447,6 @@
   justify-content: space-between;
   align-items: center;
   gap: 1em;
-  flex-wrap: wrap;
 }
 
 .remote-info {
@@ -435,6 +454,8 @@
   flex-direction: column;
   gap: 0.15em;
   min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
 }
 
 .remote-name {
@@ -597,8 +618,13 @@
   padding: 0.35em;
   border-radius: 12px;
   border: 1px solid var(--border-color-subtle);
-  background-color: var(--bg-surface);
+  background-color: var(--bg-menu);
   box-shadow: var(--shadow-icon-hover);
+}
+
+.more-menu-panel.up {
+  top: auto;
+  bottom: calc(100% + 0.4em);
 }
 
 .more-menu-item {
@@ -627,7 +653,7 @@
 }
 
 .more-menu-item.danger:hover:not(:disabled) {
-  color: var(--bg-surface);
+  color: var(--bg-menu);
   background-color: var(--status-red);
 }
 

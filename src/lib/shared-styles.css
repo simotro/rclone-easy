@@ -28,6 +28,7 @@
   --text-muted: #666;
   --bg-page: #f6f6f6;
   --bg-surface: #ffffff;
+  --bg-menu: #ffffff;
   --surface-tint: rgba(0, 0, 0, 0.05);
   --border-color: #ccc;
   --border-color-subtle: rgba(0, 0, 0, 0.15);
@@ -74,6 +75,7 @@
     --text-muted: #aaa;
     --bg-page: #2f2f2f;
     --bg-surface: #0f0f0f98;
+    --bg-menu: #1e1e1e;
     --surface-tint: rgba(255, 255, 255, 0.08);
     --border-color: #444;
     --border-color-subtle: rgba(255, 255, 255, 0.2);
@@ -103,6 +105,7 @@
   --text-muted: #aaa;
   --bg-page: #2f2f2f;
   --bg-surface: #0f0f0f98;
+  --bg-menu: #1e1e1e;
   --surface-tint: rgba(255, 255, 255, 0.08);
   --border-color: #444;
   --border-color-subtle: rgba(255, 255, 255, 0.2);
@@ -131,6 +134,7 @@
   --text-muted: #666;
   --bg-page: #f6f6f6;
   --bg-surface: #ffffff;
+  --bg-menu: #ffffff;
   --surface-tint: rgba(0, 0, 0, 0.05);
   --border-color: #ccc;
   --border-color-subtle: rgba(0, 0, 0, 0.15);

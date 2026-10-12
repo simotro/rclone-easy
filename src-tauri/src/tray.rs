@@ -595,10 +595,44 @@ fn dispatch_action(app: &AppHandle, id: &str) {
             // mount (che in più apre la cartella, ma senza notifica
             // l'utente resterebbe comunque incerto se il click fosse partito).
             Ok(Ok(())) => notify_done(&app, &name, &prefix),
-            Ok(Err(message)) => notify_error(&app, &name, &message),
-            Err(_) => notify_error(&app, &name, "l'operazione si è interrotta inaspettatamente, riprova"),
+            Ok(Err(message)) => report_error(&app, &name, &prefix, &message),
+            Err(_) => report_error(&app, &name, &prefix, "l'operazione si è interrotta inaspettatamente, riprova"),
         }
     });
+}
+
+/// Oltre alla notifica, porta in primo piano la finestra sulla Cronologia del
+/// remote coinvolto, così l'errore è visibile senza che l'utente debba
+/// aprire l'interfaccia da sé.
+fn report_error(app: &AppHandle, name: &str, prefix: &str, message: &str) {
+    notify_error(app, name, message);
+    if let Some(remote) = remote_of_action(app, name, prefix) {
+        focus_remote(app, &remote, true);
+    } else {
+        show_main_window(app);
+    }
+}
+
+/// Risale al remote a cui appartiene l'azione `prefix` + `name` (nome di un
+/// mount, di un backup o di un bisync).
+fn remote_of_action(app: &AppHandle, name: &str, prefix: &str) -> Option<String> {
+    let config_dir = app.path().app_config_dir().ok()?;
+    let remote = match prefix {
+        MOUNT_PREFIX | UNMOUNT_PREFIX => {
+            let m = crate::mounts::load_from_dir(&config_dir).ok()?.into_iter().find(|m| m.name == name)?;
+            remote_name_of(&m.remote)?.to_string()
+        }
+        BACKUP_PREFIX => {
+            let j = crate::jobs::load_from_dir(&config_dir).ok()?.into_iter().find(|j| j.name == name)?;
+            remote_name_of(&j.source).or_else(|| remote_name_of(&j.destination))?.to_string()
+        }
+        BISYNC_PREFIX => {
+            let j = crate::bisync::load_from_dir(&config_dir).ok()?.into_iter().find(|j| j.name == name)?;
+            remote_name_of(&j.path1).or_else(|| remote_name_of(&j.path2))?.to_string()
+        }
+        _ => return None,
+    };
+    Some(remote)
 }
 
 /// Entrambe le notifiche sotto girano su un thread OS a parte, non nel task
