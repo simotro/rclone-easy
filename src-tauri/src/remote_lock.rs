@@ -44,6 +44,26 @@ const STALE_AFTER_SECS: u64 = 30 * 60;
 /// il lock: restano comunque 2 tentativi di margine prima della soglia).
 const RENEW_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
+/// Nonce dei lock che questo processo tiene attualmente. Serve a riconoscere
+/// un lock "orfano" scritto da questa stessa macchina ma che nessun run in
+/// corso possiede più: l'ultimo rinnovo periodico può infatti essere ancora
+/// in volo verso il demone mentre il run finisce, e riscrivere il file
+/// subito dopo che `release_all` lo ha cancellato. Senza distinguerlo, il
+/// run successivo lo prenderebbe per un conflitto con un altro dispositivo
+/// e resterebbe in attesa fino a `STALE_AFTER_SECS` senza fare nulla.
+fn held_nonces() -> &'static std::sync::Mutex<std::collections::HashSet<u64>> {
+    static HELD: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// `true` se `content` è stato scritto da questa macchina ma non da un lock
+/// attualmente posseduto da questo processo. Una sola istanza dell'app può
+/// girare per volta (plugin single-instance), quindi un lock con il nostro
+/// hostname e un nonce sconosciuto non può appartenere a un run in corso.
+fn is_own_orphan(content: &LockContent) -> bool {
+    content.host == this_host() && !held_nonces().lock().unwrap().contains(&content.nonce)
+}
+
 fn now_unix() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -87,6 +107,7 @@ struct LockContent {
 #[derive(Debug)]
 pub(crate) struct RemoteLockGuard {
     remote: String,
+    nonce: u64,
     renew_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -261,7 +282,7 @@ async fn try_acquire_once(info: &ConnectionInfo, remote: &str) -> Result<RemoteL
             // di sovrascrivere un lock legittimo solo perché una singola
             // lettura è fallita per un problema di rete transitorio.
             None => false,
-            Some(c) => now_unix().saturating_sub(c.acquired_at_unix) > STALE_AFTER_SECS,
+            Some(c) => is_own_orphan(c) || now_unix().saturating_sub(c.acquired_at_unix) > STALE_AFTER_SECS,
         };
         if !is_stale {
             return Err(LockError::Conflict(conflict_message(remote, content.as_ref())));
@@ -300,7 +321,8 @@ async fn try_acquire_once(info: &ConnectionInfo, remote: &str) -> Result<RemoteL
     match confirmed {
         Some(c) if c == our_content => {
             let renew_handle = spawn_renewal(info.clone(), remote.to_string(), lock_path, nonce);
-            Ok(RemoteLockGuard { remote: remote.to_string(), renew_handle })
+            held_nonces().lock().unwrap().insert(nonce);
+            Ok(RemoteLockGuard { remote: remote.to_string(), nonce, renew_handle })
         }
         other => Err(LockError::Conflict(conflict_message(remote, other.as_ref()))),
     }
@@ -425,9 +447,12 @@ async fn acquire_all_with_patience(
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) async fn release_all(state: &RcdState, guards: Vec<RemoteLockGuard>) {
+    for guard in &guards {
+        guard.renew_handle.abort();
+        held_nonces().lock().unwrap().remove(&guard.nonce);
+    }
     let Ok(info) = rcd::connection_info(state).await else { return };
     for guard in guards {
-        guard.renew_handle.abort();
         let fs = format!("{}:", guard.remote);
         let lock_path = lock_path_for(&guard.remote);
         let _ = tokio::time::timeout(RELEASE_TIMEOUT, info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": lock_path }))).await;
@@ -446,6 +471,33 @@ mod tests {
     /// identicamente contro una cartella locale reale.
     fn fake_remote_path(dir: &TempDir) -> String {
         dir.path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_lock_from_this_host_that_nobody_holds_is_an_orphan() {
+        let orphan = LockContent { host: this_host(), acquired_at_unix: now_unix(), nonce: 987_654_321 };
+        assert!(is_own_orphan(&orphan));
+        held_nonces().lock().unwrap().insert(987_654_321);
+        assert!(!is_own_orphan(&orphan), "un lock che questo processo tiene davvero non è orfano");
+        held_nonces().lock().unwrap().remove(&987_654_321);
+        let other = LockContent { host: "altro-pc".to_string(), acquired_at_unix: now_unix(), nonce: 5 };
+        assert!(!is_own_orphan(&other), "un lock di un altro dispositivo non va mai preso");
+    }
+
+    #[tokio::test]
+    async fn an_orphan_lock_left_by_this_host_does_not_block_acquisition() {
+        let config_dir = TempDir::new("remote-lock-orphan-config");
+        let remote_dir = TempDir::new("remote-lock-orphan-remote");
+        std::fs::create_dir_all(&remote_dir.path).unwrap();
+        let state = crate::rcd::build_state(config_dir.config_path()).await;
+        let remote = fake_remote_path(&remote_dir);
+
+        let info = rcd::connection_info(&state).await.unwrap();
+        let orphan = LockContent { host: this_host(), acquired_at_unix: now_unix(), nonce: 424_242 };
+        write_lock(&info, &remote, &lock_path_for(&remote), &orphan).await.unwrap();
+
+        let guards = acquire_all_with_patience(&state, &[&remote], Duration::from_millis(200), Duration::from_millis(20)).await;
+        assert!(guards.is_ok(), "il lock orfano di questa macchina va ripreso subito, senza attendere la scadenza");
     }
 
     #[tokio::test]

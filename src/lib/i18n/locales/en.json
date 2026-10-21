@@ -215,7 +215,15 @@
     "deleteConfirmQuestion": "Do you really want to delete this remote?",
     "irreversible": "This action cannot be undone.",
     "deleting": "Deleting…",
-    "saveChanges": "Save changes"
+    "saveChanges": "Save changes",
+    "autoResyncedReason": "The first attempt failed with: {reason}",
+    "progress": {
+      "waitingLock": "Waiting for {remote} to become free (in use by another device or a sync that just finished)…",
+      "preparing": "preparing",
+      "comparing": "comparing files",
+      "applying": "applying changes",
+      "finishing": "finishing"
+    }
   },
   "remotePanel": {
     "tabConfigure": "Configure",

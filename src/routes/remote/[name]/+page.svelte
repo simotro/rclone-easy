@@ -52,7 +52,14 @@
     // Stesso intervallo della home, per lo stesso motivo (countdown della
     // prossima esecuzione automatica ragionevolmente aggiornato).
     const id = setInterval(loadServices, 10000);
-    return () => clearInterval(id);
+    // Durante una sincronizzazione l'avanzamento va aggiornato più spesso.
+    const fast = setInterval(() => {
+      if (bisyncJobs.some((j) => j.isRunning)) loadServices();
+    }, 2000);
+    return () => {
+      clearInterval(id);
+      clearInterval(fast);
+    };
   });
 </script>
 

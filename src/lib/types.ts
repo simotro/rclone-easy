@@ -44,6 +44,15 @@ export type BisyncRunEntry = {
   log: string;
   needsForce: boolean;
   autoResynced: boolean;
+  resyncReason: string;
+};
+
+export type BisyncProgress = {
+  phase: "waitingLock" | "preparing" | "comparing" | "applying" | "finishing";
+  detail: string | null;
+  feed: { kind: "phase" | "queued" | "queuedDelete" | "start" | "done" | "delete" | "error"; direction: string; text: string; size: number | null }[];
+  queuedTotal: number;
+  transferring: { name: string; size: number; bytes: number; direction: "upload" | "download" | "sync" }[];
 };
 
 export type BisyncDryRunReport = {
@@ -88,4 +97,5 @@ export type BisyncJob = {
   lastDryRun: BisyncDryRunReport | null;
   isRunning: boolean;
   isDryRunning: boolean;
+  progress: BisyncProgress | null;
 };

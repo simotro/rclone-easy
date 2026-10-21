@@ -945,8 +945,11 @@
                 {/if}
                 {#if entry.autoResynced}
                   <p class="hint">{$t("remoteRow.autoResyncedHint")}</p>
+                  {#if entry.resyncReason}
+                    <p class="hint">{$t("remoteRow.autoResyncedReason", { values: { reason: entry.resyncReason } })}</p>
+                  {/if}
                 {/if}
-                {#if !entry.success}
+                {#if !entry.success || entry.autoResynced}
                   <LogView text={entry.log || entry.message} />
                   {#if entry.needsForce && index === 0}
                     <div class="inline-warning">

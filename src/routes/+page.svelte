@@ -74,7 +74,14 @@
     // non pesare (tre chiamate IPC leggere ogni 10s, indipendentemente da
     // quanti remote ci sono).
     const id = setInterval(loadServices, 10000);
-    return () => clearInterval(id);
+    // Durante una sincronizzazione l'avanzamento va aggiornato più spesso.
+    const fast = setInterval(() => {
+      if (bisyncJobs.some((j) => j.isRunning)) loadServices();
+    }, 2000);
+    return () => {
+      clearInterval(id);
+      clearInterval(fast);
+    };
   });
 </script>
 

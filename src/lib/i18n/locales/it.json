@@ -215,7 +215,15 @@
     "deleteConfirmQuestion": "Vuoi davvero eliminare questo remote?",
     "irreversible": "L'operazione non è reversibile.",
     "deleting": "Eliminazione…",
-    "saveChanges": "Salva modifiche"
+    "saveChanges": "Salva modifiche",
+    "autoResyncedReason": "Il primo tentativo è fallito con: {reason}",
+    "progress": {
+      "waitingLock": "In attesa che {remote} si liberi (in uso da un altro dispositivo o da una sincronizzazione appena conclusa)…",
+      "preparing": "preparazione",
+      "comparing": "confronto dei file",
+      "applying": "applicazione delle modifiche",
+      "finishing": "completamento"
+    }
   },
   "remotePanel": {
     "tabConfigure": "Configura",

@@ -78,6 +78,13 @@ pub struct BisyncRunResult {
     /// salvate su disco prima di questo campo.
     #[serde(default)]
     pub auto_resynced: bool,
+    /// Messaggio d'errore del primo tentativo, quello che ha reso necessario
+    /// il resync automatico — vuoto se non c'è stato. Senza questo il
+    /// motivo originale andava perso: la voce di cronologia riportava solo
+    /// l'esito del secondo tentativo. Il log completo del primo tentativo
+    /// è in testa a `log`.
+    #[serde(default)]
+    pub resync_reason: String,
 }
 
 /// `BisyncJob` unito allo stato live "in esecuzione ora" — stesso principio
@@ -94,6 +101,9 @@ pub struct BisyncJobEntry {
     pub last_dry_run: Option<BisyncDryRunReport>,
     pub is_running: bool,
     pub is_dry_running: bool,
+    /// Cosa sta facendo il run in corso — `None` se il job non è in
+    /// esecuzione. Solo stato live, mai salvato su disco.
+    pub progress: Option<BisyncProgress>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -286,6 +296,230 @@ fn now_unix() -> u64 {
 /// limite di lunghezza del filesystem con percorsi non banali (osservato
 /// durante lo sviluppo: "file name too long" con un percorso di test
 /// nidificato).
+/// Quante righe recenti del flusso di eventi tenere — un resync su un albero
+/// grande ne produce decine di migliaia, inutili da conservare tutte e
+/// costose da serializzare a ogni aggiornamento; i totali restano esatti
+/// (`BisyncProgress::queued_total`).
+const MAX_FEED_LINES: usize = 150;
+
+/// Una modifica che bisync ha deciso di applicare e messo in coda.
+/// `direction`: `upload` (verso il remote), `download` (verso la cartella
+/// locale) oppure `sync` quando i due lati sono dello stesso tipo.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedChange {
+    /// `copy` oppure `delete`.
+    pub action: String,
+    pub direction: String,
+    pub path: String,
+}
+
+/// Una riga del flusso di eventi del run in corso, mostrato come un
+/// terminale. `kind`: `phase`, `queued`, `start`, `done`, `delete` o
+/// `error`; `text` è il percorso (o il messaggio per `phase`/`error`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedEntry {
+    pub kind: String,
+    pub direction: String,
+    pub text: String,
+    /// Dimensione in byte, solo per `start`.
+    pub size: Option<u64>,
+}
+
+impl FeedEntry {
+    fn new(kind: &str, direction: &str, text: impl Into<String>) -> Self {
+        FeedEntry { kind: kind.to_string(), direction: direction.to_string(), text: text.into(), size: None }
+    }
+}
+
+/// Un file in trasferimento in questo momento.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferringFile {
+    pub name: String,
+    pub size: u64,
+    pub bytes: u64,
+    pub direction: String,
+}
+
+/// Stato live di un run di bisync, ricostruito leggendo in diretta il log
+/// JSON di `rclone bisync` (messaggi "Queue copy to ..." e statistiche
+/// periodiche `--stats`).
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BisyncProgress {
+    /// `waitingLock`, `preparing`, `comparing`, `applying` o `finishing`.
+    pub phase: String,
+    /// Solo per `waitingLock`: chi sta tenendo occupato il remote.
+    pub detail: Option<String>,
+    /// Ultime righe del flusso di eventi, dalla più vecchia alla più recente.
+    pub feed: Vec<FeedEntry>,
+    pub queued_total: usize,
+    pub transferring: Vec<TransferringFile>,
+    /// File già comparsi in `transferring`, per annunciarli una volta sola.
+    #[serde(skip)]
+    seen_transfers: std::collections::HashSet<String>,
+}
+
+impl BisyncProgress {
+    fn push_feed(&mut self, entry: FeedEntry) {
+        self.feed.push(entry);
+        if self.feed.len() > MAX_FEED_LINES {
+            self.feed.remove(0);
+        }
+    }
+
+    fn enter_phase(&mut self, phase: &str) {
+        if self.phase != phase {
+            self.phase = phase.to_string();
+            self.push_feed(FeedEntry::new("phase", "", phase));
+        }
+    }
+}
+
+fn progress_map() -> &'static std::sync::Mutex<std::collections::HashMap<String, BisyncProgress>> {
+    static PROGRESS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, BisyncProgress>>> =
+        std::sync::OnceLock::new();
+    PROGRESS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn set_phase(name: &str, phase: &str, detail: Option<String>) {
+    let mut map = progress_map().lock().unwrap();
+    let entry = map.entry(name.to_string()).or_default();
+    entry.phase = phase.to_string();
+    entry.detail = detail;
+}
+
+fn clear_progress(name: &str) {
+    progress_map().lock().unwrap().remove(name);
+}
+
+fn progress_of(name: &str) -> Option<BisyncProgress> {
+    progress_map().lock().unwrap().get(name).cloned()
+}
+
+/// `true` per un percorso sul disco locale (assoluto, o comunque senza il
+/// `remote:` iniziale).
+fn is_local_path(path: &str) -> bool {
+    Path::new(path).is_absolute() || !path.contains(':')
+}
+
+fn direction_to(dest: &str, other: &str) -> &'static str {
+    match (is_local_path(dest), is_local_path(other)) {
+        (true, false) => "download",
+        (false, true) => "upload",
+        _ => "sync",
+    }
+}
+
+/// Toglie dal percorso mostrato da rclone la radice del lato a cui si
+/// riferisce, così l'utente vede il percorso dentro la cartella sincronizzata.
+fn relative_to_root<'a>(path: &'a str, root: &str) -> &'a str {
+    let root = root.trim_end_matches('/');
+    match path.strip_prefix(root) {
+        Some(rest) if !root.is_empty() && rest.starts_with('/') => rest.trim_start_matches('/'),
+        _ => path,
+    }
+}
+
+/// Interpreta un messaggio "Queue copy to PathN" / "Queue delete" di bisync.
+fn parse_queue_line(msg: &str, path1: &str, path2: &str) -> Option<QueuedChange> {
+    let clean = strip_ansi(msg);
+    let idx = clean.find("Queue ")?;
+    let (head, tail) = (&clean[..idx], &clean[idx + "Queue ".len()..]);
+    let side_of = |text: &str| -> Option<u8> {
+        let after = &text[text.find("Path")? + "Path".len()..];
+        after.chars().next()?.to_digit(10).map(|d| d as u8)
+    };
+    let (action, side, rest) = if let Some(rest) = tail.strip_prefix("copy to ") {
+        ("copy", side_of(rest)?, &rest["Path1".len()..])
+    } else if let Some(rest) = tail.strip_prefix("delete") {
+        ("delete", side_of(head)?, rest)
+    } else {
+        return None;
+    };
+    let shown = rest.trim_start().strip_prefix("- ")?.trim();
+    let (own, other) = if side == 1 { (path1, path2) } else { (path2, path1) };
+    Some(QueuedChange {
+        action: action.to_string(),
+        direction: direction_to(own, other).to_string(),
+        path: relative_to_root(shown, own).to_string(),
+    })
+}
+
+/// Aggiorna `progress` con una riga del log JSON. Restituisce `true` se la
+/// riga è una statistica periodica (`--stats`): serve solo ad aggiornare lo
+/// stato live e non va conservata nel log del run.
+fn update_progress_from_line(progress: &mut BisyncProgress, line: &str, path1: &str, path2: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { return false };
+
+    if let Some(stats) = value.get("stats") {
+        let transferring: Vec<TransferringFile> = stats
+            .get("transferring")
+            .and_then(|t| t.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        Some(TransferringFile {
+                            name: item.get("name")?.as_str()?.to_string(),
+                            size: item.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+                            bytes: item.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+                            direction: direction_to(
+                                item.get("dstFs").and_then(|v| v.as_str()).unwrap_or(""),
+                                item.get("srcFs").and_then(|v| v.as_str()).unwrap_or(""),
+                            )
+                            .to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for file in &transferring {
+            if progress.seen_transfers.insert(file.name.clone()) {
+                let mut entry = FeedEntry::new("start", &file.direction, file.name.clone());
+                entry.size = Some(file.size);
+                progress.push_feed(entry);
+            }
+        }
+        progress.transferring = transferring;
+        return true;
+    }
+
+    let level = value.get("level").and_then(|l| l.as_str()).unwrap_or("info");
+    let Some(msg) = value.get("msg").and_then(|m| m.as_str()) else { return false };
+    let clean = strip_ansi(msg);
+    if level == "error" || level == "warning" {
+        progress.push_feed(FeedEntry::new("error", "", clean.chars().take(300).collect::<String>()));
+        return false;
+    }
+    if let Some(change) = parse_queue_line(msg, path1, path2) {
+        progress.queued_total += 1;
+        let kind = if change.action == "delete" { "queuedDelete" } else { "queued" };
+        progress.push_feed(FeedEntry::new(kind, &change.direction, change.path));
+        return false;
+    }
+    if let Some(object) = value.get("object").and_then(|o| o.as_str()) {
+        if clean.starts_with("Copied") {
+            progress.push_feed(FeedEntry::new("done", "", object));
+            return false;
+        }
+        if clean.starts_with("Deleted") {
+            progress.push_feed(FeedEntry::new("delete", "", object));
+            return false;
+        }
+    }
+    if clean.contains("Applying changes") {
+        progress.enter_phase("applying");
+    } else if clean.contains("Updating listings") {
+        progress.enter_phase("finishing");
+    } else if clean.contains("Building Path1 and Path2 listings") || clean.contains("checking for diffs") {
+        progress.enter_phase("comparing");
+    }
+    false
+}
+
 fn workdir_for(config_dir: &Path, name: &str) -> PathBuf {
     config_dir.join("bisync-workdirs").join(name)
 }
@@ -397,6 +631,25 @@ fn extract_error_message(stderr: &str) -> Option<String> {
     last_error.or(last_any_msg).or(last_raw_line)
 }
 
+/// Prima riga di livello "error" del log, con il file a cui si riferisce
+/// (campo `object` del log JSON) quando c'è. Di solito è la causa vera di un
+/// fallimento, mentre l'ultima riga — quella che rclone riporta come
+/// risultato finale — è un generico "Must run --resync to recover".
+fn first_error_with_object(stderr: &str) -> Option<String> {
+    for line in stderr.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        if value.get("level").and_then(|l| l.as_str()) != Some("error") {
+            continue;
+        }
+        let msg = strip_ansi(value.get("msg").and_then(|m| m.as_str())?);
+        return Some(match value.get("object").and_then(|o| o.as_str()) {
+            Some(object) if !object.is_empty() => format!("{object}: {msg}"),
+            _ => msg,
+        });
+    }
+    None
+}
+
 /// `true` se il messaggio d'errore indica esplicitamente che serve un nuovo
 /// resync prima di poter riprovare (rclone lo segnala chiaramente, es.
 /// "Bisync aborted. Must run --resync to recover.") — usato per far ripartire
@@ -423,6 +676,9 @@ fn error_suggests_force(message: &str) -> bool {
 /// recenti (la coda), dove si trova quasi sempre il motivo di un fallimento.
 const MAX_LOG_LINES: usize = 500;
 
+/// Tetto più largo per i run falliti o con resync automatico.
+const MAX_LOG_LINES_FAILED: usize = 2000;
+
 /// Converte il log grezzo di rclone (una riga JSON per evento, con
 /// `--use-json-log`) in una trascrizione leggibile "livello  messaggio",
 /// ripulita dai codici ANSI — stesso principio di `extract_error_message`
@@ -430,6 +686,13 @@ const MAX_LOG_LINES: usize = 500;
 /// un crash prima dell'inizializzazione del logging) sono incluse così come
 /// sono, ripulite. Troncata alle ultime `MAX_LOG_LINES` righe se più lunga.
 fn readable_log(stderr: &str) -> String {
+    readable_log_capped(stderr, MAX_LOG_LINES)
+}
+
+/// Come `readable_log` ma con un tetto di righe a scelta: un run fallito o
+/// con resync automatico conserva molte più righe (`MAX_LOG_LINES_FAILED`),
+/// perché è quello che poi serve capire.
+fn readable_log_capped(stderr: &str, max_lines: usize) -> String {
     let lines: Vec<String> = stderr
         .lines()
         .map(str::trim)
@@ -444,10 +707,10 @@ fn readable_log(stderr: &str) -> String {
         })
         .collect();
 
-    if lines.len() <= MAX_LOG_LINES {
+    if lines.len() <= max_lines {
         return lines.join("\n");
     }
-    let skipped = lines.len() - MAX_LOG_LINES;
+    let skipped = lines.len() - max_lines;
     let mut truncated = vec![format!("[log troncato: omesse le prime {skipped} righe]")];
     truncated.extend_from_slice(&lines[skipped..]);
     truncated.join("\n")
@@ -591,6 +854,15 @@ async fn run_bisync_subprocess(
     }
     if dry_run {
         args.push("--dry-run".to_string());
+    } else {
+        // Log dettagliato (cosa viene messo in coda, copiato, cancellato) e
+        // statistiche ogni secondo: alimentano sia l'avanzamento mostrato in
+        // tempo reale (`update_progress_from_line`) sia la cronologia. Non
+        // nel dry-run, il cui report (`extract_dry_run_stats`) si basa sul
+        // formato del log di default.
+        args.push("-v".to_string());
+        args.push("--stats".to_string());
+        args.push("1s".to_string());
     }
 
     let mut command = tokio::process::Command::new(crate::rclone_bin::resolve_rclone_binary());
@@ -606,7 +878,7 @@ async fn run_bisync_subprocess(
         command.env("RCLONE_CONFIG_PASS", password);
     }
 
-    let child = command.spawn().map_err(|e| format!("impossibile avviare 'rclone bisync': {e}"))?;
+    let mut child = command.spawn().map_err(|e| format!("impossibile avviare 'rclone bisync': {e}"))?;
     // Tracciato solo per poterlo terminare in modo pulito allo spegnimento
     // dell'app (`terminate_running_bisyncs`) — non serve alla mutua
     // esclusione, già garantita altrove da `running_jobs`.
@@ -614,12 +886,55 @@ async fn run_bisync_subprocess(
     if let Some(pid) = pid {
         running_pids().lock().unwrap().insert(pid);
     }
-    let output = child.wait_with_output().await;
+
+    // stdout non porta nulla di utile ma va comunque svuotato, altrimenti un
+    // output abbondante riempirebbe la pipe e bloccherebbe il processo.
+    let stdout_drain = child.stdout.take().map(|mut out| {
+        tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut out, &mut tokio::io::sink()).await;
+        })
+    });
+
+    // stderr letto riga per riga mentre il processo gira, per aggiornare lo
+    // stato live. Si leggono byte grezzi (non `lines()`): una riga con UTF-8
+    // non valido interromperebbe la lettura e il processo resterebbe
+    // bloccato sulla pipe piena.
+    let progress_key = if dry_run { None } else { workdir.file_name().map(|n| n.to_string_lossy().into_owned()) };
+    let mut captured = String::new();
+    if let Some(stderr) = child.stderr.take() {
+        use tokio::io::AsyncBufReadExt;
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = String::from_utf8_lossy(&buf);
+            let line = line.trim_end();
+            let is_stats = match &progress_key {
+                Some(key) => {
+                    let mut map = progress_map().lock().unwrap();
+                    update_progress_from_line(map.entry(key.clone()).or_default(), line, path1, path2)
+                }
+                None => false,
+            };
+            if !is_stats {
+                captured.push_str(line);
+                captured.push('\n');
+            }
+        }
+    }
+    let status = child.wait().await;
+    if let Some(drain) = stdout_drain {
+        let _ = drain.await;
+    }
     if let Some(pid) = pid {
         running_pids().lock().unwrap().remove(&pid);
     }
-    let output = output.map_err(|e| format!("impossibile attendere 'rclone bisync': {e}"))?;
-    Ok((output.status, String::from_utf8_lossy(&output.stderr).into_owned()))
+    let status = status.map_err(|e| format!("impossibile attendere 'rclone bisync': {e}"))?;
+    Ok((status, captured))
 }
 
 /// Rimuove il lock file lasciato in `workdir` da una precedente esecuzione
@@ -701,9 +1016,21 @@ async fn execute_bisync(
     // questo fallimento) — qui lo facciamo direttamente, in un solo click.
     // Un solo tentativo di retry: se anche il resync fallisse, l'errore
     // (qualunque esso sia a quel punto) va comunque mostrato per intero.
+    // L'errore e il log del primo tentativo non vanno persi: sono l'unica
+    // traccia di cosa ha reso necessario il resync.
+    let mut first_attempt: Option<(String, String)> = None;
     let (status, stderr, auto_resynced) = if !status.success() && !resync {
         let message = extract_error_message(&stderr).unwrap_or_default();
         if error_requires_resync(&message) {
+            let first_log = readable_log_capped(&stderr, MAX_LOG_LINES_FAILED);
+            let reason = first_error_with_object(&stderr).unwrap_or(message);
+            first_attempt = Some((reason, first_log));
+            if let Some(key) = workdir.file_name() {
+                // Il retry riparte da zero: l'elenco del primo tentativo non
+                // ha più senso.
+                clear_progress(&key.to_string_lossy());
+                set_phase(&key.to_string_lossy(), "preparing", None);
+            }
             let (retry_status, retry_stderr) =
                 run_bisync_subprocess(config_path, workdir, path1, path2, true, force, false, config_password).await?;
             (retry_status, retry_stderr, true)
@@ -716,7 +1043,15 @@ async fn execute_bisync(
 
     let conflict_paths = extract_conflict_paths(&stderr);
     let duplicate_names = extract_duplicate_names(&stderr);
-    let log = readable_log(&stderr);
+    let cap = if status.success() && !auto_resynced { MAX_LOG_LINES } else { MAX_LOG_LINES_FAILED };
+    let mut log = readable_log_capped(&stderr, cap);
+    let resync_reason = match first_attempt {
+        Some((reason, first_log)) => {
+            log = format!("--- Primo tentativo (fallito: {reason}) ---\n{first_log}\n--- Resync automatico ---\n{log}");
+            reason
+        }
+        None => String::new(),
+    };
 
     let (success, message, needs_force) = if status.success() {
         (true, String::new(), false)
@@ -727,7 +1062,7 @@ async fn execute_bisync(
         (false, message, needs_force)
     };
 
-    Ok(BisyncRunResult { success, message, when_unix: now_unix(), conflict_paths, duplicate_names, log, needs_force, auto_resynced })
+    Ok(BisyncRunResult { success, message, when_unix: now_unix(), conflict_paths, duplicate_names, log, needs_force, auto_resynced, resync_reason })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -885,8 +1220,10 @@ async fn run_bisync_job_by_name_with_force(
         return Err(format!("il job '{name}' è già in esecuzione"));
     }
 
+    set_phase(name, "preparing", None);
     let result = run_bisync_job_by_name_with_remote_lock(config_dir, state, config_password, name, force).await;
 
+    clear_progress(name);
     running_jobs().lock().unwrap().remove(name);
     result
 }
@@ -908,6 +1245,7 @@ fn record_lock_failure(config_dir: &Path, name: &str, message: String) -> Result
         log: String::new(),
         needs_force: false,
         auto_resynced: false,
+        resync_reason: String::new(),
     };
     let mut jobs = load_from_dir(config_dir)?;
     if let Some(stored) = jobs.iter_mut().find(|j| j.name == name) {
@@ -932,10 +1270,12 @@ async fn run_bisync_job_by_name_with_remote_lock(
     let job = jobs.iter().find(|j| j.name == name).ok_or_else(|| format!("nessun job bisync chiamato '{name}'"))?;
     let remotes: Vec<&str> = job_remote_names(job).into_iter().flatten().collect();
 
+    set_phase(name, "waitingLock", Some(remotes.join(", ")));
     let locks = match crate::remote_lock::acquire_all(state, &remotes).await {
         Ok(locks) => locks,
         Err(message) => return record_lock_failure(config_dir, name, message),
     };
+    set_phase(name, "preparing", None);
     let result = run_bisync_job_by_name_inner(config_dir, config_password, name, force).await;
     if matches!(&result, Ok(r) if r.success) {
         // Best effort, un lato alla volta: vedi il commento su
@@ -991,6 +1331,7 @@ pub fn list_bisync_jobs(app: AppHandle) -> Result<Vec<BisyncJobEntry>, String> {
         .map(|j| BisyncJobEntry {
             is_running: is_job_running(&j.name),
             is_dry_running: is_job_dry_running(&j.name),
+            progress: progress_of(&j.name),
             name: j.name,
             path1: j.path1,
             path2: j.path2,
@@ -1488,6 +1829,74 @@ mod tests {
     }
 
     #[test]
+    fn first_error_with_object_prefers_the_root_cause_and_names_the_file() {
+        let stderr = [
+            json_log_line("info", "Applying changes"),
+            r#"{"level":"error","msg":"Couldn't delete: googleapi: Error 403: insufficientFilePermissions","object":"Visentin/a.pdf"}"#.to_string(),
+            json_log_line("error", "Bisync aborted. Must run --resync to recover."),
+        ]
+        .join("\n");
+        assert_eq!(first_error_with_object(&stderr).unwrap(), "Visentin/a.pdf: Couldn't delete: googleapi: Error 403: insufficientFilePermissions");
+        assert!(first_error_with_object(&json_log_line("info", "tutto ok")).is_none());
+    }
+
+    #[test]
+    fn parse_queue_line_reads_copy_direction_and_strips_the_root() {
+        let msg = "- \u{1b}[36mPath1\u{1b}[0m    \u{1b}[35mQueue copy to\u{1b}[0m Path2\u{1b}[0m       - \u{1b}[36mMega Simo:cartella/file.txt\u{1b}[0m";
+        let change = parse_queue_line(msg, "/home/utente/Drive", "Mega Simo:").unwrap();
+        assert_eq!(change, QueuedChange { action: "copy".into(), direction: "upload".into(), path: "Mega Simo:cartella/file.txt".into() });
+
+        let msg = "- Path2    Queue copy to Path1       - /home/utente/Drive/cartella/OST - BOZZA.docx";
+        let change = parse_queue_line(msg, "/home/utente/Drive", "Mega Simo:").unwrap();
+        assert_eq!(change.direction, "download");
+        assert_eq!(change.path, "cartella/OST - BOZZA.docx", "il percorso può contenere \" - \"");
+    }
+
+    #[test]
+    fn parse_queue_line_reads_deletes_and_ignores_other_messages() {
+        let change = parse_queue_line("- Path1    Queue delete              - a/vecchio.txt", "a", "b").unwrap();
+        assert_eq!((change.action.as_str(), change.path.as_str()), ("delete", "vecchio.txt"));
+        assert!(parse_queue_line("Applying changes", "a", "b").is_none());
+        assert!(parse_queue_line("- Path1    File is new               - x.txt", "a", "b").is_none());
+    }
+
+    #[test]
+    fn progress_follows_phases_queue_and_stats_lines() {
+        let mut p = BisyncProgress::default();
+        assert!(!update_progress_from_line(&mut p, &json_log_line("info", "Building Path1 and Path2 listings"), "/a", "r:"));
+        assert_eq!(p.phase, "comparing");
+        update_progress_from_line(&mut p, &json_log_line("info", "Applying changes"), "/a", "r:");
+        assert_eq!(p.phase, "applying");
+        for i in 0..(MAX_FEED_LINES + 5) {
+            update_progress_from_line(&mut p, &json_log_line("info", &format!("- Path1    Queue copy to Path2       - r:f{i}.txt")), "/a", "r:");
+        }
+        assert_eq!(p.queued_total, MAX_FEED_LINES + 5);
+        assert_eq!(p.feed.len(), MAX_FEED_LINES, "il flusso tiene solo le righe più recenti");
+        assert_eq!(p.feed.last().unwrap().kind, "queued");
+
+        let stats = r#"{"level":"info","msg":"stats","stats":{"transferring":[{"name":"sub/grande.bin","size":3000000,"bytes":1000,"srcFs":"/a","dstFs":"r:"}]}}"#;
+        assert!(update_progress_from_line(&mut p, stats, "/a", "r:"), "le statistiche non vanno nel log");
+        let start = p.feed.last().unwrap();
+        assert_eq!((start.kind.as_str(), start.text.as_str(), start.size), ("start", "sub/grande.bin", Some(3_000_000)));
+        update_progress_from_line(&mut p, stats, "/a", "r:");
+        assert_eq!(p.feed.iter().filter(|e| e.kind == "start").count(), 1, "ogni file viene annunciato una volta sola");
+        let copied = r#"{"level":"info","msg":"Copied (new)","object":"sub/grande.bin"}"#;
+        update_progress_from_line(&mut p, copied, "/a", "r:");
+        assert_eq!(p.feed.last().unwrap().kind, "done");
+        assert_eq!(p.transferring, vec![TransferringFile { name: "sub/grande.bin".into(), size: 3_000_000, bytes: 1000, direction: "upload".into() }]);
+        let done = r#"{"level":"info","msg":"stats","stats":{"transferring":null}}"#;
+        update_progress_from_line(&mut p, done, "/a", "r:");
+        assert!(p.transferring.is_empty());
+    }
+
+    #[test]
+    fn failed_runs_keep_more_log_lines_than_successful_ones() {
+        let stderr = (0..MAX_LOG_LINES + 100).map(|i| json_log_line("info", &format!("riga {i}"))).collect::<Vec<_>>().join("\n");
+        assert!(readable_log_capped(&stderr, MAX_LOG_LINES_FAILED).lines().all(|l| !l.contains("troncato")));
+        assert!(readable_log(&stderr).lines().next().unwrap().contains("troncato"));
+    }
+
+    #[test]
     fn readable_log_formats_json_lines_and_strips_ansi() {
         let stderr = [json_log_line("error", "<ESC>[31mtroppi errori<ESC>[0m"), "riga non json".to_string()].join("\n");
         let log = readable_log(&stderr);
@@ -1758,6 +2167,8 @@ mod tests {
         let result = run_bisync_job_by_name(&jobs_dir.path, &state, None, "prova-cache-persa").await.unwrap();
         assert!(result.success, "il resync automatico dovrebbe far riuscire comunque il run: {result:?}");
         assert!(result.auto_resynced, "il run dovrebbe segnalare che è stato necessario un resync automatico");
+        assert!(result.resync_reason.to_lowercase().contains("resync"), "deve restare il motivo del primo tentativo: {}", result.resync_reason);
+        assert!(result.log.contains("Primo tentativo"), "il log del primo tentativo non deve andare perso");
 
         let jobs = load_from_dir(&jobs_dir.path).unwrap();
         assert!(!jobs[0].needs_resync, "dopo il resync automatico riuscito non deve restare in sospeso per il prossimo run");
