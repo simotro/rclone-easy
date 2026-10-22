@@ -102,33 +102,9 @@
   // restava sepolta nel log grezzo.
   let duplicateNamesCount = $derived(displayService === "bisync" ? (bisyncJob?.history[0]?.duplicateNames.length ?? 0) : 0);
 
-  function formatSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    const units = ["KiB", "MiB", "GiB", "TiB"];
-    let value = bytes / 1024;
-    let unitIndex = 0;
-    while (value >= 1024 && unitIndex < units.length - 1) {
-      value /= 1024;
-      unitIndex += 1;
-    }
-    return `${value.toFixed(1)} ${units[unitIndex]}`;
-  }
-
-  // Avanzamento live del bisync in corso, mostrato come un terminale che
-  // scorre: fasi, modifiche in coda, file trasferiti.
+  // Avanzamento del bisync in corso: nella riga resta solo l'eventuale
+  // attesa del lock; il dettaglio dei file è nella pagina Attività.
   let progress = $derived(bisyncJob?.isRunning ? bisyncJob.progress : null);
-  let terminalEl: HTMLDivElement | undefined = $state();
-
-  $effect(() => {
-    // Rilegge ad ogni aggiornamento per tenere il terminale in fondo.
-    progress?.feed.length;
-    progress?.transferring.length;
-    if (terminalEl) terminalEl.scrollTop = terminalEl.scrollHeight;
-  });
-
-  function arrow(direction: string): string {
-    return direction === "upload" ? "↑" : direction === "download" ? "↓" : "⇅";
-  }
 
   function formatWhen(whenUnix: number): string {
     return new Date(whenUnix * 1000).toLocaleString();
@@ -362,37 +338,8 @@
           {@render quickActionLink()}
         </span>
       {/if}
-      {#if progress}
-        {#if progress.phase === "waitingLock"}
-          <span class="last-op">{$t("remoteRow.progress.waitingLock", { values: { remote: progress.detail ?? "" } })}</span>
-        {:else}
-          <div class="terminal" bind:this={terminalEl}>
-            {#each progress.feed as entry, i (i)}
-              <div class="terminal-line {entry.kind}" title={entry.text}>
-                {#if entry.kind === "phase"}
-                  # {$t(`remoteRow.progress.${entry.text}`)}
-                {:else if entry.kind === "queued"}
-                  · {arrow(entry.direction)} {entry.text}
-                {:else if entry.kind === "queuedDelete"}
-                  · ✕ {entry.text}
-                {:else if entry.kind === "start"}
-                  ▶ {arrow(entry.direction)} {entry.text}{entry.size ? ` (${formatSize(entry.size)})` : ""}
-                {:else if entry.kind === "done"}
-                  ✓ {entry.text}
-                {:else if entry.kind === "delete"}
-                  ✕ {entry.text}
-                {:else}
-                  ! {entry.text}
-                {/if}
-              </div>
-            {/each}
-            {#each progress.transferring as file (file.name)}
-              <div class="terminal-line active" title={file.name}>
-                ⟳ {arrow(file.direction)} {file.name} — {formatSize(file.bytes)} / {formatSize(file.size)}{file.size > 0 ? ` (${Math.min(100, Math.floor((file.bytes / file.size) * 100))}%)` : ""}
-              </div>
-            {/each}
-          </div>
-        {/if}
+      {#if progress?.phase === "waitingLock"}
+        <span class="last-op">{$t("remoteRow.progress.waitingLock", { values: { remote: progress.detail ?? "" } })}</span>
       {/if}
       {#if localFolderPath}
         <span class="last-op">
@@ -537,52 +484,6 @@
 
 .last-op.conflict {
   color: var(--warning-text);
-}
-
-.terminal {
-  box-sizing: border-box;
-  height: 11em;
-  margin: 0.3em 0;
-  padding: 0.5em 0.7em;
-  overflow-y: auto;
-  border-radius: 8px;
-  background-color: #111;
-  color: #cfd6dd;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 0.75em;
-  line-height: 1.45;
-}
-
-.terminal-line {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.terminal-line.phase {
-  color: #7d8a96;
-}
-
-.terminal-line.queued,
-.terminal-line.queuedDelete {
-  color: #8fa0b0;
-}
-
-.terminal-line.start,
-.terminal-line.active {
-  color: #6cc4e8;
-}
-
-.terminal-line.done {
-  color: #7fd08a;
-}
-
-.terminal-line.delete {
-  color: #e0b36a;
-}
-
-.terminal-line.error {
-  color: #ff7b72;
 }
 
 .path-link {

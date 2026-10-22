@@ -85,6 +85,10 @@ pub struct BisyncRunResult {
     /// è in testa a `log`.
     #[serde(default)]
     pub resync_reason: String,
+    /// Eventi per-file del run, destinati al registro attività
+    /// (`activity_log`). Non vengono salvati con la cronologia.
+    #[serde(skip)]
+    pub events: Vec<crate::activity_log::ActivityEvent>,
 }
 
 /// `BisyncJob` unito allo stato live "in esecuzione ora" — stesso principio
@@ -296,11 +300,10 @@ fn now_unix() -> u64 {
 /// limite di lunghezza del filesystem con percorsi non banali (osservato
 /// durante lo sviluppo: "file name too long" con un percorso di test
 /// nidificato).
-/// Quante righe recenti del flusso di eventi tenere — un resync su un albero
-/// grande ne produce decine di migliaia, inutili da conservare tutte e
-/// costose da serializzare a ogni aggiornamento; i totali restano esatti
-/// (`BisyncProgress::queued_total`).
-const MAX_FEED_LINES: usize = 150;
+/// Tetto agli eventi per-file raccolti in un singolo run, per non far
+/// crescere la memoria con un resync su un albero enorme (il registro
+/// stesso ha poi il suo tetto, vedi `activity_log`).
+const MAX_RUN_EVENTS: usize = 20_000;
 
 /// Una modifica che bisync ha deciso di applicare e messo in coda.
 /// `direction`: `upload` (verso il remote), `download` (verso la cartella
@@ -312,25 +315,6 @@ pub struct QueuedChange {
     pub action: String,
     pub direction: String,
     pub path: String,
-}
-
-/// Una riga del flusso di eventi del run in corso, mostrato come un
-/// terminale. `kind`: `phase`, `queued`, `start`, `done`, `delete` o
-/// `error`; `text` è il percorso (o il messaggio per `phase`/`error`).
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct FeedEntry {
-    pub kind: String,
-    pub direction: String,
-    pub text: String,
-    /// Dimensione in byte, solo per `start`.
-    pub size: Option<u64>,
-}
-
-impl FeedEntry {
-    fn new(kind: &str, direction: &str, text: impl Into<String>) -> Self {
-        FeedEntry { kind: kind.to_string(), direction: direction.to_string(), text: text.into(), size: None }
-    }
 }
 
 /// Un file in trasferimento in questo momento.
@@ -345,7 +329,8 @@ pub struct TransferringFile {
 
 /// Stato live di un run di bisync, ricostruito leggendo in diretta il log
 /// JSON di `rclone bisync` (messaggi "Queue copy to ..." e statistiche
-/// periodiche `--stats`).
+/// periodiche `--stats`). I campi `#[serde(skip)]` non vanno alla UI: servono
+/// a costruire gli eventi per il registro attività a fine run.
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BisyncProgress {
@@ -353,27 +338,23 @@ pub struct BisyncProgress {
     pub phase: String,
     /// Solo per `waitingLock`: chi sta tenendo occupato il remote.
     pub detail: Option<String>,
-    /// Ultime righe del flusso di eventi, dalla più vecchia alla più recente.
-    pub feed: Vec<FeedEntry>,
     pub queued_total: usize,
     pub transferring: Vec<TransferringFile>,
-    /// File già comparsi in `transferring`, per annunciarli una volta sola.
     #[serde(skip)]
-    seen_transfers: std::collections::HashSet<String>,
+    events: Vec<crate::activity_log::ActivityEvent>,
+    /// Percorso in coda → (direzione, azione), per dare una direzione agli
+    /// eventi "copiato"/"cancellato", che nel log non la riportano.
+    #[serde(skip)]
+    pending: std::collections::HashMap<String, (String, String)>,
+    /// Dimensioni viste nelle statistiche di trasferimento.
+    #[serde(skip)]
+    sizes: std::collections::HashMap<String, u64>,
 }
 
 impl BisyncProgress {
-    fn push_feed(&mut self, entry: FeedEntry) {
-        self.feed.push(entry);
-        if self.feed.len() > MAX_FEED_LINES {
-            self.feed.remove(0);
-        }
-    }
-
-    fn enter_phase(&mut self, phase: &str) {
-        if self.phase != phase {
-            self.phase = phase.to_string();
-            self.push_feed(FeedEntry::new("phase", "", phase));
+    fn record(&mut self, event: crate::activity_log::ActivityEvent) {
+        if self.events.len() < MAX_RUN_EVENTS {
+            self.events.push(event);
         }
     }
 }
@@ -415,7 +396,26 @@ fn direction_to(dest: &str, other: &str) -> &'static str {
 
 /// Toglie dal percorso mostrato da rclone la radice del lato a cui si
 /// riferisce, così l'utente vede il percorso dentro la cartella sincronizzata.
+/// Per un remote rclone mostra `nome{id}:/percorso` (con un identificativo
+/// tra graffe dopo il nome), non `nome:percorso` come configurato.
 fn relative_to_root<'a>(path: &'a str, root: &str) -> &'a str {
+    if !is_local_path(root) {
+        let (name, sub) = root.split_once(':').unwrap_or((root, ""));
+        let Some(mut rest) = path.strip_prefix(name) else { return path };
+        if rest.starts_with('{') {
+            match rest.find('}') {
+                Some(end) => rest = &rest[end + 1..],
+                None => return path,
+            }
+        }
+        let Some(rest) = rest.strip_prefix(':') else { return path };
+        let rest = rest.trim_start_matches('/');
+        let sub = sub.trim_matches('/');
+        return match rest.strip_prefix(sub) {
+            Some(after) if !sub.is_empty() && (after.is_empty() || after.starts_with('/')) => after.trim_start_matches('/'),
+            _ => rest,
+        };
+    }
     let root = root.trim_end_matches('/');
     match path.strip_prefix(root) {
         Some(rest) if !root.is_empty() && rest.starts_with('/') => rest.trim_start_matches('/'),
@@ -452,10 +452,11 @@ fn parse_queue_line(msg: &str, path1: &str, path2: &str) -> Option<QueuedChange>
 /// riga è una statistica periodica (`--stats`): serve solo ad aggiornare lo
 /// stato live e non va conservata nel log del run.
 fn update_progress_from_line(progress: &mut BisyncProgress, line: &str, path1: &str, path2: &str) -> bool {
+    use crate::activity_log::ActivityEvent;
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { return false };
 
     if let Some(stats) = value.get("stats") {
-        let transferring: Vec<TransferringFile> = stats
+        progress.transferring = stats
             .get("transferring")
             .and_then(|t| t.as_array())
             .map(|items| {
@@ -476,46 +477,56 @@ fn update_progress_from_line(progress: &mut BisyncProgress, line: &str, path1: &
                     .collect()
             })
             .unwrap_or_default();
-        for file in &transferring {
-            if progress.seen_transfers.insert(file.name.clone()) {
-                let mut entry = FeedEntry::new("start", &file.direction, file.name.clone());
-                entry.size = Some(file.size);
-                progress.push_feed(entry);
-            }
+        for file in &progress.transferring {
+            progress.sizes.insert(file.name.clone(), file.size);
         }
-        progress.transferring = transferring;
         return true;
     }
 
     let level = value.get("level").and_then(|l| l.as_str()).unwrap_or("info");
     let Some(msg) = value.get("msg").and_then(|m| m.as_str()) else { return false };
     let clean = strip_ansi(msg);
+    let object = value.get("object").and_then(|o| o.as_str()).filter(|o| !o.is_empty());
+    let blank = || ActivityEvent::new("bisync", "", "", "");
+
     if level == "error" || level == "warning" {
-        progress.push_feed(FeedEntry::new("error", "", clean.chars().take(300).collect::<String>()));
+        let kind = if level == "error" { "error" } else { "warning" };
+        let mut event = ActivityEvent { kind: kind.to_string(), message: clean.chars().take(400).collect(), ..blank() };
+        event.path = object.unwrap_or_default().to_string();
+        progress.record(event);
         return false;
     }
     if let Some(change) = parse_queue_line(msg, path1, path2) {
         progress.queued_total += 1;
-        let kind = if change.action == "delete" { "queuedDelete" } else { "queued" };
-        progress.push_feed(FeedEntry::new(kind, &change.direction, change.path));
+        progress.pending.insert(change.path, (change.direction, change.action));
         return false;
     }
-    if let Some(object) = value.get("object").and_then(|o| o.as_str()) {
-        if clean.starts_with("Copied") {
-            progress.push_feed(FeedEntry::new("done", "", object));
-            return false;
-        }
-        if clean.starts_with("Deleted") {
-            progress.push_feed(FeedEntry::new("delete", "", object));
+    if let Some(object) = object {
+        let kind = if clean.starts_with("Copied") {
+            Some("copied")
+        } else if clean.starts_with("Deleted") || clean.starts_with("Moved into backup dir") {
+            // Con il cestino sibling attivo (`trash.rs`) una cancellazione
+            // arriva come spostamento nella cartella di backup.
+            Some("deleted")
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
+            let mut event = ActivityEvent { kind: kind.to_string(), path: object.to_string(), ..blank() };
+            if let Some((direction, _)) = progress.pending.get(object) {
+                event.direction = direction.clone();
+            }
+            event.size = progress.sizes.get(object).copied();
+            progress.record(event);
             return false;
         }
     }
     if clean.contains("Applying changes") {
-        progress.enter_phase("applying");
+        progress.phase = "applying".to_string();
     } else if clean.contains("Updating listings") {
-        progress.enter_phase("finishing");
+        progress.phase = "finishing".to_string();
     } else if clean.contains("Building Path1 and Path2 listings") || clean.contains("checking for diffs") {
-        progress.enter_phase("comparing");
+        progress.phase = "comparing".to_string();
     }
     false
 }
@@ -748,7 +759,7 @@ async fn run_bisync_subprocess(
     force: bool,
     dry_run: bool,
     config_password: Option<&str>,
-) -> Result<(std::process::ExitStatus, String), String> {
+) -> Result<(std::process::ExitStatus, String, Vec<crate::activity_log::ActivityEvent>), String> {
     std::fs::create_dir_all(workdir)
         .map_err(|e| format!("impossibile creare la cartella di lavoro '{}': {e}", workdir.display()))?;
     clear_stale_lock(workdir);
@@ -934,7 +945,13 @@ async fn run_bisync_subprocess(
         running_pids().lock().unwrap().remove(&pid);
     }
     let status = status.map_err(|e| format!("impossibile attendere 'rclone bisync': {e}"))?;
-    Ok((status, captured))
+    // Gli eventi raccolti vanno via con il risultato: lo stato live viene
+    // azzerato a fine run.
+    let events = progress_key
+        .as_ref()
+        .and_then(|key| progress_map().lock().unwrap().get_mut(key).map(|p| std::mem::take(&mut p.events)))
+        .unwrap_or_default();
+    Ok((status, captured, events))
 }
 
 /// Rimuove il lock file lasciato in `workdir` da una precedente esecuzione
@@ -1003,7 +1020,8 @@ async fn execute_bisync(
     force: bool,
     config_password: Option<&str>,
 ) -> Result<BisyncRunResult, String> {
-    let (status, stderr) = run_bisync_subprocess(config_path, workdir, path1, path2, resync, force, false, config_password).await?;
+    let (status, stderr, mut run_events) =
+        run_bisync_subprocess(config_path, workdir, path1, path2, resync, force, false, config_password).await?;
 
     // `needs_resync` persistito può essere `false` (l'ultimo run risultava
     // riuscito) mentre rclone rifiuta comunque di procedere perché la
@@ -1031,8 +1049,9 @@ async fn execute_bisync(
                 clear_progress(&key.to_string_lossy());
                 set_phase(&key.to_string_lossy(), "preparing", None);
             }
-            let (retry_status, retry_stderr) =
+            let (retry_status, retry_stderr, retry_events) =
                 run_bisync_subprocess(config_path, workdir, path1, path2, true, force, false, config_password).await?;
+            run_events.extend(retry_events);
             (retry_status, retry_stderr, true)
         } else {
             (status, stderr, false)
@@ -1062,7 +1081,18 @@ async fn execute_bisync(
         (false, message, needs_force)
     };
 
-    Ok(BisyncRunResult { success, message, when_unix: now_unix(), conflict_paths, duplicate_names, log, needs_force, auto_resynced, resync_reason })
+    Ok(BisyncRunResult {
+        success,
+        message,
+        when_unix: now_unix(),
+        conflict_paths,
+        duplicate_names,
+        log,
+        needs_force,
+        auto_resynced,
+        resync_reason,
+        events: run_events,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1132,7 +1162,7 @@ pub(crate) async fn dry_run_bisync_sync(
     let path1_total_files = count_files(state, path1).await?;
     let path2_total_files = count_files(state, path2).await?;
 
-    let (status, stderr) = run_bisync_subprocess(config_path, workdir, path1, path2, resync, false, true, config_password).await?;
+    let (status, stderr, _) = run_bisync_subprocess(config_path, workdir, path1, path2, resync, false, true, config_password).await?;
     if !status.success() {
         let message =
             extract_error_message(&stderr).unwrap_or_else(|| format!("rclone bisync terminato con codice {:?}", status.code()));
@@ -1246,6 +1276,7 @@ fn record_lock_failure(config_dir: &Path, name: &str, message: String) -> Result
         needs_force: false,
         auto_resynced: false,
         resync_reason: String::new(),
+        events: Vec::new(),
     };
     let mut jobs = load_from_dir(config_dir)?;
     if let Some(stored) = jobs.iter_mut().find(|j| j.name == name) {
@@ -1315,8 +1346,42 @@ async fn run_bisync_job_by_name_inner(
         crate::jobs::push_history(&mut stored.history, result.clone());
     }
     save_to_dir(config_dir, &jobs)?;
+    record_activity(config_dir, &job, &result);
 
     Ok(result)
+}
+
+/// Eventi di un run da mandare al registro attività: quelli per-file raccolti
+/// durante l'esecuzione, più conflitti, nomi duplicati, resync automatico e
+/// l'eventuale fallimento complessivo. Best-effort.
+fn record_activity(config_dir: &Path, job: &BisyncJob, result: &BisyncRunResult) {
+    use crate::activity_log::ActivityEvent;
+    let remote = remote_name_of(&job.path1).or_else(|| remote_name_of(&job.path2)).unwrap_or_default().to_string();
+    let base = |kind: &str| ActivityEvent::new("bisync", &job.name, &remote, kind);
+
+    let mut events: Vec<ActivityEvent> = result
+        .events
+        .iter()
+        .cloned()
+        .map(|mut e| {
+            e.job = job.name.clone();
+            e.remote = remote.clone();
+            e
+        })
+        .collect();
+    for path in &result.conflict_paths {
+        events.push(base("conflict").with_path(path.clone()));
+    }
+    for name in &result.duplicate_names {
+        events.push(base("warning").with_path(name.clone()).with_message("nome duplicato sul remote"));
+    }
+    if result.auto_resynced {
+        events.push(base("warning").with_message(format!("resync automatico: {}", result.resync_reason)));
+    }
+    if !result.success && !events.iter().any(|e| e.kind == "error") {
+        events.push(base("error").with_message(result.message.clone()));
+    }
+    let _ = crate::activity_log::append_events(config_dir, events);
 }
 
 fn app_config_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -1844,7 +1909,7 @@ mod tests {
     fn parse_queue_line_reads_copy_direction_and_strips_the_root() {
         let msg = "- \u{1b}[36mPath1\u{1b}[0m    \u{1b}[35mQueue copy to\u{1b}[0m Path2\u{1b}[0m       - \u{1b}[36mMega Simo:cartella/file.txt\u{1b}[0m";
         let change = parse_queue_line(msg, "/home/utente/Drive", "Mega Simo:").unwrap();
-        assert_eq!(change, QueuedChange { action: "copy".into(), direction: "upload".into(), path: "Mega Simo:cartella/file.txt".into() });
+        assert_eq!(change, QueuedChange { action: "copy".into(), direction: "upload".into(), path: "cartella/file.txt".into() });
 
         let msg = "- Path2    Queue copy to Path1       - /home/utente/Drive/cartella/OST - BOZZA.docx";
         let change = parse_queue_line(msg, "/home/utente/Drive", "Mega Simo:").unwrap();
@@ -1861,32 +1926,37 @@ mod tests {
     }
 
     #[test]
-    fn progress_follows_phases_queue_and_stats_lines() {
+    fn progress_follows_phases_and_collects_per_file_events() {
         let mut p = BisyncProgress::default();
         assert!(!update_progress_from_line(&mut p, &json_log_line("info", "Building Path1 and Path2 listings"), "/a", "r:"));
         assert_eq!(p.phase, "comparing");
         update_progress_from_line(&mut p, &json_log_line("info", "Applying changes"), "/a", "r:");
         assert_eq!(p.phase, "applying");
-        for i in 0..(MAX_FEED_LINES + 5) {
-            update_progress_from_line(&mut p, &json_log_line("info", &format!("- Path1    Queue copy to Path2       - r:f{i}.txt")), "/a", "r:");
-        }
-        assert_eq!(p.queued_total, MAX_FEED_LINES + 5);
-        assert_eq!(p.feed.len(), MAX_FEED_LINES, "il flusso tiene solo le righe più recenti");
-        assert_eq!(p.feed.last().unwrap().kind, "queued");
+        update_progress_from_line(&mut p, &json_log_line("info", "- Path1    Queue copy to Path2       - r{abc}:/sub/grande.bin"), "/a", "r:");
+        assert_eq!(p.queued_total, 1);
 
         let stats = r#"{"level":"info","msg":"stats","stats":{"transferring":[{"name":"sub/grande.bin","size":3000000,"bytes":1000,"srcFs":"/a","dstFs":"r:"}]}}"#;
         assert!(update_progress_from_line(&mut p, stats, "/a", "r:"), "le statistiche non vanno nel log");
-        let start = p.feed.last().unwrap();
-        assert_eq!((start.kind.as_str(), start.text.as_str(), start.size), ("start", "sub/grande.bin", Some(3_000_000)));
-        update_progress_from_line(&mut p, stats, "/a", "r:");
-        assert_eq!(p.feed.iter().filter(|e| e.kind == "start").count(), 1, "ogni file viene annunciato una volta sola");
-        let copied = r#"{"level":"info","msg":"Copied (new)","object":"sub/grande.bin"}"#;
-        update_progress_from_line(&mut p, copied, "/a", "r:");
-        assert_eq!(p.feed.last().unwrap().kind, "done");
         assert_eq!(p.transferring, vec![TransferringFile { name: "sub/grande.bin".into(), size: 3_000_000, bytes: 1000, direction: "upload".into() }]);
+
+        update_progress_from_line(&mut p, r#"{"level":"info","msg":"Copied (new)","object":"sub/grande.bin"}"#, "/a", "r:");
+        update_progress_from_line(&mut p, r#"{"level":"info","msg":"Deleted","object":"vecchio.txt"}"#, "/a", "r:");
+        update_progress_from_line(&mut p, r#"{"level":"error","msg":"Couldn't delete: 403","object":"Visentin/a.pdf"}"#, "/a", "r:");
+        let kinds: Vec<(&str, &str)> = p.events.iter().map(|e| (e.kind.as_str(), e.path.as_str())).collect();
+        assert_eq!(kinds, vec![("copied", "sub/grande.bin"), ("deleted", "vecchio.txt"), ("error", "Visentin/a.pdf")]);
+        assert_eq!((p.events[0].direction.as_str(), p.events[0].size), ("upload", Some(3_000_000)));
+
         let done = r#"{"level":"info","msg":"stats","stats":{"transferring":null}}"#;
         update_progress_from_line(&mut p, done, "/a", "r:");
         assert!(p.transferring.is_empty());
+    }
+
+    #[test]
+    fn relative_to_root_understands_google_drive_style_paths() {
+        assert_eq!(relative_to_root("Google Drive Copass{yHZXc}:/CORSI/x.txt", "Google Drive Copass:"), "CORSI/x.txt");
+        assert_eq!(relative_to_root("Mega:sub/cartella/f", "Mega:sub"), "cartella/f");
+        assert_eq!(relative_to_root("/home/u/Drive/a/b", "/home/u/Drive"), "a/b");
+        assert_eq!(relative_to_root("altro", "Mega:"), "altro");
     }
 
     #[test]
@@ -1912,6 +1982,38 @@ mod tests {
         assert!(lines[0].contains("troncato"));
         assert!(lines[1].contains("riga 10"), "devono restare le ultime righe, non le prime: {}", lines[1]);
         assert!(lines.last().unwrap().contains(&format!("riga {}", MAX_LOG_LINES + 9)));
+    }
+
+    #[tokio::test]
+    async fn a_real_run_reports_per_file_events_for_the_activity_log() {
+        let rcd_dir = TempDir::new("bisync-events-rcd");
+        let config_dir = TempDir::new("bisync-events-config");
+        let path1_dir = TempDir::new("bisync-events-path1");
+        let path2_dir = TempDir::new("bisync-events-path2");
+        for dir in [&config_dir, &path1_dir, &path2_dir] {
+            std::fs::create_dir_all(&dir.path).unwrap();
+        }
+        std::fs::write(path1_dir.path.join("resta.txt"), "uguale").unwrap();
+        std::fs::write(path1_dir.path.join("sparisce.txt"), "da cancellare").unwrap();
+        std::fs::write(path1_dir.path.join("altro.txt"), "altro").unwrap();
+
+        let _state = crate::rcd::build_state(rcd_dir.config_path()).await;
+        let rclone_conf = config_dir.path.join("rclone.conf");
+        let workdir = workdir_for(&config_dir.path, "eventi");
+        let (p1, p2) = (path1_dir.path.to_string_lossy().into_owned(), path2_dir.path.to_string_lossy().into_owned());
+        let baseline = execute_bisync(&rclone_conf, &workdir, &p1, &p2, true, false, None).await.unwrap();
+        assert!(baseline.success, "{baseline:?}");
+
+        std::fs::write(path1_dir.path.join("nuovo.txt"), "solo qui").unwrap();
+        std::fs::remove_file(path1_dir.path.join("sparisce.txt")).unwrap();
+        let result = execute_bisync(&rclone_conf, &workdir, &p1, &p2, false, false, None).await.unwrap();
+        assert!(result.success, "{result:?}");
+
+        let copied: Vec<&str> = result.events.iter().filter(|e| e.kind == "copied").map(|e| e.path.as_str()).collect();
+        let deleted: Vec<&str> = result.events.iter().filter(|e| e.kind == "deleted").map(|e| e.path.as_str()).collect();
+        assert!(copied.contains(&"nuovo.txt"), "eventi: {:?}", result.events);
+        assert!(deleted.contains(&"sparisce.txt"), "eventi: {:?}", result.events);
+        assert!(!copied.contains(&"resta.txt"), "un file invariato non produce eventi");
     }
 
     #[tokio::test]

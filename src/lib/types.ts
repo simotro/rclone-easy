@@ -50,9 +50,28 @@ export type BisyncRunEntry = {
 export type BisyncProgress = {
   phase: "waitingLock" | "preparing" | "comparing" | "applying" | "finishing";
   detail: string | null;
-  feed: { kind: "phase" | "queued" | "queuedDelete" | "start" | "done" | "delete" | "error"; direction: string; text: string; size: number | null }[];
   queuedTotal: number;
-  transferring: { name: string; size: number; bytes: number; direction: "upload" | "download" | "sync" }[];
+  transferring: { name: string; size: number; bytes: number; direction: string }[];
+};
+
+export type ActivityKind = "copied" | "deleted" | "moved" | "conflict" | "warning" | "error" | "mounted" | "unmounted";
+
+export type ActivityEvent = {
+  whenUnix: number;
+  remote: string;
+  service: "backup" | "bisync" | "mount";
+  job: string;
+  kind: ActivityKind;
+  direction: string;
+  path: string;
+  size: number | null;
+  message: string;
+};
+
+export type ActivityPage = {
+  events: ActivityEvent[];
+  total: number;
+  remotes: string[];
 };
 
 export type BisyncDryRunReport = {

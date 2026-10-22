@@ -12,6 +12,8 @@ mod rcd;
 use rcd::{rcd_status, RcdState};
 
 mod activity;
+mod activity_log;
+use activity_log::{clear_activity, list_activity};
 
 mod remotes;
 use remotes::{
@@ -341,6 +343,8 @@ pub fn run() {
             unmount_now,
             download_and_launch_winfsp_installer,
             list_bisync_jobs,
+            list_activity,
+            clear_activity,
             create_bisync_job,
             update_bisync_job,
             delete_bisync_job,

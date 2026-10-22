@@ -218,11 +218,7 @@
     "saveChanges": "Save changes",
     "autoResyncedReason": "The first attempt failed with: {reason}",
     "progress": {
-      "waitingLock": "Waiting for {remote} to become free (in use by another device or a sync that just finished)…",
-      "preparing": "preparing",
-      "comparing": "comparing files",
-      "applying": "applying changes",
-      "finishing": "finishing"
+      "waitingLock": "Waiting for {remote} to become free (in use by another device or a sync that just finished)…"
     }
   },
   "remotePanel": {
@@ -375,5 +371,50 @@
     "oauthNotEditable": "The parameters of remotes authorized via browser (Dropbox, OneDrive) can't be edited from here yet, only the name. If you need to change account, delete this remote from the previous page and recreate it.",
     "leaveEmptyToKeep": "leave empty to keep it unchanged",
     "nameLabel": "Remote name"
+  },
+  "activity": {
+    "title": "Activity",
+    "back": "Back to home",
+    "open": "Activity",
+    "filterRemote": "Remote",
+    "allRemotes": "All remotes",
+    "filterKind": "Type",
+    "searchPlaceholder": "Search for a file…",
+    "kinds": {
+      "all": "All",
+      "warnings": "Warnings",
+      "errors": "Errors",
+      "copied": "Copied",
+      "deleted": "Deleted",
+      "moved": "Moved",
+      "mounts": "Mounts"
+    },
+    "kind": {
+      "copied": "Copied",
+      "deleted": "Deleted",
+      "moved": "Moved",
+      "conflict": "Conflict",
+      "warning": "Warning",
+      "error": "Error",
+      "mounted": "Mounted",
+      "unmounted": "Unmounted"
+    },
+    "running": "In progress",
+    "nothingRunning": "No sync in progress.",
+    "empty": "No activity recorded with these filters.",
+    "showing": "{shown} of {total} events",
+    "loadMore": "Load more",
+    "clear": "Clear log",
+    "clearConfirm": "Confirm: clear the log",
+    "retention": "The log keeps the last 30 days.",
+    "phase": {
+      "waitingLock": "Waiting for the remote to become free",
+      "preparing": "Preparing",
+      "comparing": "Comparing files",
+      "applying": "Applying changes",
+      "finishing": "Finishing"
+    },
+    "queued": "{count} changes queued",
+    "backupRunning": "Backup in progress"
   }
 }

@@ -376,6 +376,18 @@ fn record_mount_event(config_dir: &Path, name: &str, action: &str, result: &Resu
         Ok(()) => MountEvent { action: action.to_string(), success: true, message: String::new(), when_unix: now_unix() },
         Err(e) => MountEvent { action: action.to_string(), success: false, message: e.clone(), when_unix: now_unix() },
     };
+    let kind = match (event.success, action) {
+        (false, _) => "error",
+        (true, "unmount") => "unmounted",
+        (true, _) => "mounted",
+    };
+    let remote = remote_name_of(&stored.remote).unwrap_or_default().to_string();
+    let _ = crate::activity_log::append_events(
+        config_dir,
+        vec![crate::activity_log::ActivityEvent::new("mount", name, &remote, kind)
+            .with_path(stored.mount_point.clone())
+            .with_message(event.message.clone())],
+    );
     crate::jobs::push_history(&mut stored.history, event);
     let _ = save_to_dir(config_dir, &mounts);
 }

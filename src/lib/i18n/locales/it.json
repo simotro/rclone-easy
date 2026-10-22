@@ -218,11 +218,7 @@
     "saveChanges": "Salva modifiche",
     "autoResyncedReason": "Il primo tentativo è fallito con: {reason}",
     "progress": {
-      "waitingLock": "In attesa che {remote} si liberi (in uso da un altro dispositivo o da una sincronizzazione appena conclusa)…",
-      "preparing": "preparazione",
-      "comparing": "confronto dei file",
-      "applying": "applicazione delle modifiche",
-      "finishing": "completamento"
+      "waitingLock": "In attesa che {remote} si liberi (in uso da un altro dispositivo o da una sincronizzazione appena conclusa)…"
     }
   },
   "remotePanel": {
@@ -375,5 +371,50 @@
     "oauthNotEditable": "I parametri dei remote autorizzati via browser (Dropbox, OneDrive) non sono ancora modificabili da qui, solo il nome. Se devi cambiare account, elimina questo remote dalla pagina precedente e ricrealo.",
     "leaveEmptyToKeep": "lascia vuoto per non cambiarla",
     "nameLabel": "Nome del remote"
+  },
+  "activity": {
+    "title": "Attività",
+    "back": "Torna alla home",
+    "open": "Attività",
+    "filterRemote": "Remote",
+    "allRemotes": "Tutti i remote",
+    "filterKind": "Tipo",
+    "searchPlaceholder": "Cerca un file…",
+    "kinds": {
+      "all": "Tutti",
+      "warnings": "Avvisi",
+      "errors": "Errori",
+      "copied": "Copiati",
+      "deleted": "Cancellati",
+      "moved": "Spostati",
+      "mounts": "Mount"
+    },
+    "kind": {
+      "copied": "Copiato",
+      "deleted": "Cancellato",
+      "moved": "Spostato",
+      "conflict": "Conflitto",
+      "warning": "Avviso",
+      "error": "Errore",
+      "mounted": "Montato",
+      "unmounted": "Smontato"
+    },
+    "running": "In corso",
+    "nothingRunning": "Nessuna sincronizzazione in corso.",
+    "empty": "Nessuna attività registrata con questi filtri.",
+    "showing": "{shown} di {total} eventi",
+    "loadMore": "Carica altri",
+    "clear": "Svuota registro",
+    "clearConfirm": "Conferma: svuotare il registro",
+    "retention": "Il registro conserva gli ultimi 30 giorni.",
+    "phase": {
+      "waitingLock": "In attesa che il remote si liberi",
+      "preparing": "Preparazione",
+      "comparing": "Confronto dei file",
+      "applying": "Applicazione delle modifiche",
+      "finishing": "Completamento"
+    },
+    "queued": "{count} modifiche in coda",
+    "backupRunning": "Backup in corso"
   }
 }

@@ -100,6 +100,7 @@
       <button type="button" class="add-remote-button" onclick={() => goto("/nuovo-remote")}>
         {$t("home.addRemote")}
       </button>
+      <button type="button" onclick={() => goto("/attivita")}>{$t("activity.open")}</button>
       <SettingsButton {onRemotesChanged} />
     </div>
 

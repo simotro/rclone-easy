@@ -294,6 +294,44 @@ fn now_unix() -> u64 {
 const HISTORY_LIMIT: usize = 20;
 
 /// Aggiunge in testa (più recente per prima) e tronca oltre `HISTORY_LIMIT`.
+/// Traduce un valore `what` di `core/transferred` nel tipo di evento del
+/// registro attività. `None` per i semplici controlli ("checking"), che non
+/// cambiano nulla e riempirebbero il registro.
+fn activity_kind_for(what: &str, failed: bool) -> Option<&'static str> {
+    if failed {
+        return Some("error");
+    }
+    match what {
+        "transferring" => Some("copied"),
+        "deleting" => Some("deleted"),
+        "moving" | "renaming" => Some("moved"),
+        _ => None,
+    }
+}
+
+/// Manda al registro attività l'esito di un run di backup: un evento per
+/// file toccato (o in errore) e, se il run è fallito senza errori per-file,
+/// uno complessivo. Best-effort.
+fn record_activity(config_dir: &Path, job: &SyncJob, run: &LastRun) {
+    use crate::activity_log::ActivityEvent;
+    let remote = remote_name_of(&job.source).or_else(|| remote_name_of(&job.destination)).unwrap_or_default().to_string();
+    // Se la sorgente è locale il remote è la destinazione: i file vanno "su".
+    let direction = if remote_name_of(&job.source).is_none() { "upload" } else { "download" };
+    let mut events = Vec::new();
+    for transfer in &run.transfers {
+        let Some(kind) = activity_kind_for(&transfer.what, !transfer.error.is_empty()) else { continue };
+        let mut event = ActivityEvent::new("backup", &job.name, &remote, kind).with_path(transfer.name.clone());
+        if kind == "copied" {
+            event = event.with_direction(direction);
+        }
+        events.push(event.with_message(transfer.error.clone()));
+    }
+    if !run.success && !events.iter().any(|e| e.kind == "error") {
+        events.push(ActivityEvent::new("backup", &job.name, &remote, "error").with_message(run.message.clone()));
+    }
+    let _ = crate::activity_log::append_events(config_dir, events);
+}
+
 pub(crate) fn push_history<T>(history: &mut Vec<T>, entry: T) {
     history.insert(0, entry);
     history.truncate(HISTORY_LIMIT);
@@ -699,6 +737,7 @@ pub(crate) async fn run_job_by_name(config_dir: &Path, state: &RcdState, name: &
         }
         Err(e) => LastRun { success: false, message: e.clone(), when_unix: now_unix(), transfers: Vec::new() },
     };
+    record_activity(config_dir, &job, &last_run);
     if let Some(stored) = jobs.iter_mut().find(|j| j.name == name) {
         push_history(&mut stored.history, last_run);
     }
