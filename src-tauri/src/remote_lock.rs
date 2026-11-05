@@ -446,6 +446,27 @@ async fn acquire_all_with_patience(
 /// run appena finito) non deve bloccare per sempre anche il rilascio.
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// `fs` da usare per cancellare un lock. Su Google Drive una cancellazione
+/// normale sposta il file nel Cestino, dove resta 30 giorni: con un lock
+/// scritto e cancellato a ogni sincronizzazione se ne accumulavano migliaia.
+/// Il parametro `use_trash=false` in forma di connection string rende la
+/// cancellazione definitiva, solo per quella chiamata e senza toccare la
+/// configurazione del remote. Gli altri backend non conoscono l'opzione e la
+/// rifiuterebbero, quindi restano invariati.
+fn fs_for_lock_delete(remote: &str, backend_type: Option<&str>) -> String {
+    match backend_type {
+        Some("drive") => format!("{remote},use_trash=false:"),
+        _ => format!("{remote}:"),
+    }
+}
+
+/// Tipo di backend di `remote`, `None` se non si riesce a determinarlo
+/// (es. un remote "finto" nei test).
+async fn backend_type_of(info: &ConnectionInfo, remote: &str) -> Option<String> {
+    let body = info.call("config/get", serde_json::json!({ "name": remote })).await.ok()?;
+    body.get("type").and_then(|t| t.as_str()).map(str::to_string)
+}
+
 pub(crate) async fn release_all(state: &RcdState, guards: Vec<RemoteLockGuard>) {
     for guard in &guards {
         guard.renew_handle.abort();
@@ -453,9 +474,12 @@ pub(crate) async fn release_all(state: &RcdState, guards: Vec<RemoteLockGuard>) 
     }
     let Ok(info) = rcd::connection_info(state).await else { return };
     for guard in guards {
-        let fs = format!("{}:", guard.remote);
         let lock_path = lock_path_for(&guard.remote);
-        let _ = tokio::time::timeout(RELEASE_TIMEOUT, info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": lock_path }))).await;
+        let release = async {
+            let fs = fs_for_lock_delete(&guard.remote, backend_type_of(&info, &guard.remote).await.as_deref());
+            info.call("operations/deletefile", serde_json::json!({ "fs": fs, "remote": lock_path })).await
+        };
+        let _ = tokio::time::timeout(RELEASE_TIMEOUT, release).await;
     }
 }
 
@@ -471,6 +495,13 @@ mod tests {
     /// identicamente contro una cartella locale reale.
     fn fake_remote_path(dir: &TempDir) -> String {
         dir.path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn lock_deletion_bypasses_the_trash_only_on_google_drive() {
+        assert_eq!(fs_for_lock_delete("Google Drive Copass", Some("drive")), "Google Drive Copass,use_trash=false:");
+        assert_eq!(fs_for_lock_delete("Mega Simo", Some("mega")), "Mega Simo:");
+        assert_eq!(fs_for_lock_delete("/tmp/finto", None), "/tmp/finto:");
     }
 
     #[test]
